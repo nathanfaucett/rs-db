@@ -2,9 +2,8 @@
 use futures::executor::block_on;
 use std::collections::HashMap;
 
-use db_engine::{ColumnSchema, EngineDatabase, EngineType, TableSchema};
-use db_examples_e2e::execute_sql;
-use db_in_memory::InMemoryBTree;
+use db::Database;
+use db_engine::{ColumnSchema, EngineType, TableSchema};
 use db_sql_to_engine::SchemaResolver;
 
 struct TestResolver {
@@ -19,8 +18,7 @@ impl SchemaResolver for TestResolver {
 
 fn main() {
   block_on(async {
-    let store: InMemoryBTree<db_engine::StoreKey, db_engine::StoreValue> = InMemoryBTree::new();
-    let mut db = EngineDatabase::new(store);
+    let mut db = Database::open_in_memory().await.expect("open in-memory db");
 
     let users = TableSchema {
       name: "users".into(),
@@ -69,32 +67,25 @@ fn main() {
     tables.insert("orders".to_string(), orders.clone());
     let resolver = TestResolver { tables };
 
-    // Insert some users via SQL helper
-    execute_sql(
-      &mut db,
+    // Insert some users via SQL using the facade
+    db.execute_sql(
       &resolver,
       "INSERT INTO users (id, name) VALUES (1, 'Alice');",
     )
     .await
     .expect("insert user 1");
-    execute_sql(
-      &mut db,
-      &resolver,
-      "INSERT INTO users (id, name) VALUES (2, 'Bob');",
-    )
-    .await
-    .expect("insert user 2");
+    db.execute_sql(&resolver, "INSERT INTO users (id, name) VALUES (2, 'Bob');")
+      .await
+      .expect("insert user 2");
 
-    // Insert some orders via SQL helper
-    execute_sql(
-      &mut db,
+    // Insert some orders via SQL using the facade
+    db.execute_sql(
       &resolver,
       "INSERT INTO orders (id, user_id, amount) VALUES (1,1,100);",
     )
     .await
     .expect("insert order 1");
-    execute_sql(
-      &mut db,
+    db.execute_sql(
       &resolver,
       "INSERT INTO orders (id, user_id, amount) VALUES (2,2,200);",
     )
@@ -108,7 +99,8 @@ fn main() {
     let resolver = TestResolver { tables };
 
     let sql = "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;";
-    let res = execute_sql(&mut db, &resolver, sql)
+    let res = db
+      .execute_sql(&resolver, sql)
       .await
       .expect("execute select");
 

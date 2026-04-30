@@ -33,6 +33,13 @@ db-in-memory = { path = "crates/db-in-memory", default-features = false, feature
     "std",
 ] }
 db-redb = { path = "crates/db-redb", default-features = false, optional = true }
+thiserror = { version = "1.0", default-features = false }
+db-sql-to-engine = { path = "crates/db-sql-to-engine", default-features = false, features = [
+    "std",
+] }
+db-core = { path = "crates/db-core", default-features = false, features = [
+    "std",
+] }
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 [workspace]
@@ -44,7 +51,6 @@ members = [
     "crates/db-redb",
     "crates/db-automerge",
     "crates/db-sql-to-engine",
-    "examples/e2e",
 ]
 resolver = "2"
 

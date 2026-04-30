@@ -14,6 +14,8 @@ use db_redb::REDBBTree;
 #[cfg(feature = "redb")]
 use std::path::Path;
 
+use db_sql_to_engine::{SchemaResolver, parse_and_translate};
+
 /// Public facade error type.
 #[derive(Debug)]
 pub enum DatabaseError {
@@ -88,6 +90,16 @@ impl Database {
     Ok(res)
   }
 
+  /// Execute a SQL string using a `SchemaResolver` to map table schemas.
+  pub async fn execute_sql(
+    &self,
+    resolver: &dyn SchemaResolver,
+    sql: &str,
+  ) -> Result<EngineResult, DatabaseError> {
+    let q = parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    self.execute_query(q).await
+  }
+
   /// Convenience: run a closure in a transaction context.
   pub async fn transaction<F, Fut, T>(&self, f: F) -> Result<T, DatabaseError>
   where
@@ -128,6 +140,58 @@ impl<'db> Transaction<'db> {
       Transaction::Redb(inner) => inner.insert_row(table, row).await?,
     }
     Ok(())
+  }
+
+  /// Execute a SQL string inside this transaction. Supports INSERT/UPDATE/DELETE.
+  /// SELECT is not supported in a write transaction — use `Database::execute_sql`.
+  pub async fn execute_sql(
+    &mut self,
+    resolver: &dyn SchemaResolver,
+    sql: &str,
+  ) -> Result<EngineResult, DatabaseError> {
+    let q = parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    match q {
+      EngineQuery::Insert { table, row } => match self {
+        Transaction::InMemory(inner) => {
+          inner.insert_row(&table, row).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(feature = "redb")]
+        Transaction::Redb(inner) => {
+          inner.insert_row(&table, row).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+      },
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+      } => match self {
+        Transaction::InMemory(inner) => {
+          inner.update_rows(&table, assignments, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(feature = "redb")]
+        Transaction::Redb(inner) => {
+          inner.update_rows(&table, assignments, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+      },
+      EngineQuery::Delete { table, predicate } => match self {
+        Transaction::InMemory(inner) => {
+          inner.delete_rows(&table, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(feature = "redb")]
+        Transaction::Redb(inner) => {
+          inner.delete_rows(&table, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+      },
+      EngineQuery::Select { .. } => Err(DatabaseError::Other(
+        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
+      )),
+    }
   }
 
   pub async fn commit(self) -> Result<(), DatabaseError> {

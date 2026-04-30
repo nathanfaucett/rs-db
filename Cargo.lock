@@ -255,10 +255,13 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "db-core",
  "db-engine",
  "db-in-memory",
  "db-redb",
+ "db-sql-to-engine",
  "futures",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -303,17 +306,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tsify 0.5.6",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "db-examples-e2e"
-version = "0.1.0"
-dependencies = [
- "db-engine",
- "db-in-memory",
- "db-sql-to-engine",
- "futures",
- "sqlparser",
 ]
 
 [[package]]

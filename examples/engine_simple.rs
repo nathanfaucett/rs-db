@@ -2,10 +2,9 @@
 use futures::executor::block_on;
 use std::collections::HashMap;
 
-use db_engine::{ColumnSchema, EngineDatabase, EngineType, TableSchema};
-use db_examples_e2e::execute_sql;
-use db_in_memory::InMemoryBTree;
+use db_engine::{ColumnSchema, EngineType, TableSchema};
 use db_sql_to_engine::SchemaResolver;
+use db::Database;
 
 struct TestResolver {
   tables: HashMap<String, db_engine::TableSchema>,
@@ -19,8 +18,7 @@ impl SchemaResolver for TestResolver {
 
 fn main() {
   block_on(async {
-    let store: InMemoryBTree<db_engine::StoreKey, db_engine::StoreValue> = InMemoryBTree::new();
-    let mut db = EngineDatabase::new(store);
+    let mut db = Database::open_in_memory().await.expect("open in-memory db");
 
     let schema = TableSchema {
       name: "items".into(),
@@ -46,23 +44,16 @@ fn main() {
     tables.insert("items".to_string(), schema.clone());
     let resolver = TestResolver { tables };
 
-    // Insert using SQL helper
-    execute_sql(
-      &mut db,
-      &resolver,
-      "INSERT INTO items (id, name) VALUES (1, 'One');",
-    )
-    .await
-    .expect("insert");
+    // Insert using SQL via the facade
+    db.execute_sql(&resolver, "INSERT INTO items (id, name) VALUES (1, 'One');")
+      .await
+      .expect("insert");
 
-    // Run SELECT via SQL helper
-    let res = execute_sql(
-      &mut db,
-      &resolver,
-      "SELECT id, name FROM items WHERE id = 1;",
-    )
-    .await
-    .expect("execute select");
+    // Run SELECT via SQL using the facade
+    let res = db
+      .execute_sql(&resolver, "SELECT id, name FROM items WHERE id = 1;")
+      .await
+      .expect("execute select");
 
     println!("Found {} rows", res.rows.len());
     for row in res.rows {
