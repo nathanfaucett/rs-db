@@ -1,0 +1,80 @@
+[package]
+rust-version = "1.94"
+name = "db"
+description = "Database built on top of a B-Tree implementation."
+repository = "https://github.com/aicacia/rs-db"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.authors]
+workspace = true
+
+[package.license]
+workspace = true
+
+
+[features]
+default = ["std"]
+std = []
+redb = ["std", "db-redb"]
+
+[lib]
+name = "db"
+
+[dependencies]
+db-engine = { path = "crates/db-engine", default-features = false, features = [
+    "std",
+] }
+db-in-memory = { path = "crates/db-in-memory", default-features = false, features = [
+    "std",
+] }
+db-redb = { path = "crates/db-redb", default-features = false, optional = true }
+[dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+[workspace]
+members = [
+    "crates/db-core",
+    "crates/db-types",
+    "crates/db-engine",
+    "crates/db-in-memory",
+    "crates/db-redb",
+    "crates/db-automerge",
+    "crates/db-sql-to-engine",
+    "examples/e2e",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["nathanfaucett@gmail.com"]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+
+[workspace.lints.clippy]
+clone_on_copy = "warn"
+dbg_macro = "warn"
+expect_used = "warn"
+inefficient_to_string = "warn"
+large_stack_arrays = "warn"
+missing_docs = "warn"
+panic = "warn"
+print_stdout = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

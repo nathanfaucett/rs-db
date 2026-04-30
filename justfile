@@ -1,0 +1,43 @@
+set shell := ["bash", "-cu"]
+
+# Default task when invoking `just` with no arguments.
+default: help
+
+help:
+	@printf "Available recipes:\n"
+	@printf "  build          Build all workspace crates\n"
+	@printf "  build-release  Build all workspace crates in release mode\n"
+	@printf "  check          Check all workspace crates\n"
+	@printf "  test           Run workspace tests\n"
+	@printf "  clippy         Run clippy for all targets and workspace crates\n"
+	@printf "  clippy-fix     Run clippy with --fix for all targets and workspace crates\n"
+	@printf "  fmt            Format all workspace crates\n"
+	@printf "  clean          Remove build artifacts\n"
+	@printf "  doc            Build workspace documentation\n"
+
+build:
+	cargo build --workspace
+
+build-release:
+	cargo build --workspace --release
+
+check:
+	cargo check --workspace
+
+test:
+	cargo test --workspace
+
+clippy:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+clippy-fix:
+	cargo clippy --workspace --all-targets --fix --allow-dirty -- -D warnings
+
+fmt:
+	cargo fmt --all
+
+clean:
+	cargo clean
+
+doc:
+	cargo doc --workspace --no-deps

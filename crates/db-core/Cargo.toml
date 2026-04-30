@@ -1,0 +1,34 @@
+[package]
+name = "db-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core async storage traits and types for the database"
+
+[lib]
+name = "db_core"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = ["futures/std", "serde/std"]
+test-helpers = ["async-lock", "async-stream"]
+ts = ["tsify"]
+registry = []
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = [] }
+async-lock = { version = "3.4", default-features = false, features = [
+], optional = true }
+async-stream = { version = "0.3", default-features = false, features = [
+], optional = true }
+tsify = { version = "0.3", default-features = false, features = [
+], optional = true }
+
+thiserror = { version = "1.0", default-features = false }
+
+[dev-dependencies]
+db-in-memory = { path = "../db-in-memory", default-features = false, features = [
+  "std",
+] }
+db-redb = { path = "../db-redb", default-features = false }

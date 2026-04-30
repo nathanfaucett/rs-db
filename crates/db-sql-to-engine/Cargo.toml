@@ -1,0 +1,22 @@
+[package]
+name = "db-sql-to-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Engine layer of the database"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+db-engine = { path = "../db-engine", default-features = false, features = [] }
+sqlparser = { version = "0.61", default-features = false, features = [] }
+hashbrown = { version = "0.17", default-features = false, features = [
+  "default-hasher",
+] }
+thiserror = { version = "1.0", default-features = false, features = [] }
+
+[dev-dependencies]
+
+[features]
+default = ["std"]
+std = ["db-engine/std", "sqlparser/std"]

@@ -1,0 +1,41 @@
+[package]
+name = "db-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Engine layer of the database"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+db-core = { path = "../db-core", default-features = false, features = [
+  "test-helpers",
+] }
+db-types = { path = "../db-types", default-features = false }
+futures = { version = "0.3", default-features = false, features = [] }
+
+thiserror = { version = "1.0", default-features = false }
+
+# Optional TS generation + serde for tsify
+tsify = { version = "0.5", default-features = false, features = [
+  "js",
+], optional = true }
+serde = { version = "1.0", default-features = false, features = [
+  "derive",
+], optional = true }
+serde-wasm-bindgen = { version = "0.6", default-features = false, optional = true }
+wasm-bindgen = { version = "0.2", default-features = false, features = [
+  "std",
+], optional = true }
+
+[dev-dependencies]
+db-in-memory = { path = "../db-in-memory", default-features = false, features = [
+] }
+db-redb = { path = "../db-redb", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+proptest = { version = "1.0", default-features = false, features = ["std"] }
+
+[features]
+default = ["std"]
+std = ["futures/std", "db-core/std", "db-in-memory/std"]
+ts = ["tsify", "serde", "serde-wasm-bindgen", "wasm-bindgen"]

@@ -1,0 +1,20 @@
+[package]
+name = "db-types"
+version = "0.1.0"
+edition = "2024"
+description = "Shared store-level domain types and codec/persistence helpers"
+
+[lib]
+name = "db_types"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = ["db-core/std"]
+ts = ["tsify"]
+
+[dependencies]
+db-core = { path = "../db-core", default-features = false, features = ["std"] }
+futures = { version = "0.3", default-features = false }
+tsify = { version = "0.3", default-features = false, features = [
+], optional = true }

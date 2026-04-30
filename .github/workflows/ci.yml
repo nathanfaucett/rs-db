@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (with rustfmt + clippy)
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Rust fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all -- -D warnings
+
+  cargo-tests:
+    name: Cargo tests (${{ matrix.feature }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature: [no-default, std]
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Show rustc/cargo
+        run: rustc --version && cargo --version
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.feature }}" = "no-default" ]; then
+            cargo build --workspace --no-default-features --all-targets
+          else
+            cargo build --workspace --features std --all-targets
+          fi
+
+      - name: Test
+        run: |
+          if [ "${{ matrix.feature }}" = "no-default" ]; then
+            cargo test --workspace --no-default-features --all-targets
+          else
+            cargo test --workspace --features std --all-targets
+          fi

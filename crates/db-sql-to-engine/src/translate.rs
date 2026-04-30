@@ -1,0 +1,1320 @@
+use hashbrown::HashMap;
+use sqlparser::ast::{
+  BinaryOperator, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
+  JoinConstraint, JoinOperator, LimitClause, ObjectName, Query, SelectItem, SetExpr, Statement,
+  TableFactor, Value as SqlValue,
+};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
+use thiserror::Error;
+
+mod helpers;
+use self::helpers::sql_value_to_engine_value;
+mod having;
+mod predicates;
+use self::having as having_module;
+use self::predicates as predicates_module;
+
+/// Errors returned by the translator.
+#[derive(Error, Debug)]
+pub enum TranslateError {
+  #[error("sql parse error: {0}")]
+  SqlParse(String),
+  #[error("unsupported statement")]
+  UnsupportedStatement,
+  #[error("unknown table: {0}")]
+  UnknownTable(String),
+  #[error("unknown column: {0}")]
+  UnknownColumn(String),
+  #[error("unsupported feature: {0}")]
+  UnsupportedFeature(String),
+}
+
+/// Minimal schema resolver used by the translator to look up table schemas.
+pub trait SchemaResolver {
+  fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema>;
+}
+
+/// Pluggable mapper for converting `sqlparser` literal expressions into `EngineValue`.
+pub trait ValueMapper {
+  fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError>;
+}
+
+/// Default implementation of `ValueMapper` that uses the existing helper.
+#[derive(Clone, Debug)]
+pub struct DefaultValueMapper;
+
+impl ValueMapper for DefaultValueMapper {
+  fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError> {
+    sql_value_to_engine_value(expr)
+  }
+}
+
+/// Parse a SQL string and translate the first statement into an `EngineQuery`.
+pub fn parse_and_translate(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let canon = parse_and_translate_to_ir(sql, resolver)?;
+  Ok(canon.engine_query)
+}
+
+/// Variant of `parse_and_translate` that accepts a custom `ValueMapper`.
+pub fn parse_and_translate_with_mapper(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let canon = parse_and_translate_to_ir_with_mapper(sql, resolver, mapper)?;
+  Ok(canon.engine_query)
+}
+
+/// Parse a SQL string and translate the first statement into the canonical SQL IR.
+pub fn parse_and_translate_to_ir(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+) -> Result<crate::ir::CanonicalQuery, TranslateError> {
+  parse_and_translate_to_ir_with_mapper(sql, resolver, &DefaultValueMapper)
+}
+
+/// Variant of `parse_and_translate_to_ir` that accepts a custom `ValueMapper`.
+pub fn parse_and_translate_to_ir_with_mapper(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<crate::ir::CanonicalQuery, TranslateError> {
+  let dialect = GenericDialect {}; // generic ANSI SQL
+  let stmts =
+    Parser::parse_sql(&dialect, sql).map_err(|e| TranslateError::SqlParse(e.to_string()))?;
+  if stmts.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "only a single statement is supported".into(),
+    ));
+  }
+  translate_statement_to_ir_with_mapper(&stmts[0], resolver, mapper)
+}
+
+/// Translate a `sqlparser` AST `Statement` into the canonical SQL IR.
+pub fn translate_statement_to_ir(
+  stmt: &Statement,
+  resolver: &dyn SchemaResolver,
+) -> Result<crate::ir::CanonicalQuery, TranslateError> {
+  translate_statement_to_ir_with_mapper(stmt, resolver, &DefaultValueMapper)
+}
+
+pub fn translate_statement_to_ir_with_mapper(
+  stmt: &Statement,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<crate::ir::CanonicalQuery, TranslateError> {
+  Ok(crate::ir::CanonicalQuery::from(translate_statement(
+    stmt, resolver, mapper,
+  )?))
+}
+
+/// Translate a `sqlparser` AST `Statement` into an `EngineQuery`.
+pub fn translate_statement(
+  stmt: &Statement,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  match stmt {
+    Statement::Query(boxed_q) => {
+      let Query {
+        body,
+        order_by,
+        limit_clause,
+        ..
+      } = &**boxed_q;
+      match &**body {
+        SetExpr::Select(select) => {
+          if select.from.len() != 1 {
+            return Err(TranslateError::UnsupportedFeature(
+              "only single FROM with optional JOINs supported".into(),
+            ));
+          }
+
+          let from = &select.from[0];
+
+          let mut alias_map: HashMap<String, String> = HashMap::new();
+          let mut referenced_tables: Vec<String> = Vec::new();
+          let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+
+          let base_table = parse_from_clause(
+            from,
+            resolver,
+            &mut alias_map,
+            &mut referenced_tables,
+            &mut table_schemas,
+          )?;
+
+          let joins = parse_joins(
+            &from.joins,
+            &mut alias_map,
+            &mut referenced_tables,
+            &mut table_schemas,
+            resolver,
+            &base_table,
+          )?;
+
+          let (projection_qc, aggregates, proj_alias_map) = parse_projection(
+            &select.projection,
+            &alias_map,
+            &referenced_tables,
+            &table_schemas,
+          )?;
+
+          let group_by = parse_group_by(
+            &select.group_by,
+            &alias_map,
+            &referenced_tables,
+            &table_schemas,
+          )?;
+
+          let order_by_vec = parse_order_by(
+            order_by,
+            &proj_alias_map,
+            &alias_map,
+            &referenced_tables,
+            &table_schemas,
+          )?;
+
+          let (limit_val, offset_val) = parse_limit_clause(limit_clause)?;
+
+          // WHERE/predicate: build a qualified predicate for extended use
+          let qualified_pred = if let Some(selection) = &select.selection {
+            Some(expr_to_qualified_predicate(
+              selection,
+              &alias_map,
+              &table_schemas,
+              resolver,
+              mapper,
+            )?)
+          } else {
+            None
+          };
+
+          // HAVING support: translate having expression (after aggregates/group_by known)
+          let having_pred = if let Some(h) = &select.having {
+            Some(expr_to_having_predicate(
+              h,
+              &group_by,
+              &aggregates,
+              &proj_alias_map,
+              &alias_map,
+              &table_schemas,
+              resolver,
+              mapper,
+            )?)
+          } else {
+            None
+          };
+
+          let mut options = db_engine::SelectOptions {
+            joins,
+            aggregates,
+            group_by,
+            order_by: order_by_vec,
+            limit: limit_val,
+            offset: offset_val,
+            distinct: false,
+            having: None,
+          };
+          options.having = having_pred;
+
+          // Detect DISTINCT
+          if let Some(_distinct) = &select.distinct {
+            options.distinct = true;
+          }
+
+          // Decide between simple Select and SelectEx
+          let want_simple = options.joins.is_empty()
+            && options.aggregates.is_empty()
+            && options.group_by.is_empty()
+            && options.order_by.is_empty()
+            && options.limit.is_none()
+            && options.offset.is_none()
+            && !options.distinct;
+
+          if want_simple {
+            // try to convert qualified predicate into EnginePredicate if possible
+            let engine_pred = if let Some(qp) = qualified_pred {
+              qualified_to_engine_pred(&qp, &base_table).ok()
+            } else {
+              None
+            };
+
+            // simple projection must only reference base_table columns
+            let mut simple_proj: Vec<usize> = Vec::new();
+            for qc in projection_qc {
+              if qc.table != base_table {
+                return Err(TranslateError::UnsupportedFeature(
+                  "projection references non-base table but no JOIN present".into(),
+                ));
+              }
+              simple_proj.push(qc.column_index);
+            }
+            return Ok(db_engine::EngineQuery::select_simple(
+              base_table,
+              simple_proj,
+              engine_pred,
+            ));
+          }
+
+          // Use extended select
+          let final_projection = if !options.aggregates.is_empty() || !options.group_by.is_empty() {
+            Vec::new()
+          } else {
+            projection_qc
+          };
+
+          Ok(db_engine::EngineQuery::Select {
+            table: base_table,
+            projection: final_projection,
+            predicate: qualified_pred,
+            options: Box::new(options),
+          })
+        }
+        _ => Err(TranslateError::UnsupportedStatement),
+      }
+    }
+    Statement::Insert(insert) => translate_insert(insert, resolver, mapper),
+    _ => Err(TranslateError::UnsupportedStatement),
+  }
+}
+
+fn translate_insert(
+  insert: &sqlparser::ast::Insert,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  if !insert.assignments.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "INSERT ... SET is not supported".into(),
+    ));
+  }
+  if let Some(on) = &insert.on {
+    return Err(TranslateError::UnsupportedFeature(format!(
+      "INSERT ON is not supported: {on:?}"
+    )));
+  }
+  if insert.returning.is_some() {
+    return Err(TranslateError::UnsupportedFeature(
+      "INSERT RETURNING is not supported".into(),
+    ));
+  }
+
+  let table = match &insert.table {
+    sqlparser::ast::TableObject::TableName(name) => object_name_to_string(name),
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(
+        "only table name inserts supported".into(),
+      ));
+    }
+  };
+
+  let schema = resolver
+    .describe_table(&table)
+    .ok_or_else(|| TranslateError::UnknownTable(table.clone()))?;
+
+  let columns = if insert.columns.is_empty() {
+    schema
+      .columns
+      .iter()
+      .map(|c| c.name.clone())
+      .collect::<Vec<_>>()
+  } else {
+    insert
+      .columns
+      .iter()
+      .map(|ident| ident.value.clone())
+      .collect()
+  };
+
+  let source = insert.source.as_ref().ok_or_else(|| {
+    TranslateError::UnsupportedFeature("INSERT without source unsupported".into())
+  })?;
+
+  let values = match &*source.body {
+    SetExpr::Values(values) => values,
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(
+        "only INSERT ... VALUES (...) is supported".into(),
+      ));
+    }
+  };
+
+  if values.rows.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "only single-row INSERT VALUES supported".into(),
+    ));
+  }
+
+  let row_exprs = &values.rows[0];
+  if row_exprs.len() != columns.len() {
+    return Err(TranslateError::UnsupportedFeature(
+      "INSERT column count does not match VALUES count".into(),
+    ));
+  }
+
+  let mut row = vec![db_engine::EngineValue::Null; schema.columns.len()];
+  for (i, expr) in row_exprs.iter().enumerate() {
+    let col_name = &columns[i];
+    let idx = schema
+      .columns
+      .iter()
+      .position(|c| c.name == *col_name)
+      .ok_or_else(|| TranslateError::UnknownColumn(col_name.clone()))?;
+    row[idx] = mapper.map_sql_value(expr)?;
+  }
+
+  Ok(db_engine::EngineQuery::Insert { table, row })
+}
+
+// `extract_identifier` moved to `translate/helpers.rs`.
+
+// `sql_value_to_engine_value` moved to `translate/helpers.rs`.
+fn expr_to_qualified_predicate(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  predicates_module::expr_to_qualified_predicate(expr, alias_map, table_schemas, resolver, mapper)
+}
+
+fn qualified_to_engine_pred(
+  pred: &db_engine::QualifiedPredicate,
+  base_table: &str,
+) -> Result<db_engine::EnginePredicate, TranslateError> {
+  predicates_module::qualified_to_engine_pred(pred, base_table)
+}
+
+fn object_name_to_string(name: &ObjectName) -> String {
+  name.to_string()
+}
+
+fn parse_from_clause(
+  from: &sqlparser::ast::TableWithJoins,
+  resolver: &dyn SchemaResolver,
+  alias_map: &mut HashMap<String, String>,
+  referenced_tables: &mut Vec<String>,
+  table_schemas: &mut HashMap<String, db_engine::TableSchema>,
+) -> Result<String, TranslateError> {
+  let (base_table, base_alias) = match &from.relation {
+    TableFactor::Table { name, alias, .. } => {
+      let real = object_name_to_string(name);
+      let alias_name = alias
+        .as_ref()
+        .map(|a| a.name.value.clone())
+        .unwrap_or_else(|| real.clone());
+      (real, alias_name)
+    }
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(
+        "unsupported table factor".into(),
+      ));
+    }
+  };
+
+  alias_map.insert(base_alias.clone(), base_table.clone());
+  referenced_tables.push(base_table.clone());
+  let base_schema = resolver
+    .describe_table(&base_table)
+    .ok_or_else(|| TranslateError::UnknownTable(base_table.clone()))?;
+  table_schemas.insert(base_table.clone(), base_schema.clone());
+
+  Ok(base_table)
+}
+
+fn parse_joins(
+  joins: &[sqlparser::ast::Join],
+  alias_map: &mut HashMap<String, String>,
+  referenced_tables: &mut Vec<String>,
+  table_schemas: &mut HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  base_table: &str,
+) -> Result<Vec<db_engine::JoinClause>, TranslateError> {
+  let mut out: Vec<db_engine::JoinClause> = Vec::new();
+  let mut current_left = base_table.to_string();
+
+  for join in joins {
+    let (right_table, right_alias) = match &join.relation {
+      TableFactor::Table { name, alias, .. } => {
+        let real = object_name_to_string(name);
+        let alias_name = alias
+          .as_ref()
+          .map(|a| a.name.value.clone())
+          .unwrap_or_else(|| real.clone());
+        (real, alias_name)
+      }
+      _ => {
+        return Err(TranslateError::UnsupportedFeature(
+          "unsupported join relation".into(),
+        ));
+      }
+    };
+
+    alias_map.insert(right_alias.clone(), right_table.clone());
+    referenced_tables.push(right_table.clone());
+    let right_schema = resolver
+      .describe_table(&right_table)
+      .ok_or_else(|| TranslateError::UnknownTable(right_table.clone()))?;
+    table_schemas.insert(right_table.clone(), right_schema.clone());
+
+    let (kind, constraint) = match &join.join_operator {
+      JoinOperator::Join(c) | JoinOperator::Inner(c) => (db_engine::JoinKind::Inner, c),
+      JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => (db_engine::JoinKind::Left, c),
+      JoinOperator::Right(c) | JoinOperator::RightOuter(c) => (db_engine::JoinKind::Right, c),
+      JoinOperator::FullOuter(c) => (db_engine::JoinKind::Full, c),
+      _ => {
+        return Err(TranslateError::UnsupportedFeature(
+          "unsupported join operator".into(),
+        ));
+      }
+    };
+
+    let on = parse_join_on(constraint, alias_map, table_schemas)?;
+
+    out.push(db_engine::JoinClause {
+      kind,
+      left_table: current_left.clone(),
+      right_table: right_table.clone(),
+      on,
+    });
+    current_left = right_table.clone();
+  }
+
+  Ok(out)
+}
+
+fn parse_join_on(
+  constraint: &JoinConstraint,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<db_engine::JoinOn, TranslateError> {
+  match constraint {
+    JoinConstraint::On(expr) => match expr {
+      SqlExpr::BinaryOp { left, op, right } => match op {
+        BinaryOperator::Eq => {
+          let left_qc = helpers::resolve_qualified_column(left, alias_map, table_schemas)?;
+          let right_qc = helpers::resolve_qualified_column(right, alias_map, table_schemas)?;
+
+          Ok(db_engine::JoinOn::ColumnEq {
+            left: left_qc,
+            right: right_qc,
+          })
+        }
+        _ => Err(TranslateError::UnsupportedFeature(
+          "only equality ON joins supported".into(),
+        )),
+      },
+      _ => Err(TranslateError::UnsupportedFeature(
+        "unsupported join ON expression".into(),
+      )),
+    },
+    _ => Err(TranslateError::UnsupportedFeature(
+      "only ON join constraints supported".into(),
+    )),
+  }
+}
+
+fn parse_projection(
+  projection: &[SelectItem],
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<
+  (
+    Vec<db_engine::QualifiedColumn>,
+    Vec<db_engine::Aggregate>,
+    HashMap<String, db_engine::QualifiedColumn>,
+  ),
+  TranslateError,
+> {
+  let mut projection_qc: Vec<db_engine::QualifiedColumn> = Vec::new();
+  let mut aggregates: Vec<db_engine::Aggregate> = Vec::new();
+  let mut proj_alias_map: HashMap<String, db_engine::QualifiedColumn> = HashMap::new();
+
+  for item in projection {
+    parse_projection_item(
+      item,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      &mut projection_qc,
+      &mut aggregates,
+      &mut proj_alias_map,
+    )?;
+  }
+
+  Ok((projection_qc, aggregates, proj_alias_map))
+}
+
+fn parse_projection_item(
+  item: &SelectItem,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  match item {
+    SelectItem::Wildcard(_) => {
+      for t in referenced_tables {
+        if let Some(schema) = table_schemas.get(t) {
+          for (i, _) in schema.columns.iter().enumerate() {
+            projection_qc.push(db_engine::QualifiedColumn {
+              table: t.clone(),
+              column_index: i,
+            });
+          }
+        }
+      }
+    }
+    SelectItem::UnnamedExpr(expr) => {
+      parse_projection_expression(
+        expr,
+        alias_map,
+        referenced_tables,
+        table_schemas,
+        aggregates,
+        proj_alias_map,
+        projection_qc,
+        None,
+      )?;
+    }
+    SelectItem::ExprWithAlias { expr, alias } => match expr {
+      SqlExpr::Function(_) => {
+        parse_projection_expression(
+          expr,
+          alias_map,
+          referenced_tables,
+          table_schemas,
+          aggregates,
+          proj_alias_map,
+          projection_qc,
+          Some(&alias.value),
+        )?;
+      }
+      _ => {
+        let qc = helpers::resolve_column(expr, alias_map, referenced_tables, table_schemas)?;
+        proj_alias_map.insert(alias.value.clone(), qc.clone());
+        projection_qc.push(qc);
+      }
+    },
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(
+        "unsupported projection item".into(),
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn parse_projection_expression(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+  alias_name: Option<&str>,
+) -> Result<(), TranslateError> {
+  match expr {
+    SqlExpr::Function(func) => parse_aggregate_function(
+      func,
+      alias_name,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+    ),
+    _ => {
+      let qc = helpers::resolve_column(expr, alias_map, referenced_tables, table_schemas)?;
+      projection_qc.push(qc);
+      Ok(())
+    }
+  }
+}
+
+fn parse_aggregate_function(
+  func: &sqlparser::ast::Function,
+  alias_name: Option<&str>,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  let fname = func.name.to_string().to_lowercase();
+  let first = fname.split('.').next().unwrap_or("");
+  let args = match &func.args {
+    FunctionArguments::List(list) => &list.args[..],
+    FunctionArguments::None => &[],
+    FunctionArguments::Subquery(_) => {
+      return Err(TranslateError::UnsupportedFeature(
+        "function with subquery args unsupported".into(),
+      ));
+    }
+  };
+
+  if args.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "aggregate takes one argument".into(),
+    ));
+  }
+
+  match first {
+    "count" => match &args[0] {
+      FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+        aggregates.push(db_engine::Aggregate::Count(None));
+        Ok(())
+      }
+      FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
+        let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
+        aggregates.push(db_engine::Aggregate::Count(Some(qc.clone())));
+        if let Some(alias) = alias_name {
+          proj_alias_map.insert(alias.to_string(), qc);
+        }
+        Ok(())
+      }
+      FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_)) => Err(
+        TranslateError::UnsupportedFeature("qualified wildcard in aggregate not supported".into()),
+      ),
+      _ => Err(TranslateError::UnsupportedFeature(
+        "unsupported COUNT args".into(),
+      )),
+    },
+    "sum" | "min" | "max" | "avg" => match &args[0] {
+      FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
+        let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
+        match first {
+          "sum" => aggregates.push(db_engine::Aggregate::Sum(qc.clone())),
+          "min" => aggregates.push(db_engine::Aggregate::Min(qc.clone())),
+          "max" => aggregates.push(db_engine::Aggregate::Max(qc.clone())),
+          "avg" => aggregates.push(db_engine::Aggregate::Avg(qc.clone())),
+          _ => {}
+        }
+        if let Some(alias) = alias_name {
+          proj_alias_map.insert(alias.to_string(), qc);
+        }
+        Ok(())
+      }
+      _ => Err(TranslateError::UnsupportedFeature(
+        "unsupported aggregate arg".into(),
+      )),
+    },
+    _ => Err(TranslateError::UnsupportedFeature(format!(
+      "unsupported function: {}",
+      first,
+    ))),
+  }
+}
+
+fn parse_group_by(
+  group_by: &GroupByExpr,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<Vec<db_engine::QualifiedColumn>, TranslateError> {
+  match group_by {
+    GroupByExpr::Expressions(exprs, _modifiers) => exprs
+      .iter()
+      .map(|gb| helpers::resolve_column(gb, alias_map, referenced_tables, table_schemas))
+      .collect(),
+    GroupByExpr::All(_) => Err(TranslateError::UnsupportedFeature(
+      "GROUP BY ALL not supported".into(),
+    )),
+  }
+}
+
+fn parse_order_by(
+  order_by: &Option<sqlparser::ast::OrderBy>,
+  proj_alias_map: &HashMap<String, db_engine::QualifiedColumn>,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<Vec<db_engine::OrderBy>, TranslateError> {
+  let mut order_by_vec: Vec<db_engine::OrderBy> = Vec::new();
+  if let Some(ob_clause) = order_by {
+    match &ob_clause.kind {
+      sqlparser::ast::OrderByKind::Expressions(exprs) => {
+        for ob in exprs {
+          let qc = match &ob.expr {
+            SqlExpr::Identifier(ident) => {
+              if let Some(qc) = proj_alias_map.get(&ident.value) {
+                qc.clone()
+              } else {
+                helpers::resolve_column(&ob.expr, alias_map, referenced_tables, table_schemas)?
+              }
+            }
+            SqlExpr::CompoundIdentifier(_) => {
+              helpers::resolve_column(&ob.expr, alias_map, referenced_tables, table_schemas)?
+            }
+            _ => {
+              return Err(TranslateError::UnsupportedFeature(
+                "unsupported ORDER BY expression".into(),
+              ));
+            }
+          };
+
+          let dir = match ob.options.asc {
+            Some(true) | None => db_engine::SortDirection::Asc,
+            Some(false) => db_engine::SortDirection::Desc,
+          };
+          order_by_vec.push(db_engine::OrderBy {
+            expr: qc,
+            direction: dir,
+          });
+        }
+      }
+      sqlparser::ast::OrderByKind::All(_all) => {
+        return Err(TranslateError::UnsupportedFeature(
+          "ORDER BY ALL not supported".into(),
+        ));
+      }
+    }
+  }
+  Ok(order_by_vec)
+}
+
+fn parse_limit_clause(
+  limit_clause: &Option<LimitClause>,
+) -> Result<(Option<usize>, Option<usize>), TranslateError> {
+  let mut limit_val: Option<usize> = None;
+  let mut offset_val: Option<usize> = None;
+
+  if let Some(lc) = limit_clause {
+    match lc {
+      LimitClause::LimitOffset { limit, offset, .. } => {
+        if let Some(lim_expr) = limit {
+          match lim_expr {
+            SqlExpr::Value(v) => match &v.value {
+              SqlValue::Number(s, _) => {
+                limit_val =
+                  Some(s.parse::<usize>().map_err(|_| {
+                    TranslateError::UnsupportedFeature("invalid LIMIT value".into())
+                  })?);
+              }
+              _ => {
+                return Err(TranslateError::UnsupportedFeature(
+                  "unsupported LIMIT expression".into(),
+                ));
+              }
+            },
+            _ => {
+              return Err(TranslateError::UnsupportedFeature(
+                "unsupported LIMIT expression".into(),
+              ));
+            }
+          }
+        }
+        if let Some(off_struct) = offset {
+          match &off_struct.value {
+            SqlExpr::Value(v) => match &v.value {
+              SqlValue::Number(s, _) => {
+                offset_val = Some(s.parse::<usize>().map_err(|_| {
+                  TranslateError::UnsupportedFeature("invalid OFFSET value".into())
+                })?);
+              }
+              _ => {
+                return Err(TranslateError::UnsupportedFeature(
+                  "unsupported OFFSET expression".into(),
+                ));
+              }
+            },
+            _ => {
+              return Err(TranslateError::UnsupportedFeature(
+                "unsupported OFFSET expression".into(),
+              ));
+            }
+          }
+        }
+      }
+      LimitClause::OffsetCommaLimit { offset, limit } => {
+        match offset {
+          SqlExpr::Value(v) => match &v.value {
+            SqlValue::Number(s, _) => {
+              offset_val =
+                Some(s.parse::<usize>().map_err(|_| {
+                  TranslateError::UnsupportedFeature("invalid OFFSET value".into())
+                })?);
+            }
+            _ => {
+              return Err(TranslateError::UnsupportedFeature(
+                "unsupported OFFSET expression".into(),
+              ));
+            }
+          },
+          _ => {
+            return Err(TranslateError::UnsupportedFeature(
+              "unsupported OFFSET expression".into(),
+            ));
+          }
+        }
+        match limit {
+          SqlExpr::Value(v) => match &v.value {
+            SqlValue::Number(s, _) => {
+              limit_val = Some(
+                s.parse::<usize>()
+                  .map_err(|_| TranslateError::UnsupportedFeature("invalid LIMIT value".into()))?,
+              );
+            }
+            _ => {
+              return Err(TranslateError::UnsupportedFeature(
+                "unsupported LIMIT expression".into(),
+              ));
+            }
+          },
+          _ => {
+            return Err(TranslateError::UnsupportedFeature(
+              "unsupported LIMIT expression".into(),
+            ));
+          }
+        }
+      }
+    }
+  }
+
+  Ok((limit_val, offset_val))
+}
+
+fn expr_to_having_predicate(
+  expr: &SqlExpr,
+  _group_by: &Vec<db_engine::QualifiedColumn>,
+  aggregates: &Vec<db_engine::Aggregate>,
+  proj_alias_map: &HashMap<String, db_engine::QualifiedColumn>,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  _resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::HavingPredicate, TranslateError> {
+  having_module::expr_to_having_predicate(
+    expr,
+    _group_by,
+    aggregates,
+    proj_alias_map,
+    alias_map,
+    table_schemas,
+    _resolver,
+    mapper,
+  )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use db_engine::{
+    ColumnSchema, EngineQuery, EngineType, EngineValue, JoinKind, JoinOn, QualifiedColumn,
+    QualifiedOperand, QualifiedPredicate, TableSchema,
+  };
+  use std::collections::HashMap;
+
+  struct DummyResolver {
+    tables: HashMap<String, TableSchema>,
+  }
+
+  impl SchemaResolver for DummyResolver {
+    fn describe_table(&self, name: &str) -> Option<TableSchema> {
+      self.tables.get(name).cloned()
+    }
+  }
+
+  #[test]
+  fn translate_to_ir_returns_canonical_query() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let canon = parse_and_translate_to_ir("SELECT id FROM users WHERE id = 42;", &resolver)
+      .expect("translate to IR");
+
+    match canon.engine_query {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate,
+        options: _,
+      } => {
+        assert_eq!(table, "users");
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].table, "users");
+        assert_eq!(projection[0].column_index, 0);
+        match predicate {
+          Some(QualifiedPredicate::Equals(
+            QualifiedOperand::Column(qc),
+            QualifiedOperand::Value(v),
+          )) => {
+            assert_eq!(qc.column_index, 0);
+            assert_eq!(v, EngineValue::Integer(42));
+          }
+          other => panic!("unexpected predicate: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_simple_select() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let q = parse_and_translate("SELECT id, name FROM users WHERE id = 42;", &resolver)
+      .expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate,
+        options: _,
+      } => {
+        assert_eq!(table, "users");
+        assert_eq!(projection.len(), 2usize);
+        assert_eq!(
+          projection[0],
+          QualifiedColumn {
+            table: "users".into(),
+            column_index: 0
+          }
+        );
+        assert_eq!(
+          projection[1],
+          QualifiedColumn {
+            table: "users".into(),
+            column_index: 1
+          }
+        );
+        match predicate {
+          Some(QualifiedPredicate::Equals(
+            QualifiedOperand::Column(qc),
+            QualifiedOperand::Value(v),
+          )) => {
+            assert_eq!(qc.column_index, 0usize);
+            assert_eq!(v, EngineValue::Integer(42));
+          }
+          other => panic!("unexpected predicate: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_join_select() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    tables.insert(
+      "orders".into(),
+      TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let q = parse_and_translate(
+      "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;",
+      &resolver,
+    )
+    .expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate: _,
+        options,
+      } => {
+        assert_eq!(table, "users");
+        // projection: users.name then orders.amount
+        assert_eq!(projection.len(), 2);
+        assert_eq!(projection[0].table, "users");
+        assert_eq!(projection[0].column_index, 1);
+        assert_eq!(projection[1].table, "orders");
+        assert_eq!(projection[1].column_index, 2);
+
+        assert_eq!(options.joins.len(), 1);
+        let j = &options.joins[0];
+        assert_eq!(j.kind, JoinKind::Inner);
+        match &j.on {
+          JoinOn::ColumnEq { left, right } => {
+            assert_eq!(left.table, "users");
+            assert_eq!(left.column_index, 0);
+            assert_eq!(right.table, "orders");
+            assert_eq!(right.column_index, 1);
+          }
+        }
+      }
+      other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_group_by_aggregate_order_limit() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "city".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    tables.insert(
+      "orders".into(),
+      TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let sql = "SELECT city, COUNT(*) as cnt, SUM(o.amount) as total FROM users u JOIN orders o ON u.id = o.user_id GROUP BY city ORDER BY total DESC LIMIT 5 OFFSET 2;";
+
+    let q = parse_and_translate(sql, &resolver).expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate: _,
+        options,
+      } => {
+        assert_eq!(table, "users");
+        // for grouped queries projection may be empty; aggregates and group_by should be set
+        assert!(projection.is_empty());
+        assert_eq!(options.group_by.len(), 1);
+        assert_eq!(options.aggregates.len(), 2);
+
+        // order by should reference the aggregate (SUM) or group key; ensure limit/offset set
+        assert_eq!(options.limit, Some(5));
+        assert_eq!(options.offset, Some(2));
+      }
+      other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn default_value_mapper_converts_literals() {
+    let vm = DefaultValueMapper;
+
+    // integer
+    let int_expr: SqlExpr =
+      sqlparser::ast::Expr::Value(sqlparser::ast::Value::Number("123".into(), false).into());
+    let v = vm.map_sql_value(&int_expr).expect("int");
+    assert_eq!(v, db_engine::EngineValue::Integer(123));
+
+    // float
+    let float_expr: SqlExpr =
+      sqlparser::ast::Expr::Value(sqlparser::ast::Value::Number("1.5".into(), false).into());
+    let v = vm.map_sql_value(&float_expr).expect("float");
+    assert_eq!(v, db_engine::EngineValue::Float(1.5));
+
+    // string
+    let s_expr: SqlExpr =
+      sqlparser::ast::Expr::Value(sqlparser::ast::Value::SingleQuotedString("hello".into()).into());
+    let v = vm.map_sql_value(&s_expr).expect("string");
+    assert_eq!(v, db_engine::EngineValue::Text("hello".into()));
+
+    // null
+    let n_expr: SqlExpr = sqlparser::ast::Expr::Value(sqlparser::ast::Value::Null.into());
+    let v = vm.map_sql_value(&n_expr).expect("null");
+    assert_eq!(v, db_engine::EngineValue::Null);
+  }
+
+  #[test]
+  fn translate_with_custom_mapper() {
+    struct MyMapper;
+    impl ValueMapper for MyMapper {
+      fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError> {
+        // Map all numeric literals to text for test visibility
+        match expr {
+          SqlExpr::Value(v) => match &v.value {
+            SqlValue::Number(s, _) => Ok(db_engine::EngineValue::Text(s.clone())),
+            SqlValue::SingleQuotedString(s) => Ok(db_engine::EngineValue::Text(s.clone())),
+            SqlValue::Null => Ok(db_engine::EngineValue::Null),
+            _ => sql_value_to_engine_value(expr),
+          },
+          _ => Err(TranslateError::UnsupportedFeature(
+            "expected literal".into(),
+          )),
+        }
+      }
+    }
+
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    // Use custom mapper which turns numeric 42 into text "42"
+    let canon = parse_and_translate_to_ir_with_mapper(
+      "SELECT id FROM users WHERE id = 42;",
+      &resolver,
+      &MyMapper,
+    )
+    .expect("translate with mapper");
+
+    match canon.engine_query {
+      EngineQuery::Select { predicate, .. } => match predicate {
+        Some(QualifiedPredicate::Equals(_, QualifiedOperand::Value(v))) => {
+          assert_eq!(v, EngineValue::Text("42".into()));
+        }
+        other => panic!("unexpected predicate: {:?}", other),
+      },
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_insert_values() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "items".into(),
+      TableSchema {
+        name: "items".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate("INSERT INTO items (id, name) VALUES (1, 'One');", &resolver)
+      .expect("translate insert");
+
+    match q {
+      EngineQuery::Insert { table, row } => {
+        assert_eq!(table, "items");
+        assert_eq!(
+          row,
+          vec![EngineValue::Integer(1), EngineValue::Text("One".into())]
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+}

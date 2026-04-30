@@ -1,0 +1,22 @@
+[package]
+name = "db-examples-e2e"
+version = "0.1.0"
+edition = "2024"
+description = "End-to-end examples for the db engine (SQL -> translate -> execute)"
+
+[dependencies]
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+db-engine = { path = "../../crates/db-engine", default-features = false, features = [
+  "std",
+] }
+db-in-memory = { path = "../../crates/db-in-memory", default-features = false, features = [
+  "std",
+] }
+db-sql-to-engine = { path = "../../crates/db-sql-to-engine", default-features = false, features = [
+  "std",
+] }
+sqlparser = { version = "0.61", default-features = false, features = ["std"] }
+
+[lib]
+name = "db_examples_e2e"
+path = "src/lib.rs"

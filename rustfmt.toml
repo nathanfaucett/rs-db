@@ -1,0 +1,8 @@
+style_edition = "2024"
+
+tab_spaces = 2
+
+reorder_imports = true
+# nightly features
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"

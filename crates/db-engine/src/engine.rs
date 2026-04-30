@@ -1,0 +1,1803 @@
+use crate::{
+  EngineError, EngineRow, EngineValue, IndexSchema, TableSchema,
+  engine_kernel::{EngineKernel, EngineWriteTxn},
+  query::EnginePredicate,
+  query::EngineQuery,
+  query::EngineResult,
+  store_adapter::EngineStore,
+};
+
+#[derive(Debug, Clone)]
+pub struct EngineDatabase<S> {
+  kernel: EngineKernel<S>,
+}
+
+impl<S> EngineDatabase<S>
+where
+  S: EngineStore,
+{
+  pub fn new(store: S) -> Self {
+    Self {
+      kernel: EngineKernel::new(store),
+    }
+  }
+
+  pub async fn open(store: S) -> Result<Self, EngineError> {
+    Ok(Self {
+      kernel: EngineKernel::open(store).await?,
+    })
+  }
+
+  pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), EngineError> {
+    self.kernel.register_table(schema).await
+  }
+
+  pub async fn register_index(&mut self, schema: IndexSchema) -> Result<(), EngineError> {
+    self.kernel.register_index(schema).await
+  }
+
+  pub fn transaction(&self) -> EngineTransaction<'_, S> {
+    EngineTransaction {
+      inner: self.kernel.writer(),
+    }
+  }
+
+  pub fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
+    self.kernel.table(table_name).ok().cloned()
+  }
+
+  pub async fn execute(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
+    self.kernel.run(query).await
+  }
+
+  pub async fn select(
+    &self,
+    table_name: &str,
+    projection: &[usize],
+    predicate: Option<EnginePredicate>,
+  ) -> Result<EngineResult, EngineError> {
+    self.kernel.read(table_name, projection, predicate).await
+  }
+}
+
+pub struct EngineTransaction<'db, S>
+where
+  S: EngineStore,
+{
+  inner: EngineWriteTxn<'db, S>,
+}
+
+impl<'db, S> EngineTransaction<'db, S>
+where
+  S: EngineStore,
+{
+  pub async fn insert_row(&mut self, table_name: &str, row: EngineRow) -> Result<(), EngineError> {
+    self.inner.insert(table_name, row).await
+  }
+
+  pub async fn delete_rows(
+    &mut self,
+    table_name: &str,
+    predicate: Option<EnginePredicate>,
+  ) -> Result<(), EngineError> {
+    self.inner.delete(table_name, predicate).await
+  }
+
+  pub async fn update_rows(
+    &mut self,
+    table_name: &str,
+    assignments: Vec<(usize, EngineValue)>,
+    predicate: Option<EnginePredicate>,
+  ) -> Result<(), EngineError> {
+    self.inner.update(table_name, assignments, predicate).await
+  }
+
+  pub async fn commit(self) -> Result<(), EngineError> {
+    self.inner.commit().await
+  }
+
+  pub async fn rollback(self) -> Result<(), EngineError> {
+    self.inner.rollback().await
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::query::{JoinClause, JoinKind, JoinOn, QualifiedColumn, SelectOptions};
+  use crate::{
+    ColumnSchema, EngineError, EnginePredicate, EngineQuery, EngineType, EngineValue, IndexSchema,
+    StoreKey, StoreKeyCodec, StoreValue, StoreValueCodec, TableSchema,
+  };
+  use db_in_memory::InMemoryBTree;
+  use db_redb::REDBBTree;
+  use futures::executor::block_on;
+  use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+  };
+
+  fn redb_test_path(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+      "aicacia_db_engine_{}_{}.db",
+      name,
+      SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos()
+    ));
+    path
+  }
+
+  #[test]
+  fn insert_and_select_from_table() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let schema = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(schema)
+        .await
+        .expect("register users table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("execute insert query");
+
+      let result = database
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![1],
+          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+        ))
+        .await
+        .expect("execute select query");
+
+      assert_eq!(result.rows.len(), 1);
+      assert_eq!(result.rows[0], vec![EngineValue::Text("Alice".into())]);
+    });
+  }
+
+  #[test]
+  fn insert_and_select_float_value() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let schema = TableSchema {
+        name: "measurements".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "value".into(),
+            data_type: EngineType::Float,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(schema)
+        .await
+        .expect("register measurements table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "measurements".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Float(1.23)],
+        })
+        .await
+        .expect("execute insert query");
+
+      let result = database
+        .execute(EngineQuery::select_simple(
+          "measurements".into(),
+          vec![1],
+          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+        ))
+        .await
+        .expect("execute select query");
+
+      assert_eq!(result.rows, vec![vec![EngineValue::Float(1.23)]]);
+    });
+  }
+
+  #[test]
+  fn insert_and_select_blob_value() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let schema = TableSchema {
+        name: "files".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "data".into(),
+            data_type: EngineType::Blob,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      let blob = vec![0xde, 0xad, 0xbe, 0xef];
+
+      database
+        .register_table(schema)
+        .await
+        .expect("register files table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "files".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Blob(blob.clone())],
+        })
+        .await
+        .expect("execute insert query");
+
+      let result = database
+        .execute(EngineQuery::select_simple(
+          "files".into(),
+          vec![1],
+          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+        ))
+        .await
+        .expect("execute select query");
+
+      assert_eq!(result.rows, vec![vec![EngineValue::Blob(blob)]]);
+    });
+  }
+
+  #[test]
+  fn select_uses_index_when_available() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("execute first insert query");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("execute second insert query");
+
+      let result = database
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1],
+          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+        ))
+        .await
+        .expect("execute select query");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![
+          EngineValue::Integer(2),
+          EngineValue::Text("Bob".into())
+        ]]
+      );
+    });
+  }
+
+  #[test]
+  fn inner_join_simple() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      // Insert users
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      })
+      .await
+      .expect("insert user 2");
+
+      // Insert orders
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(100),
+        ],
+      })
+      .await
+      .expect("insert order 1");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(2),
+          EngineValue::Integer(2),
+          EngineValue::Integer(200),
+        ],
+      })
+      .await
+      .expect("insert order 2");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(3),
+          EngineValue::Integer(1),
+          EngineValue::Integer(50),
+        ],
+      })
+      .await
+      .expect("insert order 3");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Inner,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        }, // name
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        }, // amount
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute join");
+
+      // Expect 3 joined rows: Alice (100), Alice (50), Bob (200)
+      assert_eq!(res.rows.len(), 3);
+    });
+  }
+
+  #[test]
+  fn group_by_count_and_sum() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      // Insert users
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      })
+      .await
+      .expect("insert user 2");
+
+      // Insert orders
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(100),
+        ],
+      })
+      .await
+      .expect("insert order 1");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(2),
+          EngineValue::Integer(2),
+          EngineValue::Integer(200),
+        ],
+      })
+      .await
+      .expect("insert order 2");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(3),
+          EngineValue::Integer(1),
+          EngineValue::Integer(50),
+        ],
+      })
+      .await
+      .expect("insert order 3");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Inner,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let group_by = vec![QualifiedColumn {
+        table: "users".into(),
+        column_index: 1,
+      }];
+
+      let aggregates = vec![
+        crate::query::Aggregate::Count(None),
+        crate::query::Aggregate::Sum(QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        }),
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates,
+        group_by,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection: vec![],
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute grouped join");
+
+      // Expect 2 groups: Alice (count 2, sum 150), Bob (count 1, sum 200)
+      assert_eq!(res.rows.len(), 2);
+
+      for row in res.rows {
+        if row[0] == EngineValue::Text("Alice".into()) {
+          // count then sum
+          match &row[1] {
+            EngineValue::Integer(c) => assert_eq!(*c, 2),
+            _ => panic!("expected count integer"),
+          }
+          match &row[2] {
+            EngineValue::Float(s) => assert!((*s - 150.0).abs() < f64::EPSILON),
+            EngineValue::Integer(i) => assert_eq!(*i, 150),
+            _ => panic!("expected sum numeric"),
+          }
+        } else if row[0] == EngineValue::Text("Bob".into()) {
+          match &row[1] {
+            EngineValue::Integer(c) => assert_eq!(*c, 1),
+            _ => panic!("expected count integer"),
+          }
+          match &row[2] {
+            EngineValue::Float(s) => assert!((*s - 200.0).abs() < f64::EPSILON),
+            EngineValue::Integer(i) => assert_eq!(*i, 200),
+            _ => panic!("expected sum numeric"),
+          }
+        } else {
+          panic!("unexpected group key: {:?}", row[0]);
+        }
+      }
+    });
+  }
+
+  #[test]
+  fn order_by_and_limit() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      })
+      .await
+      .expect("insert user 2");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(100),
+        ],
+      })
+      .await
+      .expect("insert order 1");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(2),
+          EngineValue::Integer(2),
+          EngineValue::Integer(200),
+        ],
+      })
+      .await
+      .expect("insert order 2");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(3),
+          EngineValue::Integer(1),
+          EngineValue::Integer(50),
+        ],
+      })
+      .await
+      .expect("insert order 3");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Inner,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        },
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        },
+      ];
+
+      let order_by = vec![crate::query::OrderBy {
+        expr: QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        },
+        direction: crate::query::SortDirection::Desc,
+      }];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by,
+        limit: Some(2),
+        offset: Some(0),
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute ordered join");
+
+      // With ORDER BY amount DESC and LIMIT 2, expect amounts [200,100]
+      assert_eq!(res.rows.len(), 2);
+      match &res.rows[0][1] {
+        EngineValue::Integer(i) => assert_eq!(*i, 200),
+        _ => panic!("expected integer amount"),
+      }
+      match &res.rows[1][1] {
+        EngineValue::Integer(i) => assert_eq!(*i, 100),
+        _ => panic!("expected integer amount"),
+      }
+    });
+  }
+
+  #[test]
+  fn left_join_simple() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      // Insert users: include a user with no orders
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      })
+      .await
+      .expect("insert user 2");
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(3), EngineValue::Text("Charlie".into())],
+      })
+      .await
+      .expect("insert user 3");
+
+      // Insert orders for Alice and Bob only
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(100),
+        ],
+      })
+      .await
+      .expect("insert order 1");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(2),
+          EngineValue::Integer(2),
+          EngineValue::Integer(200),
+        ],
+      })
+      .await
+      .expect("insert order 2");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Left,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        },
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        },
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute left join");
+
+      // Expect 3 rows, Charlie's order amount should be NULL
+      assert_eq!(res.rows.len(), 3);
+      let mut found_charlie = false;
+      for row in res.rows {
+        if row[0] == EngineValue::Text("Charlie".into()) {
+          found_charlie = true;
+          assert!(matches!(row[1], EngineValue::Null));
+        }
+      }
+      assert!(found_charlie);
+    });
+  }
+
+  #[test]
+  fn right_join_simple() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      // Insert a user and an order that references a missing user
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(999),
+          EngineValue::Integer(55),
+        ],
+      })
+      .await
+      .expect("insert order missing user");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Right,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        },
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        },
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute right join");
+
+      // Expect 1 row where user is NULL and amount == 55
+      assert_eq!(res.rows.len(), 1);
+      assert!(matches!(res.rows[0][0], EngineValue::Null));
+      match &res.rows[0][1] {
+        EngineValue::Integer(i) => assert_eq!(*i, 55),
+        _ => panic!("expected integer amount"),
+      }
+    });
+  }
+
+  #[test]
+  fn full_join_simple() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+
+      // user 1 exists, user 2 has no orders; order 3 references missing user 3
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user 1");
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      })
+      .await
+      .expect("insert user 2");
+
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(100),
+        ],
+      })
+      .await
+      .expect("insert order 1");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(2),
+          EngineValue::Integer(3),
+          EngineValue::Integer(55),
+        ],
+      })
+      .await
+      .expect("insert order missing user");
+
+      let left_col = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let right_col = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+
+      let join = JoinClause {
+        kind: JoinKind::Full,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: left_col.clone(),
+          right: right_col.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        },
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 2,
+        },
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute full join");
+
+      // Expect 3 rows: Alice with 100, Bob with NULL, NULL with 55
+      assert_eq!(res.rows.len(), 3);
+    });
+  }
+
+  #[test]
+  fn multiple_joins_chain() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut db = EngineDatabase::new(store);
+
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+      let orders = TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "product_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+      let products = TableSchema {
+        name: "products".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "title".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      db.register_table(users).await.expect("register users");
+      db.register_table(orders).await.expect("register orders");
+      db.register_table(products)
+        .await
+        .expect("register products");
+
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      })
+      .await
+      .expect("insert user");
+      db.execute(EngineQuery::Insert {
+        table: "products".into(),
+        row: vec![EngineValue::Integer(10), EngineValue::Text("Gadget".into())],
+      })
+      .await
+      .expect("insert product");
+      db.execute(EngineQuery::Insert {
+        table: "orders".into(),
+        row: vec![
+          EngineValue::Integer(1),
+          EngineValue::Integer(1),
+          EngineValue::Integer(10),
+          EngineValue::Integer(99),
+        ],
+      })
+      .await
+      .expect("insert order");
+
+      // Join users -> orders, then orders -> products
+      let u_id = QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      };
+      let o_user = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 1,
+      };
+      let o_prod = QualifiedColumn {
+        table: "orders".into(),
+        column_index: 2,
+      };
+      let p_id = QualifiedColumn {
+        table: "products".into(),
+        column_index: 0,
+      };
+
+      let join1 = JoinClause {
+        kind: JoinKind::Inner,
+        left_table: "users".into(),
+        right_table: "orders".into(),
+        on: JoinOn::ColumnEq {
+          left: u_id.clone(),
+          right: o_user.clone(),
+        },
+      };
+      let join2 = JoinClause {
+        kind: JoinKind::Inner,
+        left_table: "orders".into(),
+        right_table: "products".into(),
+        on: JoinOn::ColumnEq {
+          left: o_prod.clone(),
+          right: p_id.clone(),
+        },
+      };
+
+      let projection = vec![
+        QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        },
+        QualifiedColumn {
+          table: "orders".into(),
+          column_index: 3,
+        },
+        QualifiedColumn {
+          table: "products".into(),
+          column_index: 1,
+        },
+      ];
+
+      let options = SelectOptions {
+        joins: vec![join1, join2],
+        aggregates: vec![],
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      };
+
+      let res = db
+        .execute(EngineQuery::Select {
+          table: "users".into(),
+          projection,
+          predicate: None,
+          options: Box::new(options),
+        })
+        .await
+        .expect("execute multi-join");
+
+      assert_eq!(res.rows.len(), 1);
+    });
+  }
+
+  #[test]
+  fn reopen_database_recovers_schema_from_store() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store.clone());
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("execute insert query");
+
+      let reopened = EngineDatabase::open(store)
+        .await
+        .expect("open database from store");
+      let result = reopened
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1],
+          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+        ))
+        .await
+        .expect("execute select query");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![
+          EngineValue::Integer(1),
+          EngineValue::Text("Bob".into())
+        ]],
+      );
+    });
+  }
+
+  #[test]
+  fn update_row_and_maintain_indexes() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("insert first row");
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("insert second row");
+
+      database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![(1, EngineValue::Text("Robert".into()))],
+          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(2))),
+        })
+        .await
+        .expect("update row");
+
+      let result = database
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1],
+          Some(EnginePredicate::Equals(
+            1,
+            EngineValue::Text("Robert".into()),
+          )),
+        ))
+        .await
+        .expect("select updated row");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![
+          EngineValue::Integer(2),
+          EngineValue::Text("Robert".into())
+        ]],
+      );
+
+      let stale_result = database
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1],
+          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+        ))
+        .await
+        .expect("select stale indexed row");
+
+      assert!(stale_result.rows.is_empty());
+    });
+  }
+
+  #[test]
+  fn unique_index_violates_on_update() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("insert first row");
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("insert second row");
+
+      let error = database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![(1, EngineValue::Text("Alice".into()))],
+          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(2))),
+        })
+        .await
+        .expect_err("update duplicate unique index row");
+
+      assert!(matches!(error, EngineError::UniqueIndexViolation(name) if name == "users_name_idx"));
+    });
+  }
+
+  #[test]
+  fn delete_rows_with_predicate() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("insert first row");
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("insert second row");
+
+      database
+        .execute(EngineQuery::Delete {
+          table: "users".into(),
+          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+        })
+        .await
+        .expect("delete first row");
+
+      let result = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select remaining rows");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![
+          EngineValue::Integer(2),
+          EngineValue::Text("Bob".into())
+        ]]
+      );
+    });
+  }
+
+  #[test]
+  fn unique_index_violates_on_insert() {
+    block_on(async {
+      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect("insert first row");
+
+      let error = database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(2), EngineValue::Text("Alice".into())],
+        })
+        .await
+        .expect_err("insert duplicate unique index row");
+
+      assert!(matches!(error, EngineError::UniqueIndexViolation(name) if name == "users_name_idx"));
+    });
+  }
+
+  #[test]
+  fn reopen_database_with_redb_store_recovers_schema_and_rows() {
+    block_on(async {
+      let path = redb_test_path("reopen");
+      let _ = fs::remove_file(&path);
+
+      let store =
+        REDBBTree::<StoreKey, StoreValue, StoreKeyCodec, StoreValueCodec>::open_with_codecs(
+          &path,
+          "engine_store",
+        )
+        .expect("open redb engine store");
+      let mut database = EngineDatabase::new(store.clone());
+
+      database
+        .register_table(TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "name".into(),
+              data_type: EngineType::Text,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register users table");
+
+      database
+        .register_index(IndexSchema {
+          name: "users_name_idx".into(),
+          table_name: "users".into(),
+          column_indices: vec![1],
+          unique: true,
+        })
+        .await
+        .expect("register users_name_idx index");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Text("Bob".into())],
+        })
+        .await
+        .expect("insert row into redb-backed engine");
+
+      let reopened = EngineDatabase::open(store)
+        .await
+        .expect("reopen redb-backed engine");
+      let result = reopened
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1],
+          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+        ))
+        .await
+        .expect("select row from reopened redb-backed engine");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![
+          EngineValue::Integer(1),
+          EngineValue::Text("Bob".into())
+        ]],
+      );
+
+      let _ = fs::remove_file(&path);
+    });
+  }
+}

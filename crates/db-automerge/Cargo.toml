@@ -1,0 +1,33 @@
+[package]
+name = "db-automerge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+db-core = { path = "../db-core", default-features = false, features = ["std"] }
+async-stream = { version = "0.3", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = [
+  "std",
+  "executor",
+] }
+# storage backend is provided by the caller (db-redb or db-in-memory), do not depend on redb here
+uuid = { version = "1.4", default-features = false, features = ["v4"] }
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+automerge = { version = "0.9", default-features = false, features = [] }
+
+[features]
+wasm = ["automerge/wasm"]
+default = []
+
+[dev-dependencies]
+db-in-memory = { path = "../db-in-memory", default-features = false, features = [
+  "std",
+] }
+db-core = { path = "../db-core", default-features = false, features = [
+  "std",
+  "test-helpers",
+] }
