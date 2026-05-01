@@ -380,8 +380,16 @@ where
     self.catalog.register_table(&self.store, schema).await
   }
 
+  pub(crate) async fn drop_table(&mut self, table_name: &str) -> Result<(), EngineError> {
+    self.catalog.drop_table(&self.store, table_name).await
+  }
+
   pub(crate) async fn register_index(&mut self, schema: IndexSchema) -> Result<(), EngineError> {
     self.catalog.register_index(&self.store, schema).await
+  }
+
+  pub(crate) async fn drop_index(&mut self, index_name: &str) -> Result<(), EngineError> {
+    self.catalog.drop_index(&self.store, index_name).await
   }
 
   pub(crate) fn writer(&self) -> EngineWriteTxn<'_, S> {

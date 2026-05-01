@@ -102,6 +102,72 @@ pub trait EngineStoreTransaction: Send + 'static {
   where
     Q: Borrow<StoreKey> + Send + 'a;
 
+  fn remove_table_schema<'a>(
+    &'a mut self,
+    table_name: String,
+  ) -> impl Future<Output = Result<Option<StoreValue>, EngineError>> + 'a {
+    async move {
+      let key = StoreKey::table_schema(table_name);
+      self.remove_raw(&key).await
+    }
+  }
+
+  fn remove_index_schema<'a>(
+    &'a mut self,
+    index_name: String,
+  ) -> impl Future<Output = Result<Option<StoreValue>, EngineError>> + 'a {
+    async move {
+      let key = StoreKey::index_schema(index_name);
+      self.remove_raw(&key).await
+    }
+  }
+
+  fn remove_table_rows<'a>(
+    &'a mut self,
+    table_name: &'a str,
+  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+    async move {
+      let keys = {
+        let this: &Self = &*self;
+        let stream = this.range_table_rows(table_name);
+        pin_mut!(stream);
+        let mut keys = Vec::new();
+        while let Some(item) = stream.next().await {
+          let (key, _) = item?;
+          keys.push(key);
+        }
+        keys
+      };
+      for key in keys {
+        self.remove_raw(&key).await?;
+      }
+      Ok(())
+    }
+  }
+
+  fn remove_index_entries<'a>(
+    &'a mut self,
+    index: &'a IndexSchema,
+  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+    async move {
+      let keys = {
+        let this: &Self = &*self;
+        let stream = this.range_index_entries(index);
+        pin_mut!(stream);
+        let mut keys = Vec::new();
+        while let Some(item) = stream.next().await {
+          let (key, _) = item?;
+          keys.push(key);
+        }
+        keys
+      };
+      for key in keys {
+        self.remove_raw(&key).await?;
+      }
+      Ok(())
+    }
+  }
+
   fn range<'a, R>(
     &'a self,
     range: R,

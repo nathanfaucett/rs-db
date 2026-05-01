@@ -2,7 +2,7 @@ use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds};
 
 use async_stream::stream;
 use automerge::AutoCommit;
-use db_core::ValueCodec;
+use db_core::BufferSink;
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use futures::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
@@ -19,10 +19,20 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
     doc_type: DocumentType::Snapshot,
     change_hash: [255u8; 32],
   };
-  (
-    DocumentChangeKeyCodec::encode_to_vec(&start),
-    DocumentChangeKeyCodec::encode_to_vec(&end),
-  )
+
+  let mut s1 = db_core::KeyScratch::with_capacity(49);
+  let mut s2 = db_core::KeyScratch::with_capacity(49);
+  <DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+    &DocumentChangeKeyCodec,
+    &start,
+    &mut s1,
+  );
+  <DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+    &DocumentChangeKeyCodec,
+    &end,
+    &mut s2,
+  );
+  (s1.buf, s2.buf)
 }
 
 /// Document change key: (doc_id, doc_type, change_hash)
@@ -513,10 +523,6 @@ where
     }
   }
 
-  fn encode_key<KC2: db_core::ValueCodec<DocumentChangeKey>>(key: &DocumentChangeKey) -> Vec<u8> {
-    <KC2 as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(key)
-  }
-
   fn decode_key<KC2: db_core::ValueCodec<DocumentChangeKey>>(
     data: &[u8],
   ) -> Result<DocumentChangeKey, db_core::DecodeError> {
@@ -595,6 +601,22 @@ impl db_core::KeyCodec<DocumentChangeKey> for DocumentChangeKeyCodec {
   }
 }
 
+impl db_core::FastKeyCodec<DocumentChangeKey> for DocumentChangeKeyCodec {
+  fn encode_into(&self, value: &DocumentChangeKey, scratch: &mut db_core::KeyScratch) {
+    scratch.push_bytes(value.doc_id.as_bytes());
+    let dt = match value.doc_type {
+      DocumentType::Incremental => 0u8,
+      DocumentType::Snapshot => 1u8,
+    };
+    scratch.push_bytes(&[dt]);
+    scratch.push_bytes(&value.change_hash);
+  }
+
+  fn compare_encoded(&self, left: &[u8], right: &[u8]) -> core::cmp::Ordering {
+    <Self as db_core::KeyCodec<DocumentChangeKey>>::compare(left, right)
+  }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VecBytesCodec;
 
@@ -621,8 +643,8 @@ impl db_core::ValueCodec<AutomergeEntry> for VecBytesCodec {
 impl<B, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
-  KC: db_core::ValueCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
@@ -721,9 +743,19 @@ where
       doc_type: DocumentType::Snapshot,
       change_hash,
     };
-    let key_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&internal_key);
-    let val_enc = <VC as db_core::ValueCodec<AutomergeEntry>>::encode_to_vec(&bytes);
-    self.inner.insert(key_enc, val_enc).await
+    let mut key_scratch = db_core::KeyScratch::with_capacity(49);
+    <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+      &self.key_codec,
+      &internal_key,
+      &mut key_scratch,
+    );
+    let mut val_enc: Vec<u8> = Vec::new();
+    <VC as db_core::FastValueCodec<AutomergeEntry>>::encode_into(
+      &self.val_codec,
+      &bytes,
+      &mut val_enc,
+    );
+    self.inner.insert(key_scratch.buf, val_enc).await
   }
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
@@ -814,8 +846,20 @@ where
       let start_doc = DocumentChangeKey { doc_id: Uuid::from_u128(0), doc_type: DocumentType::Incremental, change_hash: [0u8;32] };
       let end_doc = DocumentChangeKey { doc_id: Uuid::from_u128(u128::MAX), doc_type: DocumentType::Snapshot, change_hash: [255u8;32] };
 
-      let start_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&start_doc);
-      let end_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&end_doc);
+      let mut start_scratch = db_core::KeyScratch::with_capacity(49);
+      let mut end_scratch = db_core::KeyScratch::with_capacity(49);
+      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &self.key_codec,
+        &start_doc,
+        &mut start_scratch,
+      );
+      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &self.key_codec,
+        &end_doc,
+        &mut end_scratch,
+      );
+      let start_enc = start_scratch.buf;
+      let end_enc = end_scratch.buf;
 
       let inner_stream = self.inner.range(start_enc.clone()..=end_enc.clone());
       futures::pin_mut!(inner_stream);
@@ -887,8 +931,8 @@ where
 impl<B, KC, VC> BTree<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
-  KC: db_core::ValueCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   type Transaction =
     crate::automerge_btree::transaction::AutomergeEncodedTransaction<B::Transaction, KC, VC>;
@@ -1034,5 +1078,64 @@ mod tests {
         .expect("writer key missing");
       assert_eq!(actual_writer_value, b"!".to_vec());
     });
+  }
+
+  #[test]
+  fn uuid_prefix_vs_short_prefix() {
+    let _ = fs::remove_file(tmp_path("prefix_test"));
+
+    let underlying = InMemoryBTree::<Vec<u8>, Vec<u8>>::new();
+
+    let id = Uuid::new_v4();
+    let key = DocumentChangeKey {
+      doc_id: id,
+      doc_type: DocumentType::Snapshot,
+      change_hash: [1u8; 32],
+    };
+    let mut key_scratch = db_core::KeyScratch::with_capacity(49);
+    <DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+      &DocumentChangeKeyCodec,
+      &key,
+      &mut key_scratch,
+    );
+    let key_enc = key_scratch.buf;
+
+    // insert encoded key into underlying storage via a transaction
+    block_on(async {
+      let mut tx = underlying.transaction().await.expect("start tx");
+      tx.insert(key_enc.clone(), b"v".to_vec())
+        .await
+        .expect("insert");
+      tx.commit().await.expect("commit");
+    });
+
+    // short (16-byte) prefix bounds - should NOT match encoded entries
+    let short_start = id.as_bytes().to_vec();
+    let short_end = id.as_bytes().to_vec();
+    let short_count = block_on(async {
+      let mut s = underlying.range(short_start.clone()..=short_end.clone());
+      futures::pin_mut!(s);
+      let mut cnt = 0usize;
+      while let Some(item) = s.next().await {
+        let (_k, _v) = item.expect("range");
+        cnt += 1;
+      }
+      cnt
+    });
+    assert_eq!(short_count, 0);
+
+    // full-encoded bounds should include the entry
+    let (start_enc, end_enc) = uuid_prefix_range(id);
+    let full_count = block_on(async {
+      let mut s = underlying.range(start_enc.clone()..=end_enc.clone());
+      futures::pin_mut!(s);
+      let mut cnt = 0usize;
+      while let Some(item) = s.next().await {
+        let (_k, _v) = item.expect("range");
+        cnt += 1;
+      }
+      cnt
+    });
+    assert_eq!(full_count, 1);
   }
 }

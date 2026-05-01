@@ -8,7 +8,6 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 
 use automerge::AutoCommit;
-use db_core::ValueCodec;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use sha2::Digest;
 use uuid::Uuid;
@@ -27,8 +26,24 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
     change_hash: [255u8; 32],
   };
   (
-    super::DocumentChangeKeyCodec::encode_to_vec(&start),
-    super::DocumentChangeKeyCodec::encode_to_vec(&end),
+    {
+      let mut s = db_core::KeyScratch::with_capacity(49);
+      <super::DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &super::DocumentChangeKeyCodec,
+        &start,
+        &mut s,
+      );
+      s.buf
+    },
+    {
+      let mut s = db_core::KeyScratch::with_capacity(49);
+      <super::DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &super::DocumentChangeKeyCodec,
+        &end,
+        &mut s,
+      );
+      s.buf
+    },
   )
 }
 
@@ -464,15 +479,15 @@ where
 impl<T, KC, VC> BTreeTransaction<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
-  KC: db_core::ValueCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn commit(self) -> Result<(), BTreeError> {
     let AutomergeEncodedTransaction {
       mut inner_tx,
       pending,
-      key_codec: _,
-      val_codec: _,
+      key_codec,
+      val_codec,
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
@@ -506,9 +521,19 @@ where
           doc_type: DocumentType::Snapshot,
           change_hash,
         };
-        let key_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&key);
-        let val_enc = <VC as db_core::ValueCodec<AutomergeEntry>>::encode_to_vec(&bytes);
-        inner_tx.insert(key_enc, val_enc).await?;
+        let mut key_scratch = db_core::KeyScratch::with_capacity(49);
+        <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+          &key_codec,
+          &key,
+          &mut key_scratch,
+        );
+        let mut val_enc: Vec<u8> = Vec::new();
+        <VC as db_core::FastValueCodec<AutomergeEntry>>::encode_into(
+          &val_codec,
+          &bytes,
+          &mut val_enc,
+        );
+        inner_tx.insert(key_scratch.buf, val_enc).await?;
       } else {
         let (start_enc, end_enc) = uuid_prefix_range(doc_id);
 
@@ -538,8 +563,8 @@ where
 impl<T, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
-  KC: db_core::ValueCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
@@ -601,8 +626,20 @@ where
     stream! {
       let start_doc = DocumentChangeKey { doc_id: Uuid::from_u128(0), doc_type: DocumentType::Incremental, change_hash: [0u8;32] };
       let end_doc = DocumentChangeKey { doc_id: Uuid::from_u128(u128::MAX), doc_type: DocumentType::Snapshot, change_hash: [255u8;32] };
-      let start_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&start_doc);
-      let end_enc = <KC as db_core::ValueCodec<DocumentChangeKey>>::encode_to_vec(&end_doc);
+      let mut start_scratch = db_core::KeyScratch::with_capacity(49);
+      let mut end_scratch = db_core::KeyScratch::with_capacity(49);
+      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &self.key_codec,
+        &start_doc,
+        &mut start_scratch,
+      );
+      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+        &self.key_codec,
+        &end_doc,
+        &mut end_scratch,
+      );
+      let start_enc = start_scratch.buf;
+      let end_enc = end_scratch.buf;
 
       let mut merged: std::collections::BTreeMap<Uuid, Vec<u8>> = std::collections::BTreeMap::new();
 

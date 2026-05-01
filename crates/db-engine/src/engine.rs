@@ -32,8 +32,16 @@ where
     self.kernel.register_table(schema).await
   }
 
+  pub async fn drop_table(&mut self, table_name: &str) -> Result<(), EngineError> {
+    self.kernel.drop_table(table_name).await
+  }
+
   pub async fn register_index(&mut self, schema: IndexSchema) -> Result<(), EngineError> {
     self.kernel.register_index(schema).await
+  }
+
+  pub async fn drop_index(&mut self, index_name: &str) -> Result<(), EngineError> {
+    self.kernel.drop_index(index_name).await
   }
 
   pub fn transaction(&self) -> EngineTransaction<'_, S> {

@@ -211,6 +211,16 @@ pub trait FastKeyCodec<T>: KeyCodec<T> {
   }
 }
 
+/// Extends a value codec with an allocation-free encoding path.
+pub trait FastValueCodec<T>: ValueCodec<T> {
+  /// Encode `value` directly into `dst`.
+  fn encode_into(&self, value: &T, dst: &mut Vec<u8>) {
+    dst.extend_from_slice(<Self as ValueCodec<T>>::encode(value).as_ref());
+  }
+}
+
+impl<T, V> FastValueCodec<V> for T where T: ValueCodec<V> {}
+
 #[cfg(test)]
 mod tests {
   use super::*;

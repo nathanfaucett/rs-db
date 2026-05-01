@@ -1,8 +1,10 @@
+pub use db_engine::SchemaResolver;
 use hashbrown::HashMap;
 use sqlparser::ast::{
-  BinaryOperator, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
-  JoinConstraint, JoinOperator, LimitClause, ObjectName, Query, SelectItem, SetExpr, Statement,
-  TableFactor, Value as SqlValue,
+  BinaryOperator, ColumnOption, CreateIndex, CreateTable, DataType, Expr as SqlExpr, FunctionArg,
+  FunctionArgExpr, FunctionArguments, GroupByExpr, JoinConstraint, JoinOperator, LimitClause,
+  ObjectName, ObjectType, Query, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
+  Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -30,11 +32,6 @@ pub enum TranslateError {
   UnsupportedFeature(String),
 }
 
-/// Minimal schema resolver used by the translator to look up table schemas.
-pub trait SchemaResolver {
-  fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema>;
-}
-
 /// Pluggable mapper for converting `sqlparser` literal expressions into `EngineValue`.
 pub trait ValueMapper {
   fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError>;
@@ -55,8 +52,10 @@ pub fn parse_and_translate(
   sql: &str,
   resolver: &dyn SchemaResolver,
 ) -> Result<db_engine::EngineQuery, TranslateError> {
-  let canon = parse_and_translate_to_ir(sql, resolver)?;
-  Ok(canon.engine_query)
+  match parse_and_translate_statement_to_ir(sql, resolver)? {
+    crate::ir::CanonicalStatement::Query(query) => Ok(query),
+    crate::ir::CanonicalStatement::Ddl(_) => Err(TranslateError::UnsupportedStatement),
+  }
 }
 
 /// Variant of `parse_and_translate` that accepts a custom `ValueMapper`.
@@ -65,8 +64,27 @@ pub fn parse_and_translate_with_mapper(
   resolver: &dyn SchemaResolver,
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::EngineQuery, TranslateError> {
-  let canon = parse_and_translate_to_ir_with_mapper(sql, resolver, mapper)?;
-  Ok(canon.engine_query)
+  match parse_and_translate_statement_to_ir_with_mapper(sql, resolver, mapper)? {
+    crate::ir::CanonicalStatement::Query(query) => Ok(query),
+    crate::ir::CanonicalStatement::Ddl(_) => Err(TranslateError::UnsupportedStatement),
+  }
+}
+
+/// Parse a SQL string and translate the first statement into a canonical statement.
+pub fn parse_and_translate_statement(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  parse_and_translate_statement_to_ir(sql, resolver)
+}
+
+/// Variant of `parse_and_translate_statement` that accepts a custom `ValueMapper`.
+pub fn parse_and_translate_statement_with_mapper(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  parse_and_translate_statement_to_ir_with_mapper(sql, resolver, mapper)
 }
 
 /// Parse a SQL string and translate the first statement into the canonical SQL IR.
@@ -92,6 +110,276 @@ pub fn parse_and_translate_to_ir_with_mapper(
     ));
   }
   translate_statement_to_ir_with_mapper(&stmts[0], resolver, mapper)
+}
+
+/// Parse a SQL string and translate the first statement into a canonical statement.
+pub fn parse_and_translate_statement_to_ir(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  parse_and_translate_statement_to_ir_with_mapper(sql, resolver, &DefaultValueMapper)
+}
+
+/// Variant of `parse_and_translate_statement_to_ir` that accepts a custom `ValueMapper`.
+pub fn parse_and_translate_statement_to_ir_with_mapper(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  let dialect = GenericDialect {}; // generic ANSI SQL
+  let stmts =
+    Parser::parse_sql(&dialect, sql).map_err(|e| TranslateError::SqlParse(e.to_string()))?;
+  if stmts.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "only a single statement is supported".into(),
+    ));
+  }
+  translate_statement_to_canonical(&stmts[0], resolver, mapper)
+}
+
+/// Translate a `sqlparser` AST `Statement` into a canonical statement.
+pub fn translate_statement_to_canonical(
+  stmt: &Statement,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  match stmt {
+    Statement::Query(_) | Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_) => Ok(
+      crate::ir::CanonicalStatement::Query(translate_statement(stmt, resolver, mapper)?),
+    ),
+    Statement::CreateTable(create_table) => Ok(crate::ir::CanonicalStatement::Ddl(
+      crate::ir::DdlOp::CreateTable(translate_create_table(create_table)?),
+    )),
+    Statement::CreateIndex(create_index) => Ok(crate::ir::CanonicalStatement::Ddl(
+      crate::ir::DdlOp::CreateIndex(translate_create_index(create_index, resolver)?),
+    )),
+    Statement::Drop {
+      object_type,
+      names,
+      table,
+      ..
+    } => Ok(crate::ir::CanonicalStatement::Ddl(
+      translate_drop_statement(object_type, names, table)?,
+    )),
+    _ => Err(TranslateError::UnsupportedStatement),
+  }
+}
+
+/// Translate a `sqlparser` `CREATE TABLE` into an engine `TableSchema`.
+fn translate_create_table(
+  create_table: &CreateTable,
+) -> Result<db_engine::TableSchema, TranslateError> {
+  let table_name = object_name_to_string(&create_table.name);
+  let mut columns: Vec<db_engine::ColumnSchema> = Vec::new();
+  let mut pk_names: Vec<String> = Vec::new();
+
+  for column in &create_table.columns {
+    let data_type = sql_type_to_engine_type(&column.data_type)?;
+    let column_name = column.name.value.clone();
+    for option in &column.options {
+      match &option.option {
+        ColumnOption::PrimaryKey(_) => pk_names.push(column_name.clone()),
+        ColumnOption::Unique(_) => {}
+        _ => {}
+      }
+    }
+
+    columns.push(db_engine::ColumnSchema {
+      name: column_name,
+      data_type,
+    });
+  }
+
+  for constraint in &create_table.constraints {
+    if let TableConstraint::PrimaryKey(pk) = constraint {
+      for column in &pk.columns {
+        let name = match &column.column.expr {
+          SqlExpr::Identifier(ident) => ident.value.clone(),
+          SqlExpr::CompoundIdentifier(idents) => idents
+            .iter()
+            .map(|ident| ident.value.clone())
+            .collect::<Vec<_>>()
+            .join("."),
+          other => {
+            return Err(TranslateError::UnsupportedFeature(format!(
+              "unsupported primary key column expression: {other:?}"
+            )));
+          }
+        };
+        pk_names.push(name);
+      }
+    }
+  }
+
+  let primary_key = if pk_names.is_empty() {
+    if columns.is_empty() {
+      return Err(TranslateError::UnsupportedFeature(
+        "CREATE TABLE must specify at least one column".into(),
+      ));
+    }
+    vec![0]
+  } else {
+    pk_names
+      .iter()
+      .filter_map(|pk| columns.iter().position(|c| &c.name == pk))
+      .collect()
+  };
+
+  if primary_key.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE TABLE primary key columns not found".into(),
+    ));
+  }
+
+  Ok(db_engine::TableSchema {
+    name: table_name,
+    columns,
+    primary_key,
+  })
+}
+
+fn sql_type_to_engine_type(data_type: &DataType) -> Result<db_engine::EngineType, TranslateError> {
+  use sqlparser::ast::DataType as SqlDataType;
+  let ty = match data_type {
+    SqlDataType::Int(_)
+    | SqlDataType::Int2(_)
+    | SqlDataType::Int4(_)
+    | SqlDataType::Int8(_)
+    | SqlDataType::Integer(_)
+    | SqlDataType::SmallInt(_)
+    | SqlDataType::BigInt(_)
+    | SqlDataType::MediumInt(_)
+    | SqlDataType::TinyInt(_)
+    | SqlDataType::Unsigned
+    | SqlDataType::UnsignedInteger
+    | SqlDataType::Signed
+    | SqlDataType::SignedInteger
+    | SqlDataType::IntUnsigned(_)
+    | SqlDataType::Int4Unsigned(_)
+    | SqlDataType::BigIntUnsigned(_)
+    | SqlDataType::MediumIntUnsigned(_)
+    | SqlDataType::TinyIntUnsigned(_)
+    | SqlDataType::UInt8
+    | SqlDataType::UInt16
+    | SqlDataType::UInt32
+    | SqlDataType::UInt64
+    | SqlDataType::UInt128
+    | SqlDataType::UInt256
+    | SqlDataType::UBigInt
+    | SqlDataType::UHugeInt
+    | SqlDataType::SmallIntUnsigned(_)
+    | SqlDataType::UTinyInt
+    | SqlDataType::Int2Unsigned(_) => db_engine::EngineType::Integer,
+    SqlDataType::Float(_)
+    | SqlDataType::FloatUnsigned(_)
+    | SqlDataType::Float4
+    | SqlDataType::Float32
+    | SqlDataType::Float64 => db_engine::EngineType::Float,
+    SqlDataType::Char(_)
+    | SqlDataType::Character(_)
+    | SqlDataType::CharacterVarying(_)
+    | SqlDataType::CharVarying(_)
+    | SqlDataType::Varchar(_)
+    | SqlDataType::Nvarchar(_)
+    | SqlDataType::String(_)
+    | SqlDataType::Text
+    | SqlDataType::TinyText
+    | SqlDataType::MediumText
+    | SqlDataType::LongText
+    | SqlDataType::JSON
+    | SqlDataType::Clob(_)
+    | SqlDataType::CharacterLargeObject(_)
+    | SqlDataType::CharLargeObject(_) => db_engine::EngineType::Text,
+    SqlDataType::Binary(_)
+    | SqlDataType::Varbinary(_)
+    | SqlDataType::Blob(_)
+    | SqlDataType::TinyBlob
+    | SqlDataType::MediumBlob
+    | SqlDataType::LongBlob
+    | SqlDataType::Bytes(_) => db_engine::EngineType::Blob,
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(format!(
+        "unsupported CREATE TABLE data type: {data_type:?}"
+      )));
+    }
+  };
+  Ok(ty)
+}
+
+/// Translate a `sqlparser` `CREATE INDEX` into an engine `IndexSchema`.
+fn translate_create_index(
+  create_index: &CreateIndex,
+  resolver: &dyn SchemaResolver,
+) -> Result<db_engine::IndexSchema, TranslateError> {
+  let table_name = object_name_to_string(&create_index.table_name);
+  let table_schema = resolver
+    .describe_table(&table_name)
+    .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
+
+  let index_name = if let Some(name) = &create_index.name {
+    object_name_to_string(name)
+  } else {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE INDEX without explicit name is unsupported".into(),
+    ));
+  };
+
+  let mut column_indices = Vec::new();
+  for index_column in &create_index.columns {
+    let column_name = match &index_column.column.expr {
+      SqlExpr::Identifier(ident) => ident.value.clone(),
+      SqlExpr::CompoundIdentifier(idents) => idents
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect::<Vec<_>>()
+        .join("."),
+      other => {
+        return Err(TranslateError::UnsupportedFeature(format!(
+          "unsupported index column expression: {other:?}"
+        )));
+      }
+    };
+
+    let idx = table_schema
+      .columns
+      .iter()
+      .position(|c| c.name == column_name)
+      .ok_or_else(|| TranslateError::UnknownColumn(column_name.clone()))?;
+    column_indices.push(idx);
+  }
+
+  if column_indices.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE INDEX must specify at least one column".into(),
+    ));
+  }
+
+  Ok(db_engine::IndexSchema {
+    name: index_name,
+    table_name,
+    column_indices,
+    unique: create_index.unique,
+  })
+}
+
+fn translate_drop_statement(
+  object_type: &ObjectType,
+  names: &[ObjectName],
+  _table: &Option<ObjectName>,
+) -> Result<crate::ir::DdlOp, TranslateError> {
+  if names.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "DROP only supports a single object".into(),
+    ));
+  }
+
+  let object_name = object_name_to_string(&names[0]);
+
+  match object_type {
+    ObjectType::Table => Ok(crate::ir::DdlOp::DropTable(object_name)),
+    ObjectType::Index => Ok(crate::ir::DdlOp::DropIndex(object_name)),
+    _ => Err(TranslateError::UnsupportedStatement),
+  }
 }
 
 /// Translate a `sqlparser` AST `Statement` into the canonical SQL IR.

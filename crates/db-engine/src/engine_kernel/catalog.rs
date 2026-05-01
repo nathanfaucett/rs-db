@@ -142,4 +142,54 @@ impl EngineCatalog {
     self.insert_index(schema);
     Ok(())
   }
+
+  pub(crate) async fn drop_table<S>(&mut self, store: &S, table_name: &str) -> Result<(), EngineError>
+  where
+    S: EngineStore,
+  {
+    self.load_from_store(store).await?;
+
+    if !self.contains_table(table_name) {
+      return Err(EngineError::TableNotFound(table_name.into()));
+    }
+
+    let indexes = self.indexes_for_table(table_name);
+    let mut tx = store.engine_transaction().await?;
+
+    for index in &indexes {
+      tx.remove_index_entries(index).await?;
+      tx.remove_index_schema(index.name.clone()).await?;
+    }
+
+    tx.remove_table_rows(table_name).await?;
+    tx.remove_table_schema(table_name.to_string()).await?;
+    tx.commit().await?;
+
+    self.tables.remove(table_name);
+    for index in indexes {
+      self.indexes.remove(&index.name);
+    }
+
+    Ok(())
+  }
+
+  pub(crate) async fn drop_index<S>(&mut self, store: &S, index_name: &str) -> Result<(), EngineError>
+  where
+    S: EngineStore,
+  {
+    self.load_from_store(store).await?;
+
+    if !self.contains_index(index_name) {
+      return Err(EngineError::IndexNotFound(index_name.into()));
+    }
+
+    let index = self.indexes.get(index_name).cloned().unwrap();
+    let mut tx = store.engine_transaction().await?;
+    tx.remove_index_entries(&index).await?;
+    tx.remove_index_schema(index_name.to_string()).await?;
+    tx.commit().await?;
+
+    self.indexes.remove(index_name);
+    Ok(())
+  }
 }

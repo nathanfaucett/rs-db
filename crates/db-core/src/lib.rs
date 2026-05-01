@@ -19,9 +19,9 @@ mod transaction_patch;
 pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 pub use codec::BufferSink;
 pub use codec::{
-  CURRENT_CODEC_VERSION, DecodeError, FastKeyCodec, KeyCodec, KeyScratch, StorageCodec, ValueCodec,
-  compare_encoded_keys, decode_value_to_vec, encode_key_into_scratch, encode_key_to_vec,
-  encode_value_to_vec,
+  CURRENT_CODEC_VERSION, DecodeError, FastKeyCodec, FastValueCodec, KeyCodec, KeyScratch,
+  StorageCodec, ValueCodec, compare_encoded_keys, decode_value_to_vec, encode_key_into_scratch,
+  encode_key_to_vec, encode_value_to_vec,
 };
 
 pub use codec_helpers::{decode_from_slice, decode_with_version, encode_with_version};

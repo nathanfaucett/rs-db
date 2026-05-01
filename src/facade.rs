@@ -14,7 +14,9 @@ use db_redb::REDBBTree;
 #[cfg(feature = "redb")]
 use std::path::Path;
 
-use db_sql_to_engine::{SchemaResolver, parse_and_translate};
+use db_sql_to_engine::{
+  CanonicalStatement, DdlOp, SchemaResolver, parse_and_translate, parse_and_translate_statement,
+};
 
 /// Public facade error type.
 #[derive(Debug)]
@@ -46,6 +48,16 @@ pub enum Database {
   InMemory(EngineDatabase<InMemoryBTree<StoreKey, StoreValue>>),
   #[cfg(feature = "redb")]
   Redb(EngineDatabase<REDBBTree<StoreKey, StoreValue>>),
+}
+
+impl SchemaResolver for Database {
+  fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema> {
+    match self {
+      Database::InMemory(engine) => engine.describe_table(name),
+      #[cfg(feature = "redb")]
+      Database::Redb(engine) => engine.describe_table(name),
+    }
+  }
 }
 
 impl Database {
@@ -90,14 +102,44 @@ impl Database {
     Ok(res)
   }
 
-  /// Execute a SQL string using a `SchemaResolver` to map table schemas.
-  pub async fn execute_sql(
-    &self,
-    resolver: &dyn SchemaResolver,
-    sql: &str,
-  ) -> Result<EngineResult, DatabaseError> {
-    let q = parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
-    self.execute_query(q).await
+  /// Execute a SQL string using the database schema catalog.
+  pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, DatabaseError> {
+    match parse_and_translate_statement(sql, self) {
+      Ok(CanonicalStatement::Query(q)) => self.execute_query(q).await,
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
+        match self {
+          Database::InMemory(engine) => engine.register_table(schema).await?,
+          #[cfg(feature = "redb")]
+          Database::Redb(engine) => engine.register_table(schema).await?,
+        }
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
+        match self {
+          Database::InMemory(engine) => engine.drop_table(&name).await?,
+          #[cfg(feature = "redb")]
+          Database::Redb(engine) => engine.drop_table(&name).await?,
+        }
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
+        match self {
+          Database::InMemory(engine) => engine.register_index(schema).await?,
+          #[cfg(feature = "redb")]
+          Database::Redb(engine) => engine.register_index(schema).await?,
+        }
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
+        match self {
+          Database::InMemory(engine) => engine.drop_index(&name).await?,
+          #[cfg(feature = "redb")]
+          Database::Redb(engine) => engine.drop_index(&name).await?,
+        }
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Err(e) => Err(DatabaseError::Other(format!("{e}"))),
+    }
   }
 
   /// Convenience: run a closure in a transaction context.
