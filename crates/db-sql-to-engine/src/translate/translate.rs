@@ -10,12 +10,10 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
 
-mod helpers;
-use self::helpers::sql_value_to_engine_value;
-mod having;
-mod predicates;
-use self::having as having_module;
-use self::predicates as predicates_module;
+use super::having as having_module;
+use super::helpers;
+use super::helpers::sql_value_to_engine_value;
+use super::predicates as predicates_module;
 
 /// Errors returned by the translator.
 #[derive(Error, Debug)]
@@ -484,7 +482,7 @@ pub fn translate_statement(
 
           // HAVING support: translate having expression (after aggregates/group_by known)
           let having_pred = if let Some(h) = &select.having {
-            Some(expr_to_having_predicate(
+            Some(having_module::expr_to_having_predicate(
               h,
               &group_by,
               &aggregates,
@@ -1170,28 +1168,6 @@ fn parse_limit_clause(
   }
 
   Ok((limit_val, offset_val))
-}
-
-fn expr_to_having_predicate(
-  expr: &SqlExpr,
-  _group_by: &Vec<db_engine::QualifiedColumn>,
-  aggregates: &Vec<db_engine::Aggregate>,
-  proj_alias_map: &HashMap<String, db_engine::QualifiedColumn>,
-  alias_map: &HashMap<String, String>,
-  table_schemas: &HashMap<String, db_engine::TableSchema>,
-  _resolver: &dyn SchemaResolver,
-  mapper: &dyn ValueMapper,
-) -> Result<db_engine::HavingPredicate, TranslateError> {
-  having_module::expr_to_having_predicate(
-    expr,
-    _group_by,
-    aggregates,
-    proj_alias_map,
-    alias_map,
-    table_schemas,
-    _resolver,
-    mapper,
-  )
 }
 
 #[cfg(test)]

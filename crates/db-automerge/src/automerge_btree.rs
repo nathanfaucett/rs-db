@@ -973,7 +973,7 @@ mod tests {
     let mut store = AutomergeBTree::new(underlying);
 
     let doc_id = Uuid::new_v4();
-    let mut doc = AutoCommit::new();
+    let doc = AutoCommit::new();
     let mut expected = doc.clone();
 
     block_on(store.insert(doc_id, doc)).expect("insert");
@@ -1021,7 +1021,7 @@ mod tests {
   fn compaction_with_concurrent_writer() {
     block_on(async {
       let underlying = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
-      let mut automerge = AutomergeBTree::new(underlying.clone());
+      let automerge = AutomergeBTree::new(underlying.clone());
       let doc_id = Uuid::new_v4();
 
       let delta_key = DocumentChangeKey {
@@ -1113,7 +1113,7 @@ mod tests {
     let short_start = id.as_bytes().to_vec();
     let short_end = id.as_bytes().to_vec();
     let short_count = block_on(async {
-      let mut s = underlying.range(short_start.clone()..=short_end.clone());
+      let s = underlying.range(short_start.clone()..=short_end.clone());
       futures::pin_mut!(s);
       let mut cnt = 0usize;
       while let Some(item) = s.next().await {
@@ -1127,7 +1127,7 @@ mod tests {
     // full-encoded bounds should include the entry
     let (start_enc, end_enc) = uuid_prefix_range(id);
     let full_count = block_on(async {
-      let mut s = underlying.range(start_enc.clone()..=end_enc.clone());
+      let s = underlying.range(start_enc.clone()..=end_enc.clone());
       futures::pin_mut!(s);
       let mut cnt = 0usize;
       while let Some(item) = s.next().await {

@@ -728,7 +728,7 @@ mod tests {
       tx.insert(doc_id, doc).await.expect("insert pending delta");
       tx.commit().await.expect("commit");
 
-      let mut got = store.get(&doc_id).await.expect("get after commit");
+      let got = store.get(&doc_id).await.expect("get after commit");
       let mut got_doc = got.expect("missing");
       assert_eq!(got_doc.save(), expected.save());
     });

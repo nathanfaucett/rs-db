@@ -1,7 +1,7 @@
 // Example: register a table, insert a row (programmatic), then run a SQL SELECT
-use futures::executor::block_on;
-use db_engine::{ColumnSchema, EngineType, TableSchema};
 use db::Database;
+use db_engine::{ColumnSchema, EngineType, TableSchema};
+use futures::executor::block_on;
 
 fn main() {
   block_on(async {

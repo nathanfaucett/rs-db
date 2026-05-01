@@ -245,8 +245,8 @@ mod tests {
     }
 
     fn compare_encoded_keys(&self, a: &[u8], b: &[u8]) -> Ordering {
-      let a_payload = if a.len() > 0 { &a[1..] } else { a };
-      let b_payload = if b.len() > 0 { &b[1..] } else { b };
+      let a_payload = if !a.is_empty() { &a[1..] } else { a };
+      let b_payload = if !b.is_empty() { &b[1..] } else { b };
       <IntegerI64Codec as KeyCodec<i64>>::compare(a_payload, b_payload)
     }
   }

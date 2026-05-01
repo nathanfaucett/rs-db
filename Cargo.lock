@@ -81,6 +81,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -255,6 +261,7 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "db-automerge",
  "db-core",
  "db-engine",
  "db-in-memory",
@@ -268,10 +275,13 @@ dependencies = [
 name = "db-automerge"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "async-stream",
  "automerge",
+ "base64",
  "db-core",
  "db-in-memory",
+ "db-types",
  "futures",
  "sha2 0.10.9",
  "uuid",

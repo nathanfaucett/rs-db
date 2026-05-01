@@ -143,7 +143,11 @@ impl EngineCatalog {
     Ok(())
   }
 
-  pub(crate) async fn drop_table<S>(&mut self, store: &S, table_name: &str) -> Result<(), EngineError>
+  pub(crate) async fn drop_table<S>(
+    &mut self,
+    store: &S,
+    table_name: &str,
+  ) -> Result<(), EngineError>
   where
     S: EngineStore,
   {
@@ -173,7 +177,11 @@ impl EngineCatalog {
     Ok(())
   }
 
-  pub(crate) async fn drop_index<S>(&mut self, store: &S, index_name: &str) -> Result<(), EngineError>
+  pub(crate) async fn drop_index<S>(
+    &mut self,
+    store: &S,
+    index_name: &str,
+  ) -> Result<(), EngineError>
   where
     S: EngineStore,
   {
