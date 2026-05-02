@@ -72,9 +72,11 @@ pub fn expr_to_having_predicate(
           ));
         }
         let arg_opt = match &args[0] {
-          FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
-            Some(resolve_qc_for_having(arg_expr, ctx.alias_map, ctx.table_schemas)?)
-          }
+          FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => Some(resolve_qc_for_having(
+            arg_expr,
+            ctx.alias_map,
+            ctx.table_schemas,
+          )?),
           FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => None,
           _ => {
             return Err(TranslateError::UnsupportedFeature(
@@ -97,7 +99,9 @@ pub fn expr_to_having_predicate(
           for (i, ag) in ctx.aggregates.iter().enumerate() {
             match ag {
               db_engine::Aggregate::Count(opt) => {
-                if let Some(arg) = opt && arg == qc {
+                if let Some(arg) = opt
+                  && arg == qc
+                {
                   return Ok(db_engine::RefOrAgg::AggregateIndex(i));
                 }
               }
