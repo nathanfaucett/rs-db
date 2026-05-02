@@ -1,23 +1,5 @@
 # AGENTS.md
 
-## Overview
-
-- Monorepo layout: crates/ (Rust libraries), docs/ (design, spec, examples).
-- Core choices: default to `no_std` where possible; use GitHub Actions for CI.
-
-## Build & Tooling
-
-- Format: `cargo fmt --all -- --check`
-- Lint: `cargo clippy -D warnings` (with and without default features)
-- Build: `cargo build -p <crate> --no-default-features --all-targets`
-- Build with alloc: `cargo build -p <crate> --no-default-features --features alloc --all-targets`
-- Test: `cargo test -p <crate> --no-default-features`
-
-## Formatting & Linting
-
-- Run `cargo fmt --all` using `rustfmt.toml` formatting rules.
-- Enforce `clippy` policy via `cargo clippy -D warnings` and `clippy.toml` as needed.
-
 ## Patterns & Conventions
 
 - Default to `no_std`; enable `std` only when required (IO, threading, async runtimes).
@@ -41,18 +23,8 @@
 - Specify dependencies in full table form with `default-features = false` and enable only required features.
 - Group dependencies by logical category with a comment header, alphabetize within groups, and separate groups with a blank line.
 
-## Public API & Documentation
+## Code Style
 
-- Public APIs must include doc comments or examples.
-- Pass paths/config via environment/adapters; never hard-code paths or configuration.
-
-## Testing & Examples
-
-- Add or update tests/examples when behavior changes.
-- Keep small unit tests with the implementation file (for example, `src/foo.rs` contains `#[cfg(test)] mod tests { ... }`).
-- Integration tests should live under `tests/` (crate-level) or `crates/<crate>/tests/`.
-
-## Contribution & PR Guidance
-
-- PRs (including agent-generated changes) that place implementation code in `lib.rs`/`mod.rs` should be treated as non-compliant and rewritten before merge.
-- Follow the Build & Tooling commands and formatting/lint checks in CI before submitting PRs.
+- Follow Rust's standard formatting and style guidelines.
+- Use `clippy` for linting and adhere to its recommendations.
+- Use `rustfmt` for consistent code formatting.

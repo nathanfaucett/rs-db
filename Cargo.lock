@@ -305,6 +305,7 @@ dependencies = [
 name = "db-engine"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "db-core",
  "db-in-memory",
  "db-redb",

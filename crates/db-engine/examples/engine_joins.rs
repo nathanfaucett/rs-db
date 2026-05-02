@@ -3,11 +3,11 @@ use futures::executor::block_on;
 
 use db_engine::{ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, TableSchema};
 use db_engine::{JoinClause, JoinKind, JoinOn, QualifiedColumn, SelectOptions};
-use db_in_memory::InMemoryBTree;
+use db_in_memory::InMemoryNamedBTree;
 
 fn main() {
   block_on(async {
-    let store: InMemoryBTree<_, _> = InMemoryBTree::new();
+    let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
     let mut db = EngineDatabase::new(store);
 
     let users = TableSchema {

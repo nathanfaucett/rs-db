@@ -12,6 +12,7 @@ db-core = { path = "../db-core", default-features = false, features = [
   "test-helpers",
 ] }
 db-types = { path = "../db-types", default-features = false }
+async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }
 
 thiserror = { version = "1.0", default-features = false }

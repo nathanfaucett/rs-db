@@ -184,10 +184,10 @@ mod tests {
   #[test]
   fn engine_store_facade_insert_and_get_row() {
     block_on(async {
-      use crate::{EngineKey, EngineValue, StoreKey, StoreValue};
+      use crate::{EngineKey, EngineValue};
+      use db_in_memory::InMemoryNamedBTree;
 
-      let store: db_in_memory::InMemoryBTree<StoreKey, StoreValue> =
-        db_in_memory::InMemoryBTree::new();
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
       let facade = EngineStoreFacade::new(store.clone());
 
       let pk = EngineKey::from_values(vec![EngineValue::Integer(1)]);
@@ -210,10 +210,10 @@ mod tests {
   #[test]
   fn engine_store_facade_collect_table_rows() {
     block_on(async {
-      use crate::{EngineKey, EngineValue, StoreKey, StoreValue};
+      use crate::{EngineKey, EngineValue};
+      use db_in_memory::InMemoryNamedBTree;
 
-      let store: db_in_memory::InMemoryBTree<StoreKey, StoreValue> =
-        db_in_memory::InMemoryBTree::new();
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
       let facade = EngineStoreFacade::new(store.clone());
 
       let pk1 = EngineKey::from_values(vec![EngineValue::Integer(1)]);

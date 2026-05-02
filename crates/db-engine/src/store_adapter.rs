@@ -1,14 +1,20 @@
 #![allow(clippy::manual_async_fn)]
 
-use crate::index_maintainer::IndexMaintainer;
-use crate::{EngineError, EngineKey, EngineRow, IndexSchema, StoreKey, StoreValue, TableSchema};
+use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
+use async_stream::stream;
 use core::future::Future;
-use db_core::BTreeExecutor;
-use futures::{StreamExt, pin_mut};
+use db_core::{EngineValue, NamedTreeProvider, NamedTreeTransaction};
+use futures::{Stream, StreamExt, pin_mut};
 
 mod persistence;
 
 pub use persistence::EngineStoreTransaction;
+
+use persistence::{
+  INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_row, decode_table_schema_row,
+  encode_index_schema, encode_table_schema, index_tree, make_index_entry_key, row_tree,
+  split_index_entry_key,
+};
 
 pub trait EngineStore: Clone + Send + Sync + 'static {
   type Transaction: EngineStoreTransaction + Send + 'static;
@@ -16,148 +22,39 @@ pub trait EngineStore: Clone + Send + Sync + 'static {
   fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>>;
 }
 
-impl<T> EngineStore for T
+/// Engine transaction that routes operations to named trees via a
+/// `NamedTreeTransaction<EngineKey, EngineRow>`.
+pub struct NamedTreeEngineTransaction<T>
 where
-  T: Clone + db_core::StoragePort<StoreKey, StoreValue> + Send + Sync + 'static,
+  T: NamedTreeTransaction<EngineKey, EngineRow>,
 {
-  type Transaction = StoragePortTxn<<T as db_core::BTree<StoreKey, StoreValue>>::Transaction>;
-
-  fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
-    async move {
-      self
-        .transaction()
-        .await
-        .map(StoragePortTxn::new)
-        .map_err(EngineError::from)
-    }
-  }
-}
-
-/// Wrapper around an adapter transaction that exposes the engine-level
-/// `EngineStoreTransaction` API. This decouples engine code from requiring
-/// adapter transaction types to implement the trait directly.
-#[derive(Debug)]
-pub struct StoragePortTxn<T> {
   inner: T,
 }
 
-impl<T> StoragePortTxn<T> {
+impl<T> NamedTreeEngineTransaction<T>
+where
+  T: NamedTreeTransaction<EngineKey, EngineRow>,
+{
   pub fn new(inner: T) -> Self {
     Self { inner }
   }
 }
 
-impl<T> From<T> for StoragePortTxn<T> {
-  fn from(t: T) -> Self {
-    StoragePortTxn::new(t)
-  }
-}
-
-// Implement the lower-level BTree executor/transaction traits by delegating
-// to the wrapped adapter transaction. This keeps the wrapper compatible with
-// engine internals that still rely on low-level transaction behavior.
-impl<T> db_core::BTreeExecutor<StoreKey, StoreValue> for StoragePortTxn<T>
+impl<T> EngineStoreTransaction for NamedTreeEngineTransaction<T>
 where
-  T: db_core::BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
+  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
 {
-  fn get<'a, Q>(
-    &'a self,
-    key: Q,
-  ) -> impl Future<Output = Result<Option<StoreValue>, db_core::BTreeError>> + Send + 'a
-  where
-    StoreKey: Ord,
-    Q: core::borrow::Borrow<StoreKey> + Send + 'a,
-  {
-    self.inner.get(key)
-  }
-
-  fn insert(
-    &mut self,
-    key: StoreKey,
-    value: StoreValue,
-  ) -> impl Future<Output = Result<(), db_core::BTreeError>> + Send
-  where
-    StoreKey: Ord,
-  {
-    self.inner.insert(key, value)
-  }
-
-  fn remove<'a, Q>(
-    &'a mut self,
-    key: Q,
-  ) -> impl Future<Output = Result<Option<StoreValue>, db_core::BTreeError>> + Send + 'a
-  where
-    StoreKey: Ord,
-    Q: core::borrow::Borrow<StoreKey> + Send + 'a,
-  {
-    self.inner.remove(key)
-  }
-
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl futures::Stream<Item = Result<(StoreKey, StoreValue), db_core::BTreeError>> + Send + 'a
-  where
-    R: core::ops::RangeBounds<StoreKey> + Send + 'a,
-  {
-    self.inner.range(range)
-  }
-}
-
-impl<T> db_core::BTreeTransaction<StoreKey, StoreValue> for StoragePortTxn<T>
-where
-  T: db_core::BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
-{
-  fn commit(self) -> impl Future<Output = Result<(), db_core::BTreeError>> {
-    async move { self.inner.commit().await }
-  }
-
-  fn rollback(self) -> impl Future<Output = Result<(), db_core::BTreeError>> {
-    async move { self.inner.rollback().await }
-  }
-}
-
-impl<T> EngineStoreTransaction for StoragePortTxn<T>
-where
-  T: db_core::BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
-{
-  fn collect_table_rows<'a>(
-    &'a mut self,
-    table_name: &'a str,
-    predicate: Option<crate::EnginePredicate>,
-  ) -> impl Future<Output = Result<Vec<(EngineKey, EngineRow)>, EngineError>> + 'a {
-    async move {
-      let mut rows = Vec::new();
-      let stream = EngineStoreTransaction::range_table_rows(self, table_name);
-      pin_mut!(stream);
-
-      while let Some(item) = stream.next().await {
-        let (key, value) = item?;
-        if let StoreKey::TableRow { primary_key, .. } = key
-          && let StoreValue::Row(row) = value
-          && predicate
-            .as_ref()
-            .is_none_or(|predicate| predicate.matches(&row))
-        {
-          rows.push((primary_key, row));
-        }
-      }
-
-      Ok(rows)
-    }
-  }
-
   fn get_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
     primary_key: &'a EngineKey,
   ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
-      let key = StoreKey::table_row(table_name.to_string(), primary_key.clone());
-      match self.get(&key).await.map_err(EngineError::from)? {
-        Some(StoreValue::Row(row)) => Ok(Some(row)),
-        _ => Ok(None),
-      }
+      self
+        .inner
+        .get(&row_tree(table_name), primary_key)
+        .await
+        .map_err(EngineError::from)
     }
   }
 
@@ -168,29 +65,40 @@ where
     row: EngineRow,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let table_key = StoreKey::table_row(table_name.to_string(), primary_key);
       self
-        .insert(table_key, StoreValue::Row(row))
+        .inner
+        .insert(&row_tree(table_name), primary_key, row)
         .await
         .map_err(EngineError::from)
     }
   }
 
-  fn delete_row<'a>(
+  fn remove_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
     primary_key: &'a EngineKey,
-    row: &'a EngineRow,
-    indexes: &'a [IndexSchema],
-  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+  ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
-      let table_key = StoreKey::table_row(table_name.to_string(), primary_key.clone());
+      self
+        .inner
+        .remove(&row_tree(table_name), primary_key)
+        .await
+        .map_err(EngineError::from)
+    }
+  }
 
-      self.remove(&table_key).await.map_err(EngineError::from)?;
-
-      IndexMaintainer::remove_entries(self, indexes, row, primary_key).await?;
-
-      Ok(())
+  fn range_table_rows<'a>(
+    &'a self,
+    table_name: &'a str,
+  ) -> impl Stream<Item = Result<(EngineKey, EngineRow), EngineError>> + 'a {
+    let tree = row_tree(table_name);
+    let inner = &self.inner;
+    stream! {
+      let s = inner.range(&tree, ..);
+      pin_mut!(s);
+      while let Some(item) = s.next().await {
+        yield item.map_err(EngineError::from);
+      }
     }
   }
 
@@ -199,11 +107,28 @@ where
     schema: TableSchema,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let schema_key = StoreKey::table_schema(schema.name.clone());
+      let key = EngineKey::Scalar(EngineValue::Text(schema.name.clone()));
+      let value = encode_table_schema(&schema);
       self
-        .insert(schema_key, StoreValue::TableSchema(schema))
+        .inner
+        .insert(TABLE_SCHEMA_TREE, key, value)
         .await
         .map_err(EngineError::from)
+    }
+  }
+
+  fn remove_table_schema<'a>(
+    &'a mut self,
+    table_name: &'a str,
+  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+    async move {
+      let key = EngineKey::Scalar(EngineValue::Text(table_name.into()));
+      self
+        .inner
+        .remove(TABLE_SCHEMA_TREE, &key)
+        .await
+        .map_err(EngineError::from)?;
+      Ok(())
     }
   }
 
@@ -212,58 +137,106 @@ where
     schema: IndexSchema,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let schema_key = StoreKey::index_schema(schema.name.clone());
+      let key = EngineKey::Scalar(EngineValue::Text(schema.name.clone()));
+      let value = encode_index_schema(&schema);
       self
-        .insert(schema_key, StoreValue::IndexSchema(schema))
+        .inner
+        .insert(INDEX_SCHEMA_TREE, key, value)
         .await
         .map_err(EngineError::from)
+    }
+  }
+
+  fn remove_index_schema<'a>(
+    &'a mut self,
+    index_name: &'a str,
+  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+    async move {
+      let key = EngineKey::Scalar(EngineValue::Text(index_name.into()));
+      self
+        .inner
+        .remove(INDEX_SCHEMA_TREE, &key)
+        .await
+        .map_err(EngineError::from)?;
+      Ok(())
     }
   }
 
   fn load_catalog<'a>(
     &'a mut self,
   ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a {
-    async move { persistence::load_catalog_impl(self).await }
+    async move {
+      let mut tables = Vec::new();
+      {
+        let stream = self.inner.range(TABLE_SCHEMA_TREE, ..);
+        pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+          let (_key, row) = item.map_err(EngineError::from)?;
+          tables.push(decode_table_schema_row(&row)?);
+        }
+      }
+      let mut indexes = Vec::new();
+      {
+        let stream = self.inner.range(INDEX_SCHEMA_TREE, ..);
+        pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+          let (_key, row) = item.map_err(EngineError::from)?;
+          indexes.push(decode_index_schema_row(&row)?);
+        }
+      }
+      Ok((tables, indexes))
+    }
   }
 
-  fn lookup_index_rows<'a>(
+  fn insert_index_entry<'a>(
     &'a mut self,
-    table_name: &'a str,
     index: &'a IndexSchema,
-    predicate: &'a crate::query::EnginePredicate,
-  ) -> impl Future<Output = Result<Vec<EngineRow>, EngineError>> + 'a {
-    async move { persistence::lookup_index_rows_impl(self, table_name, index, predicate).await }
-  }
-
-  fn insert_raw<'a>(
-    &'a mut self,
-    key: StoreKey,
-    value: StoreValue,
+    index_key: &'a EngineKey,
+    row_pk: &'a EngineKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
-    async move { self.insert(key, value).await.map_err(EngineError::from) }
+    async move {
+      let composite = make_index_entry_key(index, index_key, row_pk);
+      self
+        .inner
+        .insert(&index_tree(&index.name), composite, Vec::new())
+        .await
+        .map_err(EngineError::from)
+    }
   }
 
-  fn remove_raw<'a, Q>(
+  fn delete_index_entry<'a>(
     &'a mut self,
-    key: Q,
-  ) -> impl Future<Output = Result<Option<StoreValue>, EngineError>> + 'a
-  where
-    Q: core::borrow::Borrow<StoreKey> + Send + 'a,
-  {
-    async move { self.remove(key).await.map_err(EngineError::from) }
+    index: &'a IndexSchema,
+    index_key: &'a EngineKey,
+    row_pk: &'a EngineKey,
+  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
+    async move {
+      let composite = make_index_entry_key(index, index_key, row_pk);
+      self
+        .inner
+        .remove(&index_tree(&index.name), &composite)
+        .await
+        .map_err(EngineError::from)?;
+      Ok(())
+    }
   }
 
-  fn range<'a, R>(
+  fn range_index_entries<'a>(
     &'a self,
-    range: R,
-  ) -> impl futures::Stream<Item = Result<(StoreKey, StoreValue), EngineError>> + 'a
-  where
-    R: core::ops::RangeBounds<StoreKey> + Send + 'a,
-  {
-    self
-      .inner
-      .range(range)
-      .map(|res| res.map_err(EngineError::from))
+    index: &'a IndexSchema,
+  ) -> impl Stream<Item = Result<(EngineKey, EngineKey), EngineError>> + 'a {
+    let tree = index_tree(&index.name);
+    let n = index.column_indices.len();
+    let inner = &self.inner;
+    stream! {
+      let s = inner.range(&tree, ..);
+      pin_mut!(s);
+      while let Some(item) = s.next().await {
+        yield item
+          .map(|(composite, _)| split_index_entry_key(&composite, n))
+          .map_err(EngineError::from);
+      }
+    }
   }
 
   fn commit(self) -> impl Future<Output = Result<(), EngineError>> {
@@ -275,16 +248,31 @@ where
   }
 }
 
+/// Blanket impl: any `NamedTreeProvider<EngineKey, EngineRow>` is a valid
+/// engine store.
+impl<T> EngineStore for T
+where
+  T: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static,
+{
+  type Transaction = NamedTreeEngineTransaction<T::Transaction>;
+
+  fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
+    async move {
+      self
+        .begin_transaction()
+        .await
+        .map(NamedTreeEngineTransaction::new)
+        .map_err(EngineError::from)
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{
-    ColumnSchema, EngineKey, EngineType, EngineValue, IndexSchema, StoreKey, StoreValue,
-    TableSchema,
-  };
-  use db_core::{BTree, BTreeExecutor};
-  use db_in_memory::InMemoryBTree;
-  use futures::executor::block_on;
+  use crate::{ColumnSchema, EngineKey, EngineType, EngineValue, IndexSchema, TableSchema};
+  use db_core::block_on;
+  use db_in_memory::InMemoryNamedBTree;
 
   fn sample_table_schema() -> TableSchema {
     TableSchema {
@@ -306,16 +294,13 @@ mod tests {
   #[test]
   fn load_catalog_returns_table_and_index_schemas() {
     block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
-      let mut tx = store.transaction().await.expect("open tx");
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut tx = store.engine_transaction().await.expect("open tx");
 
       let table_schema = sample_table_schema();
-      tx.insert(
-        StoreKey::table_schema(table_schema.name.clone()),
-        StoreValue::TableSchema(table_schema.clone()),
-      )
-      .await
-      .expect("insert table schema");
+      tx.insert_table_schema(table_schema.clone())
+        .await
+        .expect("insert table schema");
 
       let index_schema = IndexSchema {
         name: "users_name_idx".into(),
@@ -323,17 +308,11 @@ mod tests {
         column_indices: vec![1],
         unique: true,
       };
-
-      tx.insert(
-        StoreKey::index_schema(index_schema.name.clone()),
-        StoreValue::IndexSchema(index_schema.clone()),
-      )
-      .await
-      .expect("insert index schema");
-
-      let (tables, indexes) = persistence::load_catalog_impl(&mut tx)
+      tx.insert_index_schema(index_schema.clone())
         .await
-        .expect("load catalog");
+        .expect("insert index schema");
+
+      let (tables, indexes) = tx.load_catalog().await.expect("load catalog");
       assert_eq!(tables, vec![table_schema]);
       assert_eq!(indexes, vec![index_schema]);
     });
@@ -342,190 +321,37 @@ mod tests {
   #[test]
   fn lookup_index_rows_returns_matching_rows() {
     block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
       let mut tx = store.engine_transaction().await.expect("open tx");
 
       let row = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];
       let primary_key = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      tx.insert(
-        StoreKey::table_row("users".into(), primary_key.clone()),
-        StoreValue::Row(row.clone()),
-      )
-      .await
-      .expect("insert row");
 
-      let index_schema = IndexSchema {
-        name: "users_name_idx".into(),
-        table_name: "users".into(),
-        column_indices: vec![1],
-        unique: true,
-      };
-
-      let index_key = index_schema.key_for(&row).expect("build index key");
-      tx.insert(
-        StoreKey::index_entry(index_schema.name.clone(), index_key.clone(), primary_key),
-        StoreValue::IndexEntry,
-      )
-      .await
-      .expect("insert index entry");
-
-      let predicate = crate::query::EnginePredicate::Equals(1, EngineValue::Text("Alice".into()));
-      let rows = persistence::lookup_index_rows_impl(&mut tx, "users", &index_schema, &predicate)
-        .await
-        .expect("lookup index rows");
-
-      assert_eq!(rows, vec![row]);
-    });
-  }
-
-  #[test]
-  fn engine_transaction_insert_commit_and_get_table_row() {
-    block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
-      let mut tx = store.engine_transaction().await.expect("open tx");
-
-      let pk = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let row = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];
-
-      tx.insert_table_row("users", pk.clone(), row.clone())
-        .await
-        .expect("insert table row");
-
-      super::persistence::EngineStoreTransaction::commit(tx)
-        .await
-        .expect("commit");
-
-      let mut tx2 = store.engine_transaction().await.expect("open tx");
-      let got = tx2
-        .get_table_row("users", &pk)
-        .await
-        .expect("get table row");
-      assert_eq!(got, Some(row));
-    });
-  }
-
-  #[test]
-  fn engine_transaction_index_entry_helpers() {
-    block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
-      let mut tx = store.engine_transaction().await.expect("open tx");
-
-      let index_schema = IndexSchema {
-        name: "users_name_idx".into(),
-        table_name: "users".into(),
-        column_indices: vec![1],
-        unique: true,
-      };
-
-      let index_key = EngineKey::from_values(vec![EngineValue::Text("Alice".into())]);
-      let primary_key_a = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let primary_key_b = EngineKey::from_values(vec![EngineValue::Integer(2)]);
-
-      tx.insert_index_entry(&index_schema, &index_key, &primary_key_a)
-        .await
-        .expect("insert index entry");
-
-      assert!(
-        tx.find_conflicting_index_entry(&index_schema, &index_key, &primary_key_a)
-          .await
-          .expect("find conflicting entry")
-          .is_none()
-      );
-
-      assert_eq!(
-        tx.find_conflicting_index_entry(&index_schema, &index_key, &primary_key_b)
-          .await
-          .expect("find conflicting entry"),
-        Some(primary_key_a)
-      );
-    });
-  }
-
-  #[test]
-  fn engine_transaction_range_helpers() {
-    block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
-      let mut tx = store.engine_transaction().await.expect("open tx");
-
-      let user_pk = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let user_row = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];
-      tx.insert_table_row("users", user_pk.clone(), user_row.clone())
-        .await
-        .expect("insert user row");
-
-      let order_pk = EngineKey::from_values(vec![EngineValue::Integer(10)]);
-      let order_row = vec![EngineValue::Integer(10), EngineValue::Text("OrderA".into())];
-      tx.insert_table_row("orders", order_pk.clone(), order_row.clone())
-        .await
-        .expect("insert order row");
-
-      let rows = {
-        let mut rows = Vec::new();
-        let stream = tx.range_table_rows("users");
-        futures::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-          let (key, value) = item.expect("range failed");
-          if let StoreKey::TableRow { primary_key, .. } = key
-            && let StoreValue::Row(row) = value
-          {
-            rows.push((primary_key, row));
-          }
-        }
-        rows
-      };
-
-      assert_eq!(rows, vec![(user_pk.clone(), user_row.clone())]);
-
-      let index_schema = IndexSchema {
-        name: "users_name_idx".into(),
-        table_name: "users".into(),
-        column_indices: vec![1],
-        unique: true,
-      };
-      let index_key = EngineKey::from_values(vec![EngineValue::Text("Alice".into())]);
-      tx.insert_index_entry(&index_schema, &index_key, &user_pk)
-        .await
-        .expect("insert index entry");
-
-      let entries = {
-        let mut entries = Vec::new();
-        let stream = tx.range_index_entries(&index_schema);
-        futures::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-          let (key, value) = item.expect("range failed");
-          if let StoreKey::IndexEntry { row_pk, .. } = key
-            && let StoreValue::IndexEntry = value
-          {
-            entries.push(row_pk);
-          }
-        }
-        entries
-      };
-
-      assert_eq!(entries, vec![user_pk]);
-    });
-  }
-
-  #[test]
-  fn engine_transaction_get_and_insert_row_helper() {
-    block_on(async {
-      let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
-      let mut tx = store.engine_transaction().await.expect("open tx");
-
-      let pk = EngineKey::from_values(vec![EngineValue::Integer(2)]);
-      let row = vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())];
-
-      tx.insert_row("users", pk.clone(), row.clone())
+      tx.insert_table_row("users", primary_key.clone(), row.clone())
         .await
         .expect("insert row");
 
-      super::persistence::EngineStoreTransaction::commit(tx)
+      let index_schema = IndexSchema {
+        name: "users_name_idx".into(),
+        table_name: "users".into(),
+        column_indices: vec![1],
+        unique: true,
+      };
+      let index_key = index_schema.key_for(&row).expect("build index key");
+      tx.insert_index_entry(&index_schema, &index_key, &primary_key)
         .await
-        .expect("commit");
+        .expect("insert index entry");
 
-      let mut tx2 = store.engine_transaction().await.expect("open tx");
-      let got = tx2.get_row("users", &pk).await.expect("get row");
-      assert_eq!(got, Some(row));
+      tx.commit().await.expect("commit");
+
+      let mut tx2 = store.engine_transaction().await.expect("open tx2");
+      let predicate = crate::query::EnginePredicate::Equals(1, EngineValue::Text("Alice".into()));
+      let rows = tx2
+        .lookup_index_rows("users", &index_schema, &predicate)
+        .await
+        .expect("lookup");
+
+      assert_eq!(rows, vec![row]);
     });
   }
 }

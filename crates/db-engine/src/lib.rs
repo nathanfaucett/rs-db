@@ -16,7 +16,7 @@ pub use query::{
 };
 pub use query::{EnginePredicate, EngineQuery, EngineResult};
 pub use schema_resolver::SchemaResolver;
-pub use store_codec::{StoreKeyCodec, StoreValueCodec};
+pub use store_codec::{EngineKeyCodec, EngineRowCodec};
 pub use store_facade::EngineStoreFacade;
 pub use store_facade::StoreFacade;
-pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue, StoreKey, StoreValue};
+pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue};

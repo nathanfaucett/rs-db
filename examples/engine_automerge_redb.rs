@@ -8,8 +8,6 @@ use futures::executor::block_on;
 
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db::Database;
-#[cfg(all(feature = "automerge", feature = "redb"))]
-use std::path::PathBuf;
 
 #[cfg(all(feature = "automerge", feature = "redb"))]
 fn main() {

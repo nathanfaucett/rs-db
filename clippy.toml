@@ -1,5 +1,5 @@
 # Cognitive complexity threshold
-cognitive-complexity-threshold = 30
+cognitive-complexity-threshold = 15
 
 # Documentation
 missing-docs-in-crate-items = false
@@ -20,7 +20,7 @@ lint-commented-code = true
 single-char-binding-names-threshold = 4
 
 # Too many arguments threshold
-too-many-arguments-threshold = 7
+too-many-arguments-threshold = 10
 
 # Too many lines threshold
 too-many-lines-threshold = 100

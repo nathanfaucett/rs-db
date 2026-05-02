@@ -162,11 +162,11 @@ impl EngineCatalog {
 
     for index in &indexes {
       tx.remove_index_entries(index).await?;
-      tx.remove_index_schema(index.name.clone()).await?;
+      tx.remove_index_schema(&index.name).await?;
     }
 
     tx.remove_table_rows(table_name).await?;
-    tx.remove_table_schema(table_name.to_string()).await?;
+    tx.remove_table_schema(table_name).await?;
     tx.commit().await?;
 
     self.tables.remove(table_name);
@@ -194,7 +194,7 @@ impl EngineCatalog {
     let index = self.indexes.get(index_name).cloned().unwrap();
     let mut tx = store.engine_transaction().await?;
     tx.remove_index_entries(&index).await?;
-    tx.remove_index_schema(index_name.to_string()).await?;
+    tx.remove_index_schema(index_name).await?;
     tx.commit().await?;
 
     self.indexes.remove(index_name);

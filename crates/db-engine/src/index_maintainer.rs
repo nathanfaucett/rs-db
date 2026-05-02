@@ -44,22 +44,4 @@ impl IndexMaintainer {
 
     Ok(())
   }
-
-  pub(crate) async fn remove_entries<TX>(
-    tx: &mut TX,
-    indexes: &[IndexSchema],
-    row: &EngineRow,
-    primary_key: &EngineKey,
-  ) -> Result<(), EngineError>
-  where
-    TX: EngineStoreTransaction,
-  {
-    for index in indexes {
-      let index_key = index.key_for(row)?;
-      tx.delete_index_entry(index, &index_key, primary_key)
-        .await?;
-    }
-
-    Ok(())
-  }
 }

@@ -9,6 +9,7 @@ mod codec_primitives;
 #[cfg(feature = "registry")]
 mod codec_registry;
 mod engine_types;
+mod named_tree;
 mod port;
 mod range_merge;
 mod simple_key;
@@ -16,7 +17,7 @@ mod simple_key;
 mod test_helpers;
 mod transaction_patch;
 
-pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
+pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeResult, BTreeTransaction};
 pub use codec::BufferSink;
 pub use codec::{
   CURRENT_CODEC_VERSION, DecodeError, FastKeyCodec, FastValueCodec, KeyCodec, KeyScratch,
@@ -45,3 +46,5 @@ pub use codec_registry::{CodecRegistry, EncodedComparator, TypedComparatorAdapte
 pub use test_helpers::{MockBTree, block_on};
 
 pub use port::{IntoStoragePort, StoragePort};
+
+pub use named_tree::{NamedTreeProvider, NamedTreeTransaction};

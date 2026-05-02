@@ -9,10 +9,12 @@ use core::fmt;
 
 #[cfg(feature = "automerge")]
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-use db_engine::{EngineDatabase, EngineQuery, EngineResult, EngineValue, StoreKey, StoreValue};
-use db_in_memory::InMemoryBTree;
+use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow, EngineValue};
 #[cfg(feature = "redb")]
-use db_redb::REDBBTree;
+use db_engine::{EngineKeyCodec, EngineRowCodec};
+use db_in_memory::{InMemoryBTree, InMemoryNamedBTree};
+#[cfg(feature = "redb")]
+use db_redb::{REDBBTree, REDBNamedBTree};
 #[cfg(feature = "redb")]
 use std::path::Path;
 
@@ -45,17 +47,25 @@ impl From<db_engine::EngineError> for DatabaseError {
 /// Simple row type reusing EngineValue
 pub type Row = Vec<EngineValue>;
 
+type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, EngineRow>;
+#[cfg(feature = "redb")]
+type RedbEngineStore = REDBNamedBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>;
+#[cfg(all(feature = "automerge", feature = "redb"))]
+type RedbAutomergeStore = AutomergeEngineStore<
+  REDBBTree<DocumentChangeKey, AutomergeEntry, DocumentChangeKeyCodec, VecBytesCodec>,
+>;
+
 /// Opaque database handle.
 pub enum Database {
-  InMemory(EngineDatabase<InMemoryBTree<StoreKey, StoreValue>>),
+  InMemory(EngineDatabase<InMemoryEngineStore>),
   #[cfg(feature = "automerge")]
   AutomergeInMemory(
     EngineDatabase<AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>>,
   ),
   #[cfg(all(feature = "automerge", feature = "redb"))]
-  AutomergeRedb(EngineDatabase<AutomergeEngineStore<REDBBTree<DocumentChangeKey, AutomergeEntry>>>),
+  AutomergeRedb(EngineDatabase<RedbAutomergeStore>),
   #[cfg(feature = "redb")]
-  Redb(EngineDatabase<REDBBTree<StoreKey, StoreValue>>),
+  Redb(EngineDatabase<RedbEngineStore>),
 }
 
 impl SchemaResolver for Database {
@@ -75,7 +85,7 @@ impl SchemaResolver for Database {
 impl Database {
   /// Open an in-memory database (dev/test convenience).
   pub async fn open_in_memory() -> Result<Self, DatabaseError> {
-    let store: InMemoryBTree<StoreKey, StoreValue> = InMemoryBTree::new();
+    let store = InMemoryNamedBTree::new();
     let engine = EngineDatabase::new(store);
     Ok(Self::InMemory(engine))
   }
@@ -94,8 +104,13 @@ impl Database {
     path: impl AsRef<Path>,
     table_name: &'static str,
   ) -> Result<Self, DatabaseError> {
-    let backend = REDBBTree::<DocumentChangeKey, AutomergeEntry>::open(path, table_name)
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    let backend = REDBBTree::<
+      DocumentChangeKey,
+      AutomergeEntry,
+      DocumentChangeKeyCodec,
+      VecBytesCodec,
+    >::open_with_codecs(path, table_name)
+    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let store = AutomergeEngineStore::new_with_backend(backend);
     let engine = EngineDatabase::new(store);
     Ok(Self::AutomergeRedb(engine))
@@ -104,10 +119,13 @@ impl Database {
   #[cfg(feature = "redb")]
   pub async fn open_in_redb(
     path: impl AsRef<Path>,
-    table_name: &'static str,
+    _table_name: &'static str,
   ) -> Result<Self, DatabaseError> {
     let store =
-      REDBBTree::open(path, table_name).map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+      REDBNamedBTree::<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>::open_with_codecs(
+        path,
+      )
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let engine = EngineDatabase::new(store);
     Ok(Self::Redb(engine))
   }
@@ -230,7 +248,7 @@ impl Database {
 
 /// Transaction wrapper delegating to EngineTransaction
 pub enum Transaction<'db> {
-  InMemory(db_engine::EngineTransaction<'db, InMemoryBTree<StoreKey, StoreValue>>),
+  InMemory(db_engine::EngineTransaction<'db, InMemoryEngineStore>),
   #[cfg(feature = "automerge")]
   AutomergeInMemory(
     db_engine::EngineTransaction<
@@ -239,14 +257,9 @@ pub enum Transaction<'db> {
     >,
   ),
   #[cfg(all(feature = "automerge", feature = "redb"))]
-  AutomergeRedb(
-    db_engine::EngineTransaction<
-      'db,
-      AutomergeEngineStore<REDBBTree<DocumentChangeKey, AutomergeEntry>>,
-    >,
-  ),
+  AutomergeRedb(db_engine::EngineTransaction<'db, RedbAutomergeStore>),
   #[cfg(feature = "redb")]
-  Redb(db_engine::EngineTransaction<'db, REDBBTree<StoreKey, StoreValue>>),
+  Redb(db_engine::EngineTransaction<'db, RedbEngineStore>),
 }
 
 impl<'db> Transaction<'db> {

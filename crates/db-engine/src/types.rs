@@ -1,5 +1,4 @@
 pub use db_core::{EngineKey, EngineRow, EngineType, EngineValue};
-pub use db_types::store::{StoreKey, StoreValue};
 
 use db_core::BTreeError;
 use thiserror::Error;

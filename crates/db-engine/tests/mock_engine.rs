@@ -1,14 +1,14 @@
 use futures::executor::block_on;
 
-use db_core::MockBTree;
 use db_engine::{
   ColumnSchema, EngineDatabase, EnginePredicate, EngineQuery, EngineType, EngineValue, TableSchema,
 };
+use db_in_memory::InMemoryNamedBTree;
 
 #[test]
 fn engine_works_with_mock_btree() {
   block_on(async {
-    let store: MockBTree<_, _> = MockBTree::new();
+    let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
     let mut db = EngineDatabase::new(store);
 
     let schema = TableSchema {

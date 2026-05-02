@@ -5,6 +5,7 @@ use core::{
 };
 use db_core::{BTree, BTreeExecutor, BTreeTransaction};
 use futures::{StreamExt, pin_mut};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -20,6 +21,25 @@ fn block_on<F: Future>(future: F) -> F::Output {
       Poll::Pending => core::hint::spin_loop(),
     }
   }
+}
+
+fn redb_contract_path() -> std::path::PathBuf {
+  static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+  let mut path = std::env::temp_dir();
+  let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+  let nanos = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("clock before unix epoch")
+    .as_nanos();
+
+  path.push(format!(
+    "aicacia_btree_contract_{}_{}_{}.db",
+    std::process::id(),
+    nanos,
+    id
+  ));
+  path
 }
 
 async fn commit_and_rollback_contract<S>(mut store: S)
@@ -78,13 +98,7 @@ fn inmemory_transaction_range_merges_contract() {
 #[test]
 fn redb_transaction_commit_and_rollback_contract() {
   block_on(async {
-    // Use a temp file path under std::env::temp_dir()
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-      "aicacia_btree_contract_{}.db",
-      std::time::SystemTime::now().elapsed().unwrap().as_nanos()
-    ));
-
+    let path = redb_contract_path();
     let store = db_redb::REDBBTree::<u64, u64>::open(&path, "contract_table").expect("open redb");
     let _ = std::fs::remove_file(&path);
     commit_and_rollback_contract(store).await;
@@ -96,12 +110,7 @@ fn redb_transaction_commit_and_rollback_contract() {
 #[test]
 fn redb_transaction_range_merges_contract() {
   block_on(async {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-      "aicacia_btree_contract_{}.db",
-      std::time::SystemTime::now().elapsed().unwrap().as_nanos()
-    ));
-
+    let path = redb_contract_path();
     let store = db_redb::REDBBTree::<u64, u64>::open(&path, "contract_table").expect("open redb");
     let _ = std::fs::remove_file(&path);
     transaction_range_merges_contract(store).await;

@@ -20,10 +20,10 @@ pub struct RedbKeyCodec;
 pub struct RedbValueCodec;
 
 #[derive(Clone, Copy)]
-struct EncodedKey<K, C>(PhantomData<(K, C)>);
+pub(crate) struct EncodedKey<K, C>(PhantomData<(K, C)>);
 
 #[derive(Clone, Copy)]
-struct EncodedValue<V, C>(PhantomData<(V, C)>);
+pub(crate) struct EncodedValue<V, C>(PhantomData<(V, C)>);
 
 impl<K, C> Debug for EncodedKey<K, C> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -261,6 +261,13 @@ where
   pub fn from_database_with_codecs(db: Database, table_name: &'static str) -> Self {
     Self {
       db: Arc::new(db),
+      table_definition: TableDefinition::new(table_name),
+    }
+  }
+
+  pub(crate) fn from_arc_with_codecs(db: Arc<Database>, table_name: &'static str) -> Self {
+    Self {
+      db,
       table_definition: TableDefinition::new(table_name),
     }
   }

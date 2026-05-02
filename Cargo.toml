@@ -79,7 +79,7 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }     # optional, might cause more false positives
+nursery = { level = "warn", priority = -1 }
 
 # These lints are from the `restriction` lint group and prevent specific
 # constructs being used in source code in order to drive up consistency,
