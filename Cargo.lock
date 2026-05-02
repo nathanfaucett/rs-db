@@ -268,6 +268,7 @@ dependencies = [
  "db-redb",
  "db-sql-to-engine",
  "futures",
+ "redb",
  "thiserror 1.0.69",
 ]
 

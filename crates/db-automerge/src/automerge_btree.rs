@@ -44,7 +44,7 @@ pub struct DocumentChangeKey {
   pub change_hash: [u8; 32],
 }
 
-pub type AutomergeEntry = alloc::vec::Vec<u8>;
+pub type AutomergeEntry = Vec<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentType {

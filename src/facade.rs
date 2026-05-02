@@ -51,9 +51,8 @@ type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, EngineRow>;
 #[cfg(feature = "redb")]
 type RedbEngineStore = REDBNamedBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>;
 #[cfg(all(feature = "automerge", feature = "redb"))]
-type RedbAutomergeStore = AutomergeEngineStore<
-  REDBBTree<DocumentChangeKey, AutomergeEntry, DocumentChangeKeyCodec, VecBytesCodec>,
->;
+type RedbAutomergeStore =
+  AutomergeEngineStore<REDBBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>>;
 
 /// Opaque database handle.
 pub enum Database {

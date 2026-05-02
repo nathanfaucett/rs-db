@@ -20,7 +20,7 @@ workspace = true
 [features]
 default = ["std", "automerge"]
 std = []
-redb = ["std", "db-redb"]
+redb = ["std", "db-redb", "dep:redb"]
 automerge = ["std", "db-automerge"]
 
 [lib]
@@ -42,6 +42,9 @@ db-sql-to-engine = { path = "crates/db-sql-to-engine", default-features = false,
 db-core = { path = "crates/db-core", default-features = false, features = [
     "std",
 ] }
+redb = { version = "4.0", default-features = false, features = [
+], optional = true }
+
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 [workspace]
@@ -105,6 +108,7 @@ unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 unneeded_field_pattern = "warn"
 unused_result_ok = "warn"
+absolute_paths = "warn"
 
 # May cause issues with structured logging otherwise.
 literal_string_with_formatting_args = "allow"
