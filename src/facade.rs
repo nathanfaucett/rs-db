@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 #[cfg(feature = "automerge")]
-use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
+use db_automerge::{
+  AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentChangeKeyCodec, VecBytesCodec,
+};
 use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow, EngineValue};
 #[cfg(feature = "redb")]
 use db_engine::{EngineKeyCodec, EngineRowCodec};
@@ -51,8 +53,9 @@ type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, EngineRow>;
 #[cfg(feature = "redb")]
 type RedbEngineStore = REDBNamedBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>;
 #[cfg(all(feature = "automerge", feature = "redb"))]
-type RedbAutomergeStore =
-  AutomergeEngineStore<REDBBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>>;
+type RedbAutomergeStore = AutomergeEngineStore<
+  REDBBTree<DocumentChangeKey, Vec<u8>, DocumentChangeKeyCodec, VecBytesCodec>,
+>;
 
 /// Opaque database handle.
 pub enum Database {
