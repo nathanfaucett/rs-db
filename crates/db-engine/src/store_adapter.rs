@@ -3,7 +3,8 @@
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
 use async_stream::stream;
 use core::future::Future;
-use db_core::{EngineValue, NamedTreeProvider, NamedTreeTransaction};
+use db_core::{NamedTreeProvider, NamedTreeTransaction};
+use db_types::EngineValue;
 use futures::{Stream, StreamExt, pin_mut};
 
 mod persistence;
@@ -345,7 +346,13 @@ mod tests {
       tx.commit().await.expect("commit");
 
       let mut tx2 = store.engine_transaction().await.expect("open tx2");
-      let predicate = crate::query::EnginePredicate::Equals(1, EngineValue::Text("Alice".into()));
+      let predicate = crate::query::QualifiedPredicate::Equals(
+        crate::query::QualifiedOperand::Column(crate::query::QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        }),
+        crate::query::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
+      );
       let rows = tx2
         .lookup_index_rows("users", &index_schema, &predicate)
         .await

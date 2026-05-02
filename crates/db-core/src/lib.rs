@@ -8,7 +8,6 @@ mod codec_helpers;
 mod codec_primitives;
 #[cfg(feature = "registry")]
 mod codec_registry;
-mod engine_types;
 mod named_tree;
 mod port;
 mod range_merge;
@@ -29,8 +28,6 @@ pub use codec_helpers::{decode_from_slice, decode_with_version, encode_with_vers
 pub use codec_primitives::*;
 
 pub use range_merge::merge_range_maps;
-
-pub use engine_types::{EngineKey, EngineRow, EngineType, EngineValue};
 
 pub use simple_key::{IntegerI64Codec, Tuple2Codec, Utf8Codec};
 

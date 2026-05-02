@@ -1,6 +1,6 @@
 use crate::{
-  EngineRow, EngineValue, query::EnginePredicate, query::EngineQuery, query::QualifiedColumn,
-  query::QualifiedPredicate, query::SelectOptions,
+  EngineRow, EngineValue, query::EngineQuery, query::QualifiedColumn, query::QualifiedPredicate,
+  query::SelectOptions,
 };
 
 #[allow(dead_code)]
@@ -19,11 +19,11 @@ pub enum LogicalPlan {
   Update {
     table: String,
     assignments: Vec<(usize, EngineValue)>,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   },
   Delete {
     table: String,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   },
 }
 

@@ -4,17 +4,127 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-use db_core::*;
+use db_core::{
+  BufferSink, Cursor, DecodeError, canonical_f64_bits_into_sink, decode_bool, decode_bytes,
+  decode_len, decode_string, decode_usize, encode_bool_into_sink, encode_bytes_into_sink,
+  encode_i64_into_sink, encode_len_into_sink, encode_string_into_sink, encode_usize_into_sink,
+  encode_with_version,
+};
 
+use crate::engine_types::{EngineKey, EngineRow, EngineType, EngineValue};
 use crate::schema::{ColumnSchema, IndexSchema, TableSchema};
 use crate::store::{StoreKey, StoreValue};
 
-pub fn encode_column_schema_into_sink<S: db_core::BufferSink>(sink: &mut S, value: &ColumnSchema) {
+// Engine type/value/key/row codec (moved from db-core) -----------------
+
+pub fn encode_engine_type_into_sink<S: BufferSink>(sink: &mut S, value: &EngineType) {
+  let tag = match value {
+    EngineType::Integer => 0,
+    EngineType::Float => 1,
+    EngineType::Text => 2,
+    EngineType::Blob => 3,
+  };
+  sink.push_bytes(&[tag]);
+}
+
+pub fn decode_engine_type(cursor: &mut Cursor<'_>) -> Result<EngineType, DecodeError> {
+  match cursor.read_u8()? {
+    0 => Ok(EngineType::Integer),
+    1 => Ok(EngineType::Float),
+    2 => Ok(EngineType::Text),
+    3 => Ok(EngineType::Blob),
+    _ => Err(DecodeError::Malformed),
+  }
+}
+
+pub fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValue) {
+  match value {
+    EngineValue::Null => sink.push_bytes(&[0]),
+    EngineValue::Integer(integer) => {
+      sink.push_bytes(&[1]);
+      encode_i64_into_sink(sink, *integer);
+    }
+    EngineValue::Float(float) => {
+      sink.push_bytes(&[2]);
+      canonical_f64_bits_into_sink(sink, *float);
+    }
+    EngineValue::Text(text) => {
+      sink.push_bytes(&[3]);
+      encode_string_into_sink(sink, text);
+    }
+    EngineValue::Blob(bytes) => {
+      sink.push_bytes(&[4]);
+      encode_bytes_into_sink(sink, bytes);
+    }
+  }
+}
+
+pub fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  match cursor.read_u8()? {
+    0 => Ok(EngineValue::Null),
+    1 => Ok(EngineValue::Integer(cursor.read_i64()?)),
+    2 => Ok(EngineValue::Float(f64::from_bits(cursor.read_u64()?))),
+    3 => Ok(EngineValue::Text(decode_string(cursor)?)),
+    4 => Ok(EngineValue::Blob(decode_bytes(cursor)?)),
+    _ => Err(DecodeError::Malformed),
+  }
+}
+
+pub fn encode_engine_row_into_sink<S: BufferSink>(sink: &mut S, row: &EngineRow) {
+  encode_len_into_sink(sink, row.len());
+  for value in row {
+    encode_engine_value_into_sink(sink, value);
+  }
+}
+
+pub fn decode_engine_row(cursor: &mut Cursor<'_>) -> Result<EngineRow, DecodeError> {
+  let len = decode_len(cursor)?;
+  let mut out = Vec::with_capacity(len);
+  for _ in 0..len {
+    out.push(decode_engine_value(cursor)?);
+  }
+  Ok(out)
+}
+
+pub fn encode_engine_key_into_sink<S: BufferSink>(sink: &mut S, value: &EngineKey) {
+  match value {
+    EngineKey::Scalar(scalar) => {
+      sink.push_bytes(&[0]);
+      encode_engine_value_into_sink(sink, scalar);
+    }
+    EngineKey::Tuple(values) => {
+      sink.push_bytes(&[1]);
+      encode_len_into_sink(sink, values.len());
+      for value in values {
+        encode_engine_value_into_sink(sink, value);
+      }
+    }
+  }
+}
+
+pub fn decode_engine_key(cursor: &mut Cursor<'_>) -> Result<EngineKey, DecodeError> {
+  match cursor.read_u8()? {
+    0 => Ok(EngineKey::Scalar(decode_engine_value(cursor)?)),
+    1 => {
+      let len = decode_len(cursor)?;
+      let mut values = Vec::with_capacity(len);
+      for _ in 0..len {
+        values.push(decode_engine_value(cursor)?);
+      }
+      Ok(EngineKey::Tuple(values))
+    }
+    _ => Err(DecodeError::Malformed),
+  }
+}
+
+// Schema codec ---------------------------------------------------------
+
+pub fn encode_column_schema_into_sink<S: BufferSink>(sink: &mut S, value: &ColumnSchema) {
   encode_string_into_sink(sink, &value.name);
   encode_engine_type_into_sink(sink, &value.data_type);
 }
 
-pub fn encode_table_schema_into_sink<S: db_core::BufferSink>(sink: &mut S, value: &TableSchema) {
+pub fn encode_table_schema_into_sink<S: BufferSink>(sink: &mut S, value: &TableSchema) {
   encode_string_into_sink(sink, &value.name);
   encode_len_into_sink(sink, value.columns.len());
   for column in &value.columns {
@@ -26,7 +136,7 @@ pub fn encode_table_schema_into_sink<S: db_core::BufferSink>(sink: &mut S, value
   }
 }
 
-pub fn encode_index_schema_into_sink<S: db_core::BufferSink>(sink: &mut S, value: &IndexSchema) {
+pub fn encode_index_schema_into_sink<S: BufferSink>(sink: &mut S, value: &IndexSchema) {
   encode_string_into_sink(sink, &value.name);
   encode_string_into_sink(sink, &value.table_name);
   encode_len_into_sink(sink, value.column_indices.len());

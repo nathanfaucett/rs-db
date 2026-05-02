@@ -11,6 +11,7 @@ use std::string::String;
 use db_core::BTreeTransaction;
 use futures::{StreamExt, pin_mut};
 
+use crate::engine_types::{EngineKey, EngineValue};
 use crate::schema::{IndexSchema, TableSchema};
 use crate::store::{StoreKey, StoreValue};
 
@@ -86,8 +87,8 @@ where
 {
   let start = StoreKey::index_entry(
     String::from(index_name),
-    db_core::EngineKey::Scalar(db_core::EngineValue::Null),
-    db_core::EngineKey::Scalar(db_core::EngineValue::Null),
+    EngineKey::Scalar(EngineValue::Null),
+    EngineKey::Scalar(EngineValue::Null),
   );
   tx.range(start..).take_while(move |res| {
     futures::future::ready(match res {
@@ -103,8 +104,8 @@ where
 pub async fn lookup_index_row_pks_impl<T>(
   tx: &mut T,
   index_name: &str,
-  index_key: &db_core::EngineKey,
-) -> Result<Vec<db_core::EngineKey>, db_core::BTreeError>
+  index_key: &EngineKey,
+) -> Result<Vec<EngineKey>, db_core::BTreeError>
 where
   T: BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
 {

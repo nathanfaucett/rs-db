@@ -5,7 +5,7 @@ use std::string::String;
 
 // `Vec` is not referenced directly in this file; avoid unused-import warnings.
 
-use db_core::{EngineKey, EngineRow};
+use crate::{EngineKey, EngineRow};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(

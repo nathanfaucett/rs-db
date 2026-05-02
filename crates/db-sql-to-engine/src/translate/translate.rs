@@ -531,13 +531,6 @@ pub fn translate_statement(
             && !options.distinct;
 
           if want_simple {
-            // try to convert qualified predicate into EnginePredicate if possible
-            let engine_pred = if let Some(qp) = qualified_pred {
-              qualified_to_engine_pred(&qp, &base_table).ok()
-            } else {
-              None
-            };
-
             // simple projection must only reference base_table columns
             let mut simple_proj: Vec<usize> = Vec::new();
             for qc in projection_qc {
@@ -551,7 +544,7 @@ pub fn translate_statement(
             return Ok(db_engine::EngineQuery::select_simple(
               base_table,
               simple_proj,
-              engine_pred,
+              qualified_pred,
             ));
           }
 
@@ -676,13 +669,6 @@ fn expr_to_qualified_predicate(
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::QualifiedPredicate, TranslateError> {
   predicates_module::expr_to_qualified_predicate(expr, alias_map, table_schemas, resolver, mapper)
-}
-
-fn qualified_to_engine_pred(
-  pred: &db_engine::QualifiedPredicate,
-  base_table: &str,
-) -> Result<db_engine::EnginePredicate, TranslateError> {
-  predicates_module::qualified_to_engine_pred(pred, base_table)
 }
 
 fn object_name_to_string(name: &ObjectName) -> String {

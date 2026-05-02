@@ -11,7 +11,7 @@ use std::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-use db_core::{EngineKey, EngineRow, EngineType, EngineValue};
+use crate::{EngineKey, EngineRow, EngineType, EngineValue};
 
 /// Errors returned by schema-level validation in the `db-types` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]

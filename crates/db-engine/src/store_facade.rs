@@ -76,7 +76,7 @@ where
   pub async fn collect_table_rows(
     &self,
     table_name: &str,
-    predicate: Option<crate::EnginePredicate>,
+    predicate: Option<crate::QualifiedPredicate>,
   ) -> Result<Vec<(EngineKey, EngineRow)>, EngineError> {
     let mut tx = self.store.engine_transaction().await?;
 

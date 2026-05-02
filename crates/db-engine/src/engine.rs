@@ -1,9 +1,9 @@
 use crate::{
   EngineError, EngineRow, EngineValue, IndexSchema, TableSchema,
   engine_kernel::{EngineKernel, EngineWriteTxn},
-  query::EnginePredicate,
   query::EngineQuery,
   query::EngineResult,
+  query::QualifiedPredicate,
   store_adapter::EngineStore,
 };
 
@@ -62,7 +62,7 @@ where
     &self,
     table_name: &str,
     projection: &[usize],
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<EngineResult, EngineError> {
     self.kernel.read(table_name, projection, predicate).await
   }
@@ -86,7 +86,7 @@ where
   pub async fn delete_rows(
     &mut self,
     table_name: &str,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
     self.inner.delete(table_name, predicate).await
   }
@@ -95,7 +95,7 @@ where
     &mut self,
     table_name: &str,
     assignments: Vec<(usize, EngineValue)>,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
     self.inner.update(table_name, assignments, predicate).await
   }
@@ -112,10 +112,13 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::query::{JoinClause, JoinKind, JoinOn, QualifiedColumn, SelectOptions};
+  use crate::query::{
+    JoinClause, JoinKind, JoinOn, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
+    SelectOptions,
+  };
   use crate::{
-    ColumnSchema, EngineError, EngineKey, EngineKeyCodec, EnginePredicate, EngineQuery, EngineRow,
-    EngineRowCodec, EngineType, EngineValue, IndexSchema, TableSchema,
+    ColumnSchema, EngineError, EngineKey, EngineKeyCodec, EngineQuery, EngineRow, EngineRowCodec,
+    EngineType, EngineValue, IndexSchema, TableSchema,
   };
   use db_in_memory::InMemoryNamedBTree;
   use db_redb::REDBNamedBTree;
@@ -137,6 +140,16 @@ mod tests {
         .as_nanos()
     ));
     path
+  }
+
+  fn eq_pred(table: &str, column_index: usize, value: EngineValue) -> QualifiedPredicate {
+    QualifiedPredicate::Equals(
+      QualifiedOperand::Column(QualifiedColumn {
+        table: table.into(),
+        column_index,
+      }),
+      QualifiedOperand::Value(value),
+    )
   }
 
   #[test]
@@ -176,7 +189,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![1],
-          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+          Some(eq_pred("users", 0, EngineValue::Integer(1))),
         ))
         .await
         .expect("execute select query");
@@ -223,7 +236,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "measurements".into(),
           vec![1],
-          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+          Some(eq_pred("measurements", 0, EngineValue::Integer(1))),
         ))
         .await
         .expect("execute select query");
@@ -271,7 +284,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "files".into(),
           vec![1],
-          Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+          Some(eq_pred("files", 0, EngineValue::Integer(1))),
         ))
         .await
         .expect("execute select query");
@@ -335,7 +348,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![0, 1],
-          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+          Some(eq_pred("users", 1, EngineValue::Text("Bob".into()))),
         ))
         .await
         .expect("execute select query");
@@ -1450,7 +1463,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![0, 1],
-          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+          Some(eq_pred("users", 1, EngineValue::Text("Bob".into()))),
         ))
         .await
         .expect("execute select query");
@@ -1518,7 +1531,7 @@ mod tests {
         .execute(EngineQuery::Update {
           table: "users".into(),
           assignments: vec![(1, EngineValue::Text("Robert".into()))],
-          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(2))),
+          predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
         })
         .await
         .expect("update row");
@@ -1527,10 +1540,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![0, 1],
-          Some(EnginePredicate::Equals(
-            1,
-            EngineValue::Text("Robert".into()),
-          )),
+          Some(eq_pred("users", 1, EngineValue::Text("Robert".into()))),
         ))
         .await
         .expect("select updated row");
@@ -1547,7 +1557,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![0, 1],
-          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+          Some(eq_pred("users", 1, EngineValue::Text("Bob".into()))),
         ))
         .await
         .expect("select stale indexed row");
@@ -1609,7 +1619,7 @@ mod tests {
         .execute(EngineQuery::Update {
           table: "users".into(),
           assignments: vec![(1, EngineValue::Text("Alice".into()))],
-          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(2))),
+          predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
         })
         .await
         .expect_err("update duplicate unique index row");
@@ -1661,7 +1671,7 @@ mod tests {
       database
         .execute(EngineQuery::Delete {
           table: "users".into(),
-          predicate: Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
         })
         .await
         .expect("delete first row");
@@ -1791,7 +1801,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![0, 1],
-          Some(EnginePredicate::Equals(1, EngineValue::Text("Bob".into()))),
+          Some(eq_pred("users", 1, EngineValue::Text("Bob".into()))),
         ))
         .await
         .expect("select row from reopened redb-backed engine");

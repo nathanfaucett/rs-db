@@ -2,9 +2,13 @@ use std::cmp::Ordering;
 use std::vec::Vec;
 
 use db_core::{
-  EngineKey, EngineRow, FastKeyCodec, KeyCodec, KeyScratch, ValueCodec, decode_engine_key,
-  decode_engine_row, decode_with_version, encode_engine_key_into_sink, encode_engine_row_into_sink,
-  encode_version_into_sink,
+  FastKeyCodec, KeyCodec, KeyScratch, ValueCodec, decode_with_version, encode_version_into_sink,
+};
+use db_types::{
+  EngineKey, EngineRow,
+  codec::{
+    decode_engine_key, decode_engine_row, encode_engine_key_into_sink, encode_engine_row_into_sink,
+  },
 };
 
 /// Encodes and compares engine keys for codec-backed named-tree backends.
@@ -83,7 +87,7 @@ impl ValueCodec<EngineRow> for EngineRowCodec {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_core::EngineValue;
+  use db_types::EngineValue;
 
   #[test]
   fn engine_key_round_trips() {

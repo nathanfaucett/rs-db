@@ -4,9 +4,11 @@
 extern crate alloc;
 
 pub mod codec;
+pub mod engine_types;
 pub mod persistence;
 pub mod schema;
 pub mod store;
 
+pub use engine_types::{EngineKey, EngineRow, EngineType, EngineValue};
 pub use schema::{ColumnSchema, IndexSchema, TableSchema};
 pub use store::{StoreKey, StoreValue};

@@ -10,15 +10,18 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
+use db_core::encode_with_version;
 use db_core::{
-  BTree, BTreeError, BTreeExecutor, BTreeTransaction, Cursor, DecodeError, EngineKey, EngineRow,
-  NamedTreeProvider, NamedTreeTransaction,
-};
-use db_core::{
-  decode_engine_key, decode_engine_row, encode_engine_key_into_sink, encode_engine_row_into_sink,
-  encode_with_version,
+  BTree, BTreeError, BTreeExecutor, BTreeTransaction, Cursor, DecodeError, NamedTreeProvider,
+  NamedTreeTransaction,
 };
 use db_types::codec::{decode_store_key, decode_store_value, encode_store_key, encode_store_value};
+use db_types::{
+  EngineKey, EngineRow,
+  codec::{
+    decode_engine_key, decode_engine_row, encode_engine_key_into_sink, encode_engine_row_into_sink,
+  },
+};
 use db_types::{StoreKey, StoreValue};
 
 use base64::{Engine as _, engine::general_purpose};
@@ -971,8 +974,9 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_core::{EngineValue, NamedTreeProvider, NamedTreeTransaction, block_on};
+  use db_core::{NamedTreeProvider, NamedTreeTransaction, block_on};
   use db_in_memory::InMemoryBTree;
+  use db_types::EngineValue;
 
   fn store() -> AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>> {
     AutomergeEngineStore::new_with_backend(InMemoryBTree::new())

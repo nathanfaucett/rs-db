@@ -14,7 +14,7 @@ pub use query::{
   Aggregate, HavingPredicate, JoinClause, JoinKind, JoinOn, OrderBy, QualifiedColumn,
   QualifiedOperand, QualifiedPredicate, RefOrAgg, SelectOptions, SortDirection,
 };
-pub use query::{EnginePredicate, EngineQuery, EngineResult};
+pub use query::{EngineQuery, EngineResult};
 pub use schema_resolver::SchemaResolver;
 pub use store_codec::{EngineKeyCodec, EngineRowCodec};
 pub use store_facade::EngineStoreFacade;

@@ -49,7 +49,7 @@ impl EngineCatalog {
   pub(crate) fn find_index_for_predicate(
     &self,
     table_name: &str,
-    predicate: &crate::query::EnginePredicate,
+    predicate: &crate::query::QualifiedPredicate,
   ) -> Option<IndexSchema> {
     self
       .indexes_for_table(table_name)

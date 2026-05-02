@@ -179,7 +179,7 @@ pub trait EngineStoreTransaction: Send + 'static {
   fn collect_table_rows<'a>(
     &'a mut self,
     table_name: &'a str,
-    predicate: Option<crate::EnginePredicate>,
+    predicate: Option<crate::QualifiedPredicate>,
   ) -> impl Future<Output = Result<Vec<(EngineKey, EngineRow)>, EngineError>> + 'a {
     async move {
       let mut rows = Vec::new();
@@ -187,7 +187,10 @@ pub trait EngineStoreTransaction: Send + 'static {
       pin_mut!(stream);
       while let Some(item) = stream.next().await {
         let (pk, row) = item?;
-        if predicate.as_ref().is_none_or(|p| p.matches(&row)) {
+        if predicate
+          .as_ref()
+          .is_none_or(|p| p.matches_row(table_name, &row))
+        {
           rows.push((pk, row));
         }
       }
@@ -281,7 +284,7 @@ pub trait EngineStoreTransaction: Send + 'static {
     &'a mut self,
     table_name: &'a str,
     index: &'a IndexSchema,
-    predicate: &'a crate::query::EnginePredicate,
+    predicate: &'a crate::query::QualifiedPredicate,
   ) -> impl Future<Output = Result<Vec<EngineRow>, EngineError>> + 'a {
     async move {
       let index_key = predicate
@@ -333,7 +336,7 @@ pub trait EngineStoreTransaction: Send + 'static {
   fn get_table_rows<'a>(
     &'a mut self,
     table_name: &'a str,
-    predicate: Option<crate::EnginePredicate>,
+    predicate: Option<crate::QualifiedPredicate>,
   ) -> impl Future<Output = Result<Vec<(EngineKey, EngineRow)>, EngineError>> + 'a {
     self.collect_table_rows(table_name, predicate)
   }

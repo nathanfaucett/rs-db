@@ -1,104 +1,5 @@
 use crate::{EngineKey, EngineRow, EngineValue, IndexSchema};
 
-#[derive(Debug, Clone)]
-pub enum EnginePredicate {
-  Equals(usize, EngineValue),
-  NotEquals(usize, EngineValue),
-  LessThan(usize, EngineValue),
-  LessThanOrEquals(usize, EngineValue),
-  GreaterThan(usize, EngineValue),
-  GreaterThanOrEquals(usize, EngineValue),
-  IsNull(usize),
-  IsNotNull(usize),
-  And(Box<EnginePredicate>, Box<EnginePredicate>),
-  Or(Box<EnginePredicate>, Box<EnginePredicate>),
-  Not(Box<EnginePredicate>),
-}
-
-impl EnginePredicate {
-  pub fn matches(&self, row: &EngineRow) -> bool {
-    match self {
-      EnginePredicate::Equals(index, value) => row
-        .get(*index)
-        .map(|column| column == value)
-        .unwrap_or(false),
-      EnginePredicate::NotEquals(index, value) => row
-        .get(*index)
-        .map(|column| column != value)
-        .unwrap_or(false),
-      EnginePredicate::LessThan(index, value) => row
-        .get(*index)
-        .map(|column| column < value)
-        .unwrap_or(false),
-      EnginePredicate::LessThanOrEquals(index, value) => row
-        .get(*index)
-        .map(|column| column <= value)
-        .unwrap_or(false),
-      EnginePredicate::GreaterThan(index, value) => row
-        .get(*index)
-        .map(|column| column > value)
-        .unwrap_or(false),
-      EnginePredicate::GreaterThanOrEquals(index, value) => row
-        .get(*index)
-        .map(|column| column >= value)
-        .unwrap_or(false),
-      EnginePredicate::IsNull(index) => row
-        .get(*index)
-        .map(|column| matches!(column, EngineValue::Null))
-        .unwrap_or(false),
-      EnginePredicate::IsNotNull(index) => row
-        .get(*index)
-        .map(|column| !matches!(column, EngineValue::Null))
-        .unwrap_or(false),
-      EnginePredicate::And(left, right) => left.matches(row) && right.matches(row),
-      EnginePredicate::Or(left, right) => left.matches(row) || right.matches(row),
-      EnginePredicate::Not(predicate) => !predicate.matches(row),
-    }
-  }
-
-  pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {
-    let mut values = vec![None; index.column_indices.len()];
-    self.fill_index_key_values(index, &mut values)?;
-    if values.iter().all(Option::is_some) {
-      let values = values.into_iter().map(Option::unwrap).collect();
-      Some(EngineKey::from_values(values))
-    } else {
-      None
-    }
-  }
-
-  fn fill_index_key_values(
-    &self,
-    index: &IndexSchema,
-    values: &mut [Option<EngineValue>],
-  ) -> Option<()> {
-    match self {
-      EnginePredicate::Equals(position, value) => {
-        if let Some((slot, _)) = index
-          .column_indices
-          .iter()
-          .enumerate()
-          .find(|(_, index)| *index == position)
-        {
-          if let Some(existing) = &values[slot]
-            && existing != value
-          {
-            return None;
-          }
-          values[slot] = Some(value.clone());
-        }
-        Some(())
-      }
-      EnginePredicate::And(left, right) => {
-        left.fill_index_key_values(index, values)?;
-        right.fill_index_key_values(index, values)?;
-        Some(())
-      }
-      _ => None,
-    }
-  }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QualifiedColumn {
   pub table: String,
@@ -180,6 +81,120 @@ pub enum QualifiedPredicate {
   Not(Box<QualifiedPredicate>),
 }
 
+fn eval_operand_single(op: &QualifiedOperand, table: &str, row: &EngineRow) -> Option<EngineValue> {
+  match op {
+    QualifiedOperand::Value(v) => Some(v.clone()),
+    QualifiedOperand::Column(qc) if qc.table == table => row.get(qc.column_index).cloned(),
+    QualifiedOperand::Column(_) => None,
+  }
+}
+
+impl QualifiedPredicate {
+  pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
+    match self {
+      QualifiedPredicate::Equals(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a == b)
+      }
+      QualifiedPredicate::NotEquals(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a != b)
+      }
+      QualifiedPredicate::LessThan(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a < b)
+      }
+      QualifiedPredicate::LessThanOrEquals(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a <= b)
+      }
+      QualifiedPredicate::GreaterThan(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a > b)
+      }
+      QualifiedPredicate::GreaterThanOrEquals(l, r) => {
+        let lv = eval_operand_single(l, table, row);
+        let rv = eval_operand_single(r, table, row);
+        matches!((lv, rv), (Some(a), Some(b)) if a >= b)
+      }
+      QualifiedPredicate::IsNull(qc) if qc.table == table => row
+        .get(qc.column_index)
+        .map(|v| matches!(v, EngineValue::Null))
+        .unwrap_or(false),
+      QualifiedPredicate::IsNull(_) => false,
+      QualifiedPredicate::IsNotNull(qc) if qc.table == table => row
+        .get(qc.column_index)
+        .map(|v| !matches!(v, EngineValue::Null))
+        .unwrap_or(false),
+      QualifiedPredicate::IsNotNull(_) => false,
+      QualifiedPredicate::InList {
+        expr,
+        list,
+        negated,
+      } if expr.table == table => {
+        let found = row
+          .get(expr.column_index)
+          .map(|v| list.iter().any(|x| x == v))
+          .unwrap_or(false);
+        if *negated { !found } else { found }
+      }
+      QualifiedPredicate::InList { .. } => false,
+      QualifiedPredicate::InSubquery { .. } => false,
+      QualifiedPredicate::And(l, r) => l.matches_row(table, row) && r.matches_row(table, row),
+      QualifiedPredicate::Or(l, r) => l.matches_row(table, row) || r.matches_row(table, row),
+      QualifiedPredicate::Not(p) => !p.matches_row(table, row),
+    }
+  }
+
+  pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {
+    let mut values = vec![None; index.column_indices.len()];
+    self.fill_index_key_values(index, &mut values)?;
+    if values.iter().all(Option::is_some) {
+      let values = values.into_iter().map(Option::unwrap).collect();
+      Some(EngineKey::from_values(values))
+    } else {
+      None
+    }
+  }
+
+  fn fill_index_key_values(
+    &self,
+    index: &IndexSchema,
+    values: &mut [Option<EngineValue>],
+  ) -> Option<()> {
+    match self {
+      QualifiedPredicate::Equals(QualifiedOperand::Column(qc), QualifiedOperand::Value(value))
+      | QualifiedPredicate::Equals(QualifiedOperand::Value(value), QualifiedOperand::Column(qc)) => {
+        if let Some((slot, _)) = index
+          .column_indices
+          .iter()
+          .enumerate()
+          .find(|&(_, &col)| col == qc.column_index)
+        {
+          if let Some(existing) = &values[slot]
+            && existing != value
+          {
+            return None;
+          }
+          values[slot] = Some(value.clone());
+        }
+        Some(())
+      }
+      QualifiedPredicate::And(left, right) => {
+        left.fill_index_key_values(index, values)?;
+        right.fill_index_key_values(index, values)?;
+        Some(())
+      }
+      _ => None,
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub enum RefOrAgg {
   Column(QualifiedColumn),
@@ -228,11 +243,11 @@ pub enum EngineQuery {
   Update {
     table: String,
     assignments: Vec<(usize, EngineValue)>,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   },
   Delete {
     table: String,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   },
 }
 
@@ -248,37 +263,10 @@ impl EngineResult {
 }
 
 impl EngineQuery {
-  fn qualified_column(table: &str, index: usize) -> QualifiedColumn {
-    QualifiedColumn {
-      table: table.into(),
-      column_index: index,
-    }
-  }
-
-  fn column_operand(table: &str, index: usize) -> QualifiedOperand {
-    QualifiedOperand::Column(Self::qualified_column(table, index))
-  }
-
-  fn value_operand(value: EngineValue) -> QualifiedOperand {
-    QualifiedOperand::Value(value)
-  }
-
-  fn binary_engine_pred(
-    table: &str,
-    index: usize,
-    value: EngineValue,
-    ctor: fn(QualifiedOperand, QualifiedOperand) -> QualifiedPredicate,
-  ) -> QualifiedPredicate {
-    ctor(
-      Self::column_operand(table, index),
-      Self::value_operand(value),
-    )
-  }
-
   pub fn select_simple(
     table: String,
     projection: Vec<usize>,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Self {
     let proj = projection
       .into_iter()
@@ -288,51 +276,11 @@ impl EngineQuery {
       })
       .collect();
 
-    let qpred = predicate.map(|p| Self::engine_pred_to_qualified(p, &table));
-
     EngineQuery::Select {
       table,
       projection: proj,
-      predicate: qpred,
+      predicate,
       options: Box::new(SelectOptions::default()),
-    }
-  }
-
-  fn engine_pred_to_qualified(pred: EnginePredicate, table: &str) -> QualifiedPredicate {
-    match pred {
-      EnginePredicate::Equals(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::Equals)
-      }
-      EnginePredicate::NotEquals(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::NotEquals)
-      }
-      EnginePredicate::LessThan(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::LessThan)
-      }
-      EnginePredicate::LessThanOrEquals(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::LessThanOrEquals)
-      }
-      EnginePredicate::GreaterThan(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::GreaterThan)
-      }
-      EnginePredicate::GreaterThanOrEquals(i, v) => {
-        Self::binary_engine_pred(table, i, v, QualifiedPredicate::GreaterThanOrEquals)
-      }
-      EnginePredicate::IsNull(i) => QualifiedPredicate::IsNull(Self::qualified_column(table, i)),
-      EnginePredicate::IsNotNull(i) => {
-        QualifiedPredicate::IsNotNull(Self::qualified_column(table, i))
-      }
-      EnginePredicate::And(l, r) => QualifiedPredicate::And(
-        Box::new(Self::engine_pred_to_qualified(*l, table)),
-        Box::new(Self::engine_pred_to_qualified(*r, table)),
-      ),
-      EnginePredicate::Or(l, r) => QualifiedPredicate::Or(
-        Box::new(Self::engine_pred_to_qualified(*l, table)),
-        Box::new(Self::engine_pred_to_qualified(*r, table)),
-      ),
-      EnginePredicate::Not(p) => {
-        QualifiedPredicate::Not(Box::new(Self::engine_pred_to_qualified(*p, table)))
-      }
     }
   }
 }

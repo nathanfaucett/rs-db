@@ -44,27 +44,6 @@ fn binary_predicate(
   })
 }
 
-fn extract_column_value(
-  left: &db_engine::QualifiedOperand,
-  right: &db_engine::QualifiedOperand,
-  base_table: &str,
-) -> Result<(usize, db_engine::EngineValue), TranslateError> {
-  match (left, right) {
-    (db_engine::QualifiedOperand::Column(qc), db_engine::QualifiedOperand::Value(v))
-    | (db_engine::QualifiedOperand::Value(v), db_engine::QualifiedOperand::Column(qc)) => {
-      if qc.table != base_table {
-        return Err(TranslateError::UnsupportedFeature(
-          "predicate references non-base table".into(),
-        ));
-      }
-      Ok((qc.column_index, v.clone()))
-    }
-    _ => Err(TranslateError::UnsupportedFeature(
-      "cannot convert predicate to engine predicate".into(),
-    )),
-  }
-}
-
 /// Convert a sqlparser expression into a qualified predicate (used for JOINs, HAVING, etc.).
 pub fn expr_to_qualified_predicate(
   expr: &SqlExpr,
@@ -183,66 +162,6 @@ pub fn expr_to_qualified_predicate(
     )?)),
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported WHERE expression".into(),
-    )),
-  }
-}
-
-pub fn qualified_to_engine_pred(
-  pred: &db_engine::QualifiedPredicate,
-  base_table: &str,
-) -> Result<db_engine::EnginePredicate, TranslateError> {
-  match pred {
-    db_engine::QualifiedPredicate::Equals(l, r) => {
-      let (index, value) = extract_column_value(l, r, base_table)?;
-      Ok(db_engine::EnginePredicate::Equals(index, value))
-    }
-    db_engine::QualifiedPredicate::NotEquals(l, r) => {
-      let (index, value) = extract_column_value(l, r, base_table)?;
-      Ok(db_engine::EnginePredicate::NotEquals(index, value))
-    }
-    db_engine::QualifiedPredicate::And(l, r) => Ok(db_engine::EnginePredicate::And(
-      Box::new(qualified_to_engine_pred(l, base_table)?),
-      Box::new(qualified_to_engine_pred(r, base_table)?),
-    )),
-    db_engine::QualifiedPredicate::Or(l, r) => Ok(db_engine::EnginePredicate::Or(
-      Box::new(qualified_to_engine_pred(l, base_table)?),
-      Box::new(qualified_to_engine_pred(r, base_table)?),
-    )),
-    db_engine::QualifiedPredicate::Not(p) => Ok(db_engine::EnginePredicate::Not(Box::new(
-      qualified_to_engine_pred(p, base_table)?,
-    ))),
-    db_engine::QualifiedPredicate::InList {
-      expr,
-      list,
-      negated,
-    } => {
-      if expr.table != base_table {
-        return Err(TranslateError::UnsupportedFeature(
-          "IN list references non-base table".into(),
-        ));
-      }
-      // convert to OR of equals
-      let mut it = list.iter();
-      if let Some(first) = it.next() {
-        let mut pred = if *negated {
-          db_engine::EnginePredicate::Not(Box::new(db_engine::EnginePredicate::Equals(
-            expr.column_index,
-            first.clone(),
-          )))
-        } else {
-          db_engine::EnginePredicate::Equals(expr.column_index, first.clone())
-        };
-        for v in it {
-          let p = db_engine::EnginePredicate::Equals(expr.column_index, v.clone());
-          pred = db_engine::EnginePredicate::Or(Box::new(pred), Box::new(p));
-        }
-        Ok(pred)
-      } else {
-        Err(TranslateError::UnsupportedFeature("empty IN list".into()))
-      }
-    }
-    _ => Err(TranslateError::UnsupportedFeature(
-      "unsupported qualification for engine predicate".into(),
     )),
   }
 }

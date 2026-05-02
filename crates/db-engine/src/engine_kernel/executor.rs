@@ -4,7 +4,7 @@ use super::plan::LogicalPlan;
 use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, index_maintainer::IndexMaintainer,
-  query::EnginePredicate,
+  query::QualifiedPredicate,
 };
 
 #[derive(Debug)]
@@ -60,7 +60,7 @@ where
   pub(crate) async fn delete(
     &mut self,
     table_name: &str,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
     self.catalog.table(table_name)?;
     let indexes = self.catalog.indexes_for_table(table_name);
@@ -78,7 +78,7 @@ where
     &mut self,
     table_name: &str,
     assignments: Vec<(usize, EngineValue)>,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
     let table = self.catalog.table(table_name)?.clone();
     if assignments.is_empty() {
@@ -139,7 +139,7 @@ where
   pub(crate) async fn collect_table_rows(
     tx: &mut S::Transaction,
     table_name: &str,
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<Vec<(EngineKey, EngineRow)>, EngineError> {
     tx.collect_table_rows(table_name, predicate).await
   }

@@ -4,8 +4,8 @@ use futures::future::FutureExt;
 
 use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{
-  EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, TableSchema, query::EnginePredicate,
-  query::EngineQuery, query::EngineResult, query::HavingPredicate, query::JoinKind, query::JoinOn,
+  EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, TableSchema, query::EngineQuery,
+  query::EngineResult, query::HavingPredicate, query::JoinKind, query::JoinOn,
   query::QualifiedColumn, query::QualifiedOperand, query::QualifiedPredicate, query::RefOrAgg,
   query::SelectOptions,
 };
@@ -404,7 +404,7 @@ where
     &self,
     table_name: &str,
     projection: &[usize],
-    predicate: Option<EnginePredicate>,
+    predicate: Option<QualifiedPredicate>,
   ) -> Result<EngineResult, EngineError> {
     self.table(table_name)?;
 

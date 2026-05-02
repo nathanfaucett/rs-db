@@ -1,7 +1,8 @@
 use futures::executor::block_on;
 
 use db_engine::{
-  ColumnSchema, EngineDatabase, EnginePredicate, EngineQuery, EngineType, EngineValue, TableSchema,
+  ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, QualifiedColumn,
+  QualifiedOperand, QualifiedPredicate, TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
 
@@ -39,7 +40,13 @@ fn engine_works_with_mock_btree() {
       .execute(EngineQuery::select_simple(
         "items".into(),
         vec![1],
-        Some(EnginePredicate::Equals(0, EngineValue::Integer(1))),
+        Some(QualifiedPredicate::Equals(
+          QualifiedOperand::Column(QualifiedColumn {
+            table: "items".into(),
+            column_index: 0,
+          }),
+          QualifiedOperand::Value(EngineValue::Integer(1)),
+        )),
       ))
       .await
       .expect("select");
