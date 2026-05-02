@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, Cursor, DecodeError};
-use db_in_memory::InMemoryBTree;
 use db_types::codec::{decode_store_key, decode_store_value, encode_store_key, encode_store_value};
 use db_types::{StoreKey, StoreValue};
 
@@ -38,14 +37,6 @@ where
     Self { automerge }
   }
 }
-
-pub fn new_in_memory_store()
--> AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>> {
-  AutomergeEngineStore::new_with_backend(InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new())
-}
-
-pub type AutomergeEngineStoreInMemory =
-  AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
 
 fn make_doc_id(prefix: &str, name: &str) -> Uuid {
   let mut hasher = Sha256::new();
@@ -322,10 +313,12 @@ impl<B> BTreeTransaction<StoreKey, StoreValue> for AutomergeEngineStoreTransacti
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
+  #[allow(clippy::manual_async_fn)]
   fn commit(self) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send {
     async move { self.inner.commit().await }
   }
 
+  #[allow(clippy::manual_async_fn)]
   fn rollback(self) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send {
     async move { self.inner.rollback().await }
   }

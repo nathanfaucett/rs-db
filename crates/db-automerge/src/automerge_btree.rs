@@ -233,6 +233,7 @@ where
   }
 }
 
+#[allow(clippy::needless_lifetimes)]
 impl<B> BTreeExecutor<Uuid, AutoCommit> for AutomergeBTree<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
@@ -484,6 +485,7 @@ where
 
 /// Encoded-backed Automerge wrapper: stores encoded keys/values in `B` and
 /// uses provided codecs to convert to/from `DocumentChangeKey`/`AutomergeEntry`.
+#[allow(dead_code)]
 pub struct AutomergeBTreeEncoded<B, KC = DocumentChangeKeyCodec, VC = VecBytesCodec>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
@@ -523,6 +525,7 @@ where
     }
   }
 
+  #[allow(dead_code)]
   fn decode_key<KC2: db_core::ValueCodec<DocumentChangeKey>>(
     data: &[u8],
   ) -> Result<DocumentChangeKey, db_core::DecodeError> {
@@ -530,6 +533,7 @@ where
   }
 
   /// Helper: compute change_hash = timestamp_prefix (8 bytes BE) + sha256(payload) truncated to 24 bytes
+  #[allow(dead_code)]
   fn make_change_hash(payload: &[u8]) -> [u8; 32] {
     let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
       Ok(d) => d.as_nanos(),
@@ -640,6 +644,7 @@ impl db_core::ValueCodec<AutomergeEntry> for VecBytesCodec {
   }
 }
 
+#[allow(clippy::needless_lifetimes)]
 impl<B, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,

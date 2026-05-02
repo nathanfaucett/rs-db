@@ -18,7 +18,7 @@ workspace = true
 
 
 [features]
-default = ["std"]
+default = ["std", "automerge"]
 std = []
 redb = ["std", "db-redb"]
 automerge = ["std", "db-automerge"]

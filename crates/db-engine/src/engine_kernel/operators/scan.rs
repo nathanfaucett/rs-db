@@ -112,10 +112,7 @@ impl Scan {
         matches!((lv, rv), (Some(lv), Some(rv)) if lv >= rv)
       }
       QualifiedPredicate::IsNull(qc) => {
-        match operand_value(&QualifiedOperand::Column(qc.clone())) {
-          Some(EngineValue::Null) => true,
-          _ => false,
-        }
+        matches!(operand_value(&QualifiedOperand::Column(qc.clone())), Some(EngineValue::Null))
       }
       QualifiedPredicate::IsNotNull(qc) => {
         match operand_value(&QualifiedOperand::Column(qc.clone())) {

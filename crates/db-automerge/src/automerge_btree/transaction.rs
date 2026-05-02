@@ -239,6 +239,7 @@ where
   }
 }
 
+#[allow(clippy::needless_lifetimes)]
 impl<T> BTreeExecutor<Uuid, AutoCommit> for AutomergeTransaction<T>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry> + Send,
@@ -560,6 +561,7 @@ where
   }
 }
 
+#[allow(clippy::needless_lifetimes)]
 impl<T, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,

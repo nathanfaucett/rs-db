@@ -1,14 +1,25 @@
 // Example: register two tables, insert rows, and run a SQL JOIN select
-// Requires the `automerge` feature; this example fails to build otherwise.
+// Uses an Automerge-backed store persisted in `redb` when built with the
+// `automerge` and `redb` features. When those features are not enabled, the
+// dummy `main` prints an informational message so the example crate still
+// compiles.
+#[cfg(all(feature = "automerge", feature = "redb"))]
 use futures::executor::block_on;
 
+#[cfg(all(feature = "automerge", feature = "redb"))]
 use db::Database;
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use std::path::PathBuf;
 
+#[cfg(all(feature = "automerge", feature = "redb"))]
 fn main() {
   block_on(async {
-    let mut db = Database::open_automerge_in_memory()
+    let mut path = std::env::temp_dir();
+    path.push("aicacia_automerge_redb.db");
+
+    let mut db = Database::open_automerge_with_redb(path, "automerge_store")
       .await
-      .expect("open automerge db (in-memory)");
+      .expect("open automerge redb");
 
     // Create tables via SQL using the facade.
     db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
@@ -42,4 +53,9 @@ fn main() {
       println!("row: {:?}", row);
     }
   });
+}
+
+#[cfg(not(all(feature = "automerge", feature = "redb")))]
+fn main() {
+  eprintln!("example requires features: automerge + redb; build with --features 'automerge redb'");
 }

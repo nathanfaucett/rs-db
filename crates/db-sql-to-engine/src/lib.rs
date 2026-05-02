@@ -3,6 +3,7 @@
 pub mod core;
 pub mod engine_adapter;
 pub mod ir;
+#[allow(clippy::module_inception)]
 pub mod translate;
 
 pub use core::Translator;

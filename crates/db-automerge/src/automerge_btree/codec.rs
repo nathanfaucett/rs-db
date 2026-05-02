@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use super::{AutomergeEntry, DocumentChangeKey, DocumentType};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DocumentKeyCodec;
 
@@ -58,6 +59,7 @@ impl KeyCodec<DocumentChangeKey> for DocumentKeyCodec {
   }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AutomergeValueCodec;
 

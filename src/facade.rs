@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 #[cfg(feature = "automerge")]
-use db_automerge::{AutomergeEngineStoreInMemory, new_in_memory_store};
+use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 use db_engine::{EngineDatabase, EngineQuery, EngineResult, EngineValue, StoreKey, StoreValue};
 use db_in_memory::InMemoryBTree;
 #[cfg(feature = "redb")]
@@ -49,7 +49,11 @@ pub type Row = Vec<EngineValue>;
 pub enum Database {
   InMemory(EngineDatabase<InMemoryBTree<StoreKey, StoreValue>>),
   #[cfg(feature = "automerge")]
-  Automerge(EngineDatabase<AutomergeEngineStoreInMemory>),
+  AutomergeInMemory(
+    EngineDatabase<AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>>,
+  ),
+  #[cfg(all(feature = "automerge", feature = "redb"))]
+  AutomergeRedb(EngineDatabase<AutomergeEngineStore<REDBBTree<DocumentChangeKey, AutomergeEntry>>>),
   #[cfg(feature = "redb")]
   Redb(EngineDatabase<REDBBTree<StoreKey, StoreValue>>),
 }
@@ -59,7 +63,9 @@ impl SchemaResolver for Database {
     match self {
       Database::InMemory(engine) => engine.describe_table(name),
       #[cfg(feature = "automerge")]
-      Database::Automerge(engine) => engine.describe_table(name),
+      Database::AutomergeInMemory(engine) => engine.describe_table(name),
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb(engine) => engine.describe_table(name),
       #[cfg(feature = "redb")]
       Database::Redb(engine) => engine.describe_table(name),
     }
@@ -76,10 +82,23 @@ impl Database {
 
   /// Open an Automerge-backed database (feature-gated).
   #[cfg(feature = "automerge")]
-  pub async fn open_automerge() -> Result<Self, DatabaseError> {
-    let store = new_in_memory_store();
+  pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
+    let backend = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
+    let store = AutomergeEngineStore::new_with_backend(backend);
     let engine = EngineDatabase::new(store);
-    Ok(Self::Automerge(engine))
+    Ok(Self::AutomergeInMemory(engine))
+  }
+
+  #[cfg(all(feature = "automerge", feature = "redb"))]
+  pub async fn open_automerge_with_redb(
+    path: impl AsRef<Path>,
+    table_name: &'static str,
+  ) -> Result<Self, DatabaseError> {
+    let backend = REDBBTree::<DocumentChangeKey, AutomergeEntry>::open(path, table_name)
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    let store = AutomergeEngineStore::new_with_backend(backend);
+    let engine = EngineDatabase::new(store);
+    Ok(Self::AutomergeRedb(engine))
   }
 
   #[cfg(feature = "redb")]
@@ -101,7 +120,9 @@ impl Database {
     match self {
       Database::InMemory(engine) => engine.register_table(schema).await?,
       #[cfg(feature = "automerge")]
-      Database::Automerge(engine) => engine.register_table(schema).await?,
+      Database::AutomergeInMemory(engine) => engine.register_table(schema).await?,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb(engine) => engine.register_table(schema).await?,
       #[cfg(feature = "redb")]
       Database::Redb(engine) => engine.register_table(schema).await?,
     }
@@ -113,7 +134,9 @@ impl Database {
     let res = match self {
       Database::InMemory(engine) => engine.execute(query).await?,
       #[cfg(feature = "automerge")]
-      Database::Automerge(engine) => engine.execute(query).await?,
+      Database::AutomergeInMemory(engine) => engine.execute(query).await?,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb(engine) => engine.execute(query).await?,
       #[cfg(feature = "redb")]
       Database::Redb(engine) => engine.execute(query).await?,
     };
@@ -128,7 +151,9 @@ impl Database {
         match self {
           Database::InMemory(engine) => engine.register_table(schema).await?,
           #[cfg(feature = "automerge")]
-          Database::Automerge(engine) => engine.register_table(schema).await?,
+          Database::AutomergeInMemory(engine) => engine.register_table(schema).await?,
+          #[cfg(all(feature = "automerge", feature = "redb"))]
+          Database::AutomergeRedb(engine) => engine.register_table(schema).await?,
           #[cfg(feature = "redb")]
           Database::Redb(engine) => engine.register_table(schema).await?,
         }
@@ -138,7 +163,9 @@ impl Database {
         match self {
           Database::InMemory(engine) => engine.drop_table(&name).await?,
           #[cfg(feature = "automerge")]
-          Database::Automerge(engine) => engine.drop_table(&name).await?,
+          Database::AutomergeInMemory(engine) => engine.drop_table(&name).await?,
+          #[cfg(all(feature = "automerge", feature = "redb"))]
+          Database::AutomergeRedb(engine) => engine.drop_table(&name).await?,
           #[cfg(feature = "redb")]
           Database::Redb(engine) => engine.drop_table(&name).await?,
         }
@@ -148,7 +175,9 @@ impl Database {
         match self {
           Database::InMemory(engine) => engine.register_index(schema).await?,
           #[cfg(feature = "automerge")]
-          Database::Automerge(engine) => engine.register_index(schema).await?,
+          Database::AutomergeInMemory(engine) => engine.register_index(schema).await?,
+          #[cfg(all(feature = "automerge", feature = "redb"))]
+          Database::AutomergeRedb(engine) => engine.register_index(schema).await?,
           #[cfg(feature = "redb")]
           Database::Redb(engine) => engine.register_index(schema).await?,
         }
@@ -158,7 +187,9 @@ impl Database {
         match self {
           Database::InMemory(engine) => engine.drop_index(&name).await?,
           #[cfg(feature = "automerge")]
-          Database::Automerge(engine) => engine.drop_index(&name).await?,
+          Database::AutomergeInMemory(engine) => engine.drop_index(&name).await?,
+          #[cfg(all(feature = "automerge", feature = "redb"))]
+          Database::AutomergeRedb(engine) => engine.drop_index(&name).await?,
           #[cfg(feature = "redb")]
           Database::Redb(engine) => engine.drop_index(&name).await?,
         }
@@ -177,7 +208,9 @@ impl Database {
     let mut tx = match self {
       Database::InMemory(engine) => Transaction::InMemory(engine.transaction()),
       #[cfg(feature = "automerge")]
-      Database::Automerge(engine) => Transaction::Automerge(engine.transaction()),
+      Database::AutomergeInMemory(engine) => Transaction::AutomergeInMemory(engine.transaction()),
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb(engine) => Transaction::AutomergeRedb(engine.transaction()),
       #[cfg(feature = "redb")]
       Database::Redb(engine) => Transaction::Redb(engine.transaction()),
     };
@@ -199,7 +232,19 @@ impl Database {
 pub enum Transaction<'db> {
   InMemory(db_engine::EngineTransaction<'db, InMemoryBTree<StoreKey, StoreValue>>),
   #[cfg(feature = "automerge")]
-  Automerge(db_engine::EngineTransaction<'db, AutomergeEngineStoreInMemory>),
+  AutomergeInMemory(
+    db_engine::EngineTransaction<
+      'db,
+      AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>,
+    >,
+  ),
+  #[cfg(all(feature = "automerge", feature = "redb"))]
+  AutomergeRedb(
+    db_engine::EngineTransaction<
+      'db,
+      AutomergeEngineStore<REDBBTree<DocumentChangeKey, AutomergeEntry>>,
+    >,
+  ),
   #[cfg(feature = "redb")]
   Redb(db_engine::EngineTransaction<'db, REDBBTree<StoreKey, StoreValue>>),
 }
@@ -209,7 +254,9 @@ impl<'db> Transaction<'db> {
     match self {
       Transaction::InMemory(inner) => inner.insert_row(table, row).await?,
       #[cfg(feature = "automerge")]
-      Transaction::Automerge(inner) => inner.insert_row(table, row).await?,
+      Transaction::AutomergeInMemory(inner) => inner.insert_row(table, row).await?,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Transaction::AutomergeRedb(inner) => inner.insert_row(table, row).await?,
       #[cfg(feature = "redb")]
       Transaction::Redb(inner) => inner.insert_row(table, row).await?,
     }
@@ -231,7 +278,12 @@ impl<'db> Transaction<'db> {
           Ok(EngineResult::new(Vec::new()))
         }
         #[cfg(feature = "automerge")]
-        Transaction::Automerge(inner) => {
+        Transaction::AutomergeInMemory(inner) => {
+          inner.insert_row(&table, row).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(all(feature = "automerge", feature = "redb"))]
+        Transaction::AutomergeRedb(inner) => {
           inner.insert_row(&table, row).await?;
           Ok(EngineResult::new(Vec::new()))
         }
@@ -251,7 +303,12 @@ impl<'db> Transaction<'db> {
           Ok(EngineResult::new(Vec::new()))
         }
         #[cfg(feature = "automerge")]
-        Transaction::Automerge(inner) => {
+        Transaction::AutomergeInMemory(inner) => {
+          inner.update_rows(&table, assignments, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(all(feature = "automerge", feature = "redb"))]
+        Transaction::AutomergeRedb(inner) => {
           inner.update_rows(&table, assignments, predicate).await?;
           Ok(EngineResult::new(Vec::new()))
         }
@@ -267,7 +324,12 @@ impl<'db> Transaction<'db> {
           Ok(EngineResult::new(Vec::new()))
         }
         #[cfg(feature = "automerge")]
-        Transaction::Automerge(inner) => {
+        Transaction::AutomergeInMemory(inner) => {
+          inner.delete_rows(&table, predicate).await?;
+          Ok(EngineResult::new(Vec::new()))
+        }
+        #[cfg(all(feature = "automerge", feature = "redb"))]
+        Transaction::AutomergeRedb(inner) => {
           inner.delete_rows(&table, predicate).await?;
           Ok(EngineResult::new(Vec::new()))
         }
@@ -287,7 +349,9 @@ impl<'db> Transaction<'db> {
     match self {
       Transaction::InMemory(inner) => inner.commit().await?,
       #[cfg(feature = "automerge")]
-      Transaction::Automerge(inner) => inner.commit().await?,
+      Transaction::AutomergeInMemory(inner) => inner.commit().await?,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Transaction::AutomergeRedb(inner) => inner.commit().await?,
       #[cfg(feature = "redb")]
       Transaction::Redb(inner) => inner.commit().await?,
     }
@@ -298,7 +362,9 @@ impl<'db> Transaction<'db> {
     match self {
       Transaction::InMemory(inner) => inner.rollback().await?,
       #[cfg(feature = "automerge")]
-      Transaction::Automerge(inner) => inner.rollback().await?,
+      Transaction::AutomergeInMemory(inner) => inner.rollback().await?,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Transaction::AutomergeRedb(inner) => inner.rollback().await?,
       #[cfg(feature = "redb")]
       Transaction::Redb(inner) => inner.rollback().await?,
     }

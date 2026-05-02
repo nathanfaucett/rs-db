@@ -15,6 +15,13 @@ use super::helpers;
 use super::helpers::sql_value_to_engine_value;
 use super::predicates as predicates_module;
 
+// Reduce verbosity in signatures by aliasing the projection parse result.
+type ProjectionParseResult = (
+  Vec<db_engine::QualifiedColumn>,
+  Vec<db_engine::Aggregate>,
+  HashMap<String, db_engine::QualifiedColumn>,
+);
+
 /// Errors returned by the translator.
 #[derive(Error, Debug)]
 pub enum TranslateError {
@@ -77,6 +84,7 @@ pub fn parse_and_translate_statement(
 }
 
 /// Variant of `parse_and_translate_statement` that accepts a custom `ValueMapper`.
+#[allow(dead_code)]
 pub fn parse_and_translate_statement_with_mapper(
   sql: &str,
   resolver: &dyn SchemaResolver,
@@ -482,16 +490,16 @@ pub fn translate_statement(
 
           // HAVING support: translate having expression (after aggregates/group_by known)
           let having_pred = if let Some(h) = &select.having {
-            Some(having_module::expr_to_having_predicate(
-              h,
-              &group_by,
-              &aggregates,
-              &proj_alias_map,
-              &alias_map,
-              &table_schemas,
+            let ctx = having_module::HavingContext {
+              group_by: &group_by,
+              aggregates: &aggregates,
+              proj_alias_map: &proj_alias_map,
+              alias_map: &alias_map,
+              table_schemas: &table_schemas,
               resolver,
               mapper,
-            )?)
+            };
+            Some(having_module::expr_to_having_predicate(h, &ctx)?)
           } else {
             None
           };
@@ -811,14 +819,7 @@ fn parse_projection(
   alias_map: &HashMap<String, String>,
   referenced_tables: &[String],
   table_schemas: &HashMap<String, db_engine::TableSchema>,
-) -> Result<
-  (
-    Vec<db_engine::QualifiedColumn>,
-    Vec<db_engine::Aggregate>,
-    HashMap<String, db_engine::QualifiedColumn>,
-  ),
-  TranslateError,
-> {
+) -> Result<ProjectionParseResult, TranslateError> {
   let mut projection_qc: Vec<db_engine::QualifiedColumn> = Vec::new();
   let mut aggregates: Vec<db_engine::Aggregate> = Vec::new();
   let mut proj_alias_map: HashMap<String, db_engine::QualifiedColumn> = HashMap::new();
@@ -900,6 +901,7 @@ fn parse_projection_item(
   Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_projection_expression(
   expr: &SqlExpr,
   alias_map: &HashMap<String, String>,

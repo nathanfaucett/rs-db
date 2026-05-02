@@ -3,6 +3,19 @@ use sqlparser::ast::{
   Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator,
 };
 
+use super::TranslateError;
+
+#[allow(dead_code)]
+pub struct HavingContext<'a> {
+  pub group_by: &'a Vec<db_engine::QualifiedColumn>,
+  pub aggregates: &'a Vec<db_engine::Aggregate>,
+  pub proj_alias_map: &'a HashMap<String, db_engine::QualifiedColumn>,
+  pub alias_map: &'a HashMap<String, String>,
+  pub table_schemas: &'a HashMap<String, db_engine::TableSchema>,
+  pub resolver: &'a dyn crate::translate::SchemaResolver,
+  pub mapper: &'a dyn crate::translate::ValueMapper,
+}
+
 // helper to resolve qualified column for HAVING
 fn resolve_qc_for_having(
   expr: &SqlExpr,
@@ -12,24 +25,16 @@ fn resolve_qc_for_having(
   crate::translate::helpers::resolve_column_local(expr, alias_map, table_schemas)
 }
 
-use super::TranslateError;
-
 pub fn expr_to_having_predicate(
   expr: &SqlExpr,
-  _group_by: &Vec<db_engine::QualifiedColumn>,
-  aggregates: &Vec<db_engine::Aggregate>,
-  proj_alias_map: &HashMap<String, db_engine::QualifiedColumn>,
-  alias_map: &HashMap<String, String>,
-  table_schemas: &HashMap<String, db_engine::TableSchema>,
-  _resolver: &dyn crate::translate::SchemaResolver,
-  mapper: &dyn crate::translate::ValueMapper,
+  ctx: &HavingContext<'_>,
 ) -> Result<db_engine::HavingPredicate, TranslateError> {
   use sqlparser::ast::BinaryOperator;
 
   // helper to resolve an aggregate reference to index
   let find_agg_index =
     |func_name: &str, arg_qc: Option<db_engine::QualifiedColumn>| -> Option<usize> {
-      for (i, ag) in aggregates.iter().enumerate() {
+      for (i, ag) in ctx.aggregates.iter().enumerate() {
         match (ag, func_name) {
           (db_engine::Aggregate::Count(opt), "count") => match (opt, &arg_qc) {
             (None, None) => return Some(i),
@@ -68,7 +73,7 @@ pub fn expr_to_having_predicate(
         }
         let arg_opt = match &args[0] {
           FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
-            Some(resolve_qc_for_having(arg_expr, alias_map, table_schemas)?)
+            Some(resolve_qc_for_having(arg_expr, ctx.alias_map, ctx.table_schemas)?)
           }
           FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => None,
           _ => {
@@ -87,14 +92,12 @@ pub fn expr_to_having_predicate(
       }
       SqlExpr::Identifier(ident) => {
         // may be alias referencing projection/aggregate
-        if let Some(qc) = proj_alias_map.get(&ident.value) {
+        if let Some(qc) = ctx.proj_alias_map.get(&ident.value) {
           // see if this alias corresponds to an aggregate by comparing against aggregates
-          for (i, ag) in aggregates.iter().enumerate() {
+          for (i, ag) in ctx.aggregates.iter().enumerate() {
             match ag {
               db_engine::Aggregate::Count(opt) => {
-                if let Some(arg) = opt
-                  && arg == qc
-                {
+                if let Some(arg) = opt && arg == qc {
                   return Ok(db_engine::RefOrAgg::AggregateIndex(i));
                 }
               }
@@ -112,12 +115,12 @@ pub fn expr_to_having_predicate(
           Ok(db_engine::RefOrAgg::Column(qc.clone()))
         } else {
           // treat as qualified column (resolve against table schemas)
-          let qc = resolve_qc_for_having(e, alias_map, table_schemas)?;
+          let qc = resolve_qc_for_having(e, ctx.alias_map, ctx.table_schemas)?;
           Ok(db_engine::RefOrAgg::Column(qc))
         }
       }
       SqlExpr::CompoundIdentifier(_) => {
-        let qc = resolve_qc_for_having(e, alias_map, table_schemas)?;
+        let qc = resolve_qc_for_having(e, ctx.alias_map, ctx.table_schemas)?;
         Ok(db_engine::RefOrAgg::Column(qc))
       }
       _ => Err(TranslateError::UnsupportedFeature(
@@ -129,48 +132,12 @@ pub fn expr_to_having_predicate(
   match expr {
     SqlExpr::BinaryOp { left, op, right } => match op {
       BinaryOperator::And => Ok(db_engine::HavingPredicate::And(
-        Box::new(expr_to_having_predicate(
-          left,
-          _group_by,
-          aggregates,
-          proj_alias_map,
-          alias_map,
-          table_schemas,
-          _resolver,
-          mapper,
-        )?),
-        Box::new(expr_to_having_predicate(
-          right,
-          _group_by,
-          aggregates,
-          proj_alias_map,
-          alias_map,
-          table_schemas,
-          _resolver,
-          mapper,
-        )?),
+        Box::new(expr_to_having_predicate(left, ctx)?),
+        Box::new(expr_to_having_predicate(right, ctx)?),
       )),
       BinaryOperator::Or => Ok(db_engine::HavingPredicate::Or(
-        Box::new(expr_to_having_predicate(
-          left,
-          _group_by,
-          aggregates,
-          proj_alias_map,
-          alias_map,
-          table_schemas,
-          _resolver,
-          mapper,
-        )?),
-        Box::new(expr_to_having_predicate(
-          right,
-          _group_by,
-          aggregates,
-          proj_alias_map,
-          alias_map,
-          table_schemas,
-          _resolver,
-          mapper,
-        )?),
+        Box::new(expr_to_having_predicate(left, ctx)?),
+        Box::new(expr_to_having_predicate(right, ctx)?),
       )),
       BinaryOperator::Eq
       | BinaryOperator::NotEq
@@ -180,7 +147,7 @@ pub fn expr_to_having_predicate(
       | BinaryOperator::GtEq => {
         let lref = resolve_ref(left)?;
         let rval = match &**right {
-          SqlExpr::Value(_) => mapper.map_sql_value(right)?,
+          SqlExpr::Value(_) => ctx.mapper.map_sql_value(right)?,
           _ => {
             return Err(TranslateError::UnsupportedFeature(
               "HAVING RHS must be literal value in v1".into(),
@@ -204,16 +171,7 @@ pub fn expr_to_having_predicate(
     },
     SqlExpr::UnaryOp { op, expr } => match op {
       UnaryOperator::Not => Ok(db_engine::HavingPredicate::Not(Box::new(
-        expr_to_having_predicate(
-          expr,
-          _group_by,
-          aggregates,
-          proj_alias_map,
-          alias_map,
-          table_schemas,
-          _resolver,
-          mapper,
-        )?,
+        expr_to_having_predicate(expr, ctx)?,
       ))),
       _ => Err(TranslateError::UnsupportedFeature(
         "unsupported unary operator in HAVING".into(),
