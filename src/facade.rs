@@ -1,8 +1,7 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
@@ -14,7 +13,9 @@ use db_automerge::{
 use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow, EngineValue};
 #[cfg(feature = "redb")]
 use db_engine::{EngineKeyCodec, EngineRowCodec};
-use db_in_memory::{InMemoryBTree, InMemoryNamedBTree};
+#[cfg(feature = "automerge")]
+use db_in_memory::InMemoryBTree;
+use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::{REDBBTree, REDBNamedBTree};
 #[cfg(feature = "redb")]
