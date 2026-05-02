@@ -3,9 +3,9 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
-use std::string::String;
+use std::string::{String, ToString};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
