@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod blocking;
 mod btree;
 mod codec;
 mod codec_helpers;
@@ -16,6 +17,7 @@ mod simple_key;
 mod test_helpers;
 mod transaction_patch;
 
+pub use blocking::block_on;
 pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeResult, BTreeTransaction};
 pub use codec::BufferSink;
 pub use codec::{
@@ -40,7 +42,7 @@ pub use transaction_patch::{
 pub use codec_registry::{CodecRegistry, EncodedComparator, TypedComparatorAdapter};
 
 #[cfg(feature = "test-helpers")]
-pub use test_helpers::{MockBTree, block_on};
+pub use test_helpers::MockBTree;
 
 pub use port::{IntoStoragePort, StoragePort};
 

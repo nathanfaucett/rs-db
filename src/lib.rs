@@ -3,7 +3,5 @@
 
 extern crate alloc;
 
-mod database_dispatch;
-mod database_types;
 mod facade;
-pub use database_types::{Database, DatabaseError, Row};
+pub use facade::{Database, DatabaseError, Row};

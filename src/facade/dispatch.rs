@@ -9,7 +9,7 @@ use db_sql_to_engine::{
   CanonicalStatement, DdlOp, SchemaResolver, parse_and_translate, parse_and_translate_statement,
 };
 
-use crate::database_types::{Database, DatabaseError, Row, Transaction};
+use super::types::{Database, DatabaseError, Row, Transaction};
 
 pub(crate) fn describe_table(database: &Database, name: &str) -> Option<TableSchema> {
   match database {

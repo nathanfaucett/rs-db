@@ -8,9 +8,7 @@ description = "Engine layer of the database"
 path = "src/lib.rs"
 
 [dependencies]
-db-core = { path = "../db-core", default-features = false, features = [
-  "test-helpers",
-] }
+db-core = { path = "../db-core", default-features = false }
 db-types = { path = "../db-types", default-features = false }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }

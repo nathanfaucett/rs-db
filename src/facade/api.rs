@@ -18,12 +18,12 @@ use std::path::Path;
 
 use db_sql_to_engine::SchemaResolver;
 
-use crate::database_dispatch;
-use crate::database_types::{Database, DatabaseError, Row, Transaction};
+use super::dispatch;
+use super::types::{Database, DatabaseError, Row, Transaction};
 
 impl SchemaResolver for Database {
   fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema> {
-    database_dispatch::describe_table(self, name)
+    dispatch::describe_table(self, name)
   }
 }
 
@@ -80,17 +80,17 @@ impl Database {
     &mut self,
     schema: db_engine::TableSchema,
   ) -> Result<(), DatabaseError> {
-    database_dispatch::register_table(self, schema).await
+    dispatch::register_table(self, schema).await
   }
 
   /// Execute an `EngineQuery` directly against the engine.
   pub async fn execute_query(&self, query: EngineQuery) -> Result<EngineResult, DatabaseError> {
-    database_dispatch::execute_query(self, query).await
+    dispatch::execute_query(self, query).await
   }
 
   /// Execute a SQL string using the database schema catalog.
   pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, DatabaseError> {
-    database_dispatch::execute_sql(self, sql).await
+    dispatch::execute_sql(self, sql).await
   }
 
   /// Convenience: run a closure in a transaction context.
@@ -99,15 +99,15 @@ impl Database {
     F: FnOnce(&mut Transaction<'_>) -> Fut,
     Fut: core::future::Future<Output = Result<T, DatabaseError>>,
   {
-    let mut tx = database_dispatch::begin_transaction(self);
+    let mut tx = dispatch::begin_transaction(self);
     let out = f(&mut tx).await;
     match out {
       Ok(v) => {
-        database_dispatch::transaction_commit(tx).await?;
+        dispatch::transaction_commit(tx).await?;
         Ok(v)
       }
       Err(e) => {
-        let _ = database_dispatch::transaction_rollback(tx).await;
+        let _ = dispatch::transaction_rollback(tx).await;
         Err(e)
       }
     }
@@ -116,7 +116,7 @@ impl Database {
 
 impl<'db> Transaction<'db> {
   pub async fn insert_row(&mut self, table: &str, row: Row) -> Result<(), DatabaseError> {
-    database_dispatch::transaction_insert_row(self, table, row).await
+    dispatch::transaction_insert_row(self, table, row).await
   }
 
   /// Execute a SQL string inside this transaction. Supports INSERT/UPDATE/DELETE.
@@ -126,14 +126,14 @@ impl<'db> Transaction<'db> {
     resolver: &dyn SchemaResolver,
     sql: &str,
   ) -> Result<EngineResult, DatabaseError> {
-    database_dispatch::transaction_execute_sql(self, resolver, sql).await
+    dispatch::transaction_execute_sql(self, resolver, sql).await
   }
 
   pub async fn commit(self) -> Result<(), DatabaseError> {
-    database_dispatch::transaction_commit(self).await
+    dispatch::transaction_commit(self).await
   }
 
   pub async fn rollback(self) -> Result<(), DatabaseError> {
-    database_dispatch::transaction_rollback(self).await
+    dispatch::transaction_rollback(self).await
   }
 }

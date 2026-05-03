@@ -35,7 +35,4 @@ default = []
 db-in-memory = { path = "../db-in-memory", default-features = false, features = [
   "std",
 ] }
-db-core = { path = "../db-core", default-features = false, features = [
-  "std",
-  "test-helpers",
-] }
+db-core = { path = "../db-core", default-features = false, features = ["std"] }

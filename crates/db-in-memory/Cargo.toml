@@ -13,10 +13,7 @@ futures = { version = "0.3", default-features = false, features = [] }
 async-lock = { version = "3.4", default-features = false, features = [] }
 
 [dev-dependencies]
-db-core = { path = "../db-core", default-features = false, features = [
-  "std",
-  "test-helpers",
-] }
+db-core = { path = "../db-core", default-features = false, features = ["std"] }
 
 [features]
 default = []

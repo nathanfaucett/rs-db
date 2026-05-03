@@ -161,3 +161,105 @@ impl IndexSchema {
     Ok(EngineKey::from_values(values))
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn sample_table() -> TableSchema {
+    TableSchema {
+      name: "t".into(),
+      columns: vec![
+        ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        },
+        ColumnSchema {
+          name: "name".into(),
+          data_type: EngineType::Text,
+        },
+      ],
+      primary_key: vec![0],
+    }
+  }
+
+  #[test]
+  fn accepts_null_for_any_column_type() {
+    let col = ColumnSchema {
+      name: "x".into(),
+      data_type: EngineType::Integer,
+    };
+    assert!(col.accepts(&EngineValue::Null));
+  }
+
+  #[test]
+  fn validate_row_accepts_matching_row() {
+    let table = sample_table();
+    let row = vec![EngineValue::Integer(1), EngineValue::Text("a".into())];
+    assert!(table.validate_row(&row).is_ok());
+  }
+
+  #[test]
+  fn validate_row_rejects_wrong_length() {
+    let table = sample_table();
+    let row = vec![EngineValue::Integer(1)];
+    assert!(matches!(
+      table.validate_row(&row),
+      Err(SchemaError::SchemaMismatch(_))
+    ));
+  }
+
+  #[test]
+  fn validate_row_rejects_type_mismatch() {
+    let table = sample_table();
+    let row = vec![
+      EngineValue::Text("nope".into()),
+      EngineValue::Text("a".into()),
+    ];
+    assert!(matches!(
+      table.validate_row(&row),
+      Err(SchemaError::TypeMismatch(_))
+    ));
+  }
+
+  #[test]
+  fn validate_row_requires_primary_key() {
+    let mut table = sample_table();
+    table.primary_key.clear();
+    let row = vec![EngineValue::Integer(1), EngineValue::Text("a".into())];
+    assert_eq!(
+      table.validate_row(&row),
+      Err(SchemaError::PrimaryKeyMissing)
+    );
+  }
+
+  #[test]
+  fn index_validate_for_table_rejects_wrong_name() {
+    let table = sample_table();
+    let index = IndexSchema {
+      name: "ix".into(),
+      table_name: "other".into(),
+      column_indices: vec![0],
+      unique: true,
+    };
+    assert!(index.validate_for_table(&table).is_err());
+  }
+
+  #[test]
+  fn index_key_for_extracts_columns() {
+    let table = sample_table();
+    let index = IndexSchema {
+      name: "ix".into(),
+      table_name: "t".into(),
+      column_indices: vec![1],
+      unique: false,
+    };
+    assert!(index.validate_for_table(&table).is_ok());
+    let row = vec![EngineValue::Integer(1), EngineValue::Text("hi".into())];
+    let key = index.key_for(&row).expect("key");
+    assert_eq!(
+      key,
+      EngineKey::from_values(vec![EngineValue::Text("hi".into())])
+    );
+  }
+}

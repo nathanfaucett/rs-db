@@ -187,20 +187,3 @@ where
   V: Clone + Send + Sync + 'static,
 {
 }
-
-pub fn block_on<F: core::future::Future>(future: F) -> F::Output {
-  use core::hint::spin_loop;
-  use core::pin::pin;
-  use core::task::{Context, Poll, Waker};
-
-  let waker = Waker::noop();
-  let mut context = Context::from_waker(waker);
-  let mut future = pin!(future);
-
-  loop {
-    match future.as_mut().poll(&mut context) {
-      Poll::Ready(output) => return output,
-      Poll::Pending => spin_loop(),
-    }
-  }
-}
