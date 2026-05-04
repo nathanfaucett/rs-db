@@ -96,6 +96,42 @@ use self::hash::make_change_hash;
 use self::reconstruction::reconstruct;
 use self::transaction::AutomergeTransaction;
 
+struct ReconstructionAccumulator {
+  latest_snapshot: Option<Vec<u8>>,
+  deltas_after_snapshot: Vec<Vec<u8>>,
+}
+
+impl ReconstructionAccumulator {
+  fn new() -> Self {
+    Self {
+      latest_snapshot: None,
+      deltas_after_snapshot: Vec::new(),
+    }
+  }
+
+  fn apply(&mut self, doc_type: DocumentType, entry: Vec<u8>) {
+    if doc_type.is_snapshot() {
+      self.latest_snapshot = Some(entry);
+      self.deltas_after_snapshot.clear();
+    } else {
+      self.deltas_after_snapshot.push(entry);
+    }
+  }
+
+  fn finish(self) -> Vec<u8> {
+    let state = self.latest_snapshot.unwrap_or_default();
+    reconstruct(&state, &self.deltas_after_snapshot)
+  }
+
+  fn is_empty(&self) -> bool {
+    self.latest_snapshot.is_none() && self.deltas_after_snapshot.is_empty()
+  }
+}
+
+fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
+  AutoCommit::load(bytes).map_err(BTreeError::other)
+}
+
 /// Backend-agnostic Automerge wrapper. Parameterized over any `BTree` backend.
 pub struct AutomergeBTree<B> {
   inner: B,
@@ -149,8 +185,7 @@ where
     let stream = self.inner.range(start.clone()..=end.clone());
     futures::pin_mut!(stream);
 
-    let mut latest_snapshot: Option<Vec<u8>> = None;
-    let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+    let mut accumulator = ReconstructionAccumulator::new();
     let mut delta_count: usize = 0;
     let mut delta_bytes: usize = 0;
     let mut has_entries = false;
@@ -161,25 +196,21 @@ where
         Err(_) => continue,
       };
       has_entries = true;
-      let is_snapshot = k.doc_type.is_snapshot();
-      if is_snapshot {
-        latest_snapshot = Some(entry.clone());
-        deltas_after_snapshot.clear();
+      if k.doc_type.is_snapshot() {
         delta_count = 0;
         delta_bytes = 0;
       } else {
-        deltas_after_snapshot.push(entry.clone());
         delta_count += 1;
         delta_bytes += entry.len();
       }
+      accumulator.apply(k.doc_type, entry);
     }
 
     if !has_entries {
       return None;
     }
 
-    let mut state = latest_snapshot.unwrap_or_default();
-    state = reconstruct(&state, &deltas_after_snapshot);
+    let state = accumulator.finish();
 
     if self.policy.should_compact(delta_count, delta_bytes) {
       match self.inner.transaction().await {
@@ -221,10 +252,7 @@ where
 
     match self.get_document(doc_id).await {
       None => Ok(None),
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
+      Some(bytes) => load_document(&bytes).map(Some),
     }
   }
 
@@ -327,10 +355,7 @@ where
 
     match prev {
       None => Ok(None),
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
+      Some(bytes) => load_document(&bytes).map(Some),
     }
   }
 
@@ -358,8 +383,7 @@ where
       futures::pin_mut!(inner_stream);
 
       let mut current_doc: Option<Uuid> = None;
-      let mut latest_snapshot: Option<Vec<u8>> = None;
-      let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+      let mut accumulator = ReconstructionAccumulator::new();
 
       while let Some(item) = inner_stream.next().await {
         let (k, v) = item?;
@@ -380,37 +404,26 @@ where
 
         if current_doc.is_none() {
           current_doc = Some(k.doc_id);
-          latest_snapshot = None;
-          deltas_after_snapshot.clear();
-        } else if current_doc.as_ref().unwrap() != &k.doc_id {
+        } else if current_doc.as_ref().expect("doc id present") != &k.doc_id {
           if let Some(doc_id_to_yield) = current_doc.take() {
-            let mut state = latest_snapshot.take().unwrap_or_default();
-            state = reconstruct(&state, &deltas_after_snapshot);
-            deltas_after_snapshot.clear();
-            match AutoCommit::load(&state) {
+            let state = accumulator.finish();
+            match load_document(&state) {
               Ok(doc) => yield Ok((doc_id_to_yield, doc)),
-              Err(e) => yield Err(BTreeError::other(e)),
+              Err(e) => yield Err(e),
             }
           }
           current_doc = Some(k.doc_id);
-          latest_snapshot = None;
-          deltas_after_snapshot.clear();
+          accumulator = ReconstructionAccumulator::new();
         }
 
-        if k.doc_type.is_snapshot() {
-          latest_snapshot = Some(v.clone());
-          deltas_after_snapshot.clear();
-        } else {
-          deltas_after_snapshot.push(v.clone());
-        }
+        accumulator.apply(k.doc_type, v.clone());
       }
 
       if let Some(doc_id) = current_doc {
-        let mut state = latest_snapshot.take().unwrap_or_default();
-        state = reconstruct(&state, &deltas_after_snapshot);
-        match AutoCommit::load(&state) {
+        let state = accumulator.finish();
+        match load_document(&state) {
           Ok(doc) => yield Ok((doc_id, doc)),
-          Err(e) => yield Err(BTreeError::other(e)),
+          Err(e) => yield Err(e),
         }
       }
     }
@@ -592,8 +605,7 @@ where
     let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
     futures::pin_mut!(stream);
 
-    let mut latest_snapshot: Option<Vec<u8>> = None;
-    let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+    let mut accumulator = ReconstructionAccumulator::new();
 
     while let Some(item) = stream.next().await {
       let (k_enc, entry_enc) = match item {
@@ -604,29 +616,17 @@ where
         Ok(kd) => kd,
         Err(_) => continue,
       };
-      if k.doc_type.is_snapshot() {
-        // decode value
-        let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-          .unwrap_or_else(|_| entry_enc.clone());
-        latest_snapshot = Some(v);
-        deltas_after_snapshot.clear();
-      } else {
-        let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-          .unwrap_or_else(|_| entry_enc.clone());
-        deltas_after_snapshot.push(v);
-      }
+      let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
+        .unwrap_or_else(|_| entry_enc.clone());
+      accumulator.apply(k.doc_type, value);
     }
 
-    if latest_snapshot.is_none() && deltas_after_snapshot.is_empty() {
+    if accumulator.is_empty() {
       return Ok(None);
     }
 
-    let mut state = latest_snapshot.unwrap_or_default();
-    state = reconstruct(&state, &deltas_after_snapshot);
-    match AutoCommit::load(&state) {
-      Ok(doc) => Ok(Some(doc)),
-      Err(e) => Err(BTreeError::other(e)),
-    }
+    let state = accumulator.finish();
+    load_document(&state).map(Some)
   }
 
   async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
@@ -691,8 +691,7 @@ where
 
       let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
       futures::pin_mut!(stream);
-      let mut latest_snapshot: Option<Vec<u8>> = None;
-      let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+      let mut accumulator = ReconstructionAccumulator::new();
       let mut has_entries = false;
 
       while let Some(item) = stream.next().await {
@@ -705,24 +704,15 @@ where
           Ok(kd) => kd,
           Err(_) => continue,
         };
-        if k.doc_type.is_snapshot() {
-          let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-            .unwrap_or_else(|_| entry_enc.clone());
-          latest_snapshot = Some(v);
-          deltas_after_snapshot.clear();
-        } else {
-          let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-            .unwrap_or_else(|_| entry_enc.clone());
-          deltas_after_snapshot.push(v);
-        }
+        let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
+          .unwrap_or_else(|_| entry_enc.clone());
+        accumulator.apply(k.doc_type, value);
       }
 
       if !has_entries {
         None
       } else {
-        let mut state = latest_snapshot.unwrap_or_default();
-        state = reconstruct(&state, &deltas_after_snapshot);
-        Some(state)
+        Some(accumulator.finish())
       }
     };
 
@@ -747,10 +737,7 @@ where
 
     match prev {
       None => Ok(None),
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
+      Some(bytes) => load_document(&bytes).map(Some),
     }
   }
 
@@ -785,8 +772,7 @@ where
       futures::pin_mut!(inner_stream);
 
       let mut current_doc: Option<Uuid> = None;
-      let mut latest_snapshot: Option<Vec<u8>> = None;
-      let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+      let mut accumulator = ReconstructionAccumulator::new();
 
       while let Some(item) = inner_stream.next().await {
         let (k_enc, v_enc) = item?;
@@ -809,39 +795,28 @@ where
 
         if current_doc.is_none() {
           current_doc = Some(k.doc_id);
-          latest_snapshot = None;
-          deltas_after_snapshot.clear();
-        } else if current_doc.as_ref().unwrap() != &k.doc_id {
+        } else if current_doc.as_ref().expect("doc id present") != &k.doc_id {
           if let Some(doc_id_to_yield) = current_doc.take() {
-            let mut state = latest_snapshot.take().unwrap_or_default();
-            state = reconstruct(&state, &deltas_after_snapshot);
-            deltas_after_snapshot.clear();
-            match AutoCommit::load(&state) {
+            let state = accumulator.finish();
+            match load_document(&state) {
               Ok(doc) => yield Ok((doc_id_to_yield, doc)),
-              Err(e) => yield Err(BTreeError::other(e)),
+              Err(e) => yield Err(e),
             }
           }
           current_doc = Some(k.doc_id);
-          latest_snapshot = None;
-          deltas_after_snapshot.clear();
+          accumulator = ReconstructionAccumulator::new();
         }
 
-        if k.doc_type.is_snapshot() {
-          let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc).unwrap_or_else(|_| v_enc.clone());
-          latest_snapshot = Some(v);
-          deltas_after_snapshot.clear();
-        } else {
-          let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc).unwrap_or_else(|_| v_enc.clone());
-          deltas_after_snapshot.push(v);
-        }
+        let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc)
+          .unwrap_or_else(|_| v_enc.clone());
+        accumulator.apply(k.doc_type, value);
       }
 
       if let Some(doc_id) = current_doc {
-        let mut state = latest_snapshot.take().unwrap_or_default();
-        state = reconstruct(&state, &deltas_after_snapshot);
-        match AutoCommit::load(&state) {
+        let state = accumulator.finish();
+        match load_document(&state) {
           Ok(doc) => yield Ok((doc_id, doc)),
-          Err(e) => yield Err(BTreeError::other(e)),
+          Err(e) => yield Err(e),
         }
       }
     }

@@ -1,16 +1,13 @@
 // Example: register two tables, insert rows, and run a SQL JOIN select
 // Uses an Automerge-backed store persisted in `redb` when built with the
-// `automerge` and `redb` features. When those features are not enabled, the
-// dummy `main` prints an informational message so the example crate still
-// compiles.
+// `automerge` and `redb` features.
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use db::Database;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use futures::executor::block_on;
 
-#[cfg(all(feature = "automerge", feature = "redb"))]
-use db::Database;
-
-#[cfg(all(feature = "automerge", feature = "redb"))]
 fn main() {
+  #[cfg(all(feature = "automerge", feature = "redb"))]
   block_on(async {
     let mut path = std::env::temp_dir();
     path.push("aicacia_automerge_redb.db");
@@ -51,9 +48,4 @@ fn main() {
       println!("row: {:?}", row);
     }
   });
-}
-
-#[cfg(not(all(feature = "automerge", feature = "redb")))]
-fn main() {
-  eprintln!("example requires features: automerge + redb; build with --features 'automerge redb'");
 }

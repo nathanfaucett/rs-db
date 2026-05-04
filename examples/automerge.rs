@@ -2,10 +2,8 @@
 // Requires the `automerge` feature; this example fails to build otherwise.
 #[cfg(feature = "automerge")]
 use db::Database;
-#[cfg(feature = "automerge")]
 use futures::executor::block_on;
 
-#[cfg(feature = "automerge")]
 fn main() {
   block_on(async {
     let mut db = Database::open_automerge_in_memory()
@@ -45,6 +43,3 @@ fn main() {
     }
   });
 }
-
-#[cfg(not(feature = "automerge"))]
-fn main() {}
