@@ -1,11 +1,7 @@
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
-use db_core::{
-  BTree, BTreeError, BTreeExecutor, BTreeTransaction, StoragePort, TransactionPatch,
-  commit_transaction_patch, merge_transaction_patch_range, patch_delete, patch_get, patch_insert,
-  patch_remove,
-};
+use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, StoragePort, TransactionPatch};
 use futures::Stream;
 
 #[cfg(not(feature = "std"))]
@@ -104,7 +100,7 @@ where
 {
   async fn commit(self) -> Result<(), BTreeError> {
     let mut guard = self.inner.write().await;
-    commit_transaction_patch(&mut guard, self.patch);
+    self.patch.commit_into(&mut guard);
     Ok(())
   }
 
@@ -125,7 +121,7 @@ where
   {
     let inner = self.inner.clone();
     let patch = self.patch.clone();
-    if let Some(value) = patch_get(&patch, key.borrow()) {
+    if let Some(value) = patch.get_value(key.borrow()) {
       return Ok(Some(value));
     }
     let guard = inner.read().await;
@@ -136,7 +132,7 @@ where
   where
     K: Ord,
   {
-    patch_insert(&mut self.patch, key, value);
+    self.patch.insert(key, value);
     Ok(())
   }
 
@@ -145,14 +141,14 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = patch_remove(&mut self.patch, key.borrow().clone()) {
+    if let Some(value) = self.patch.remove(key.borrow().clone()) {
       return Ok(Some(value));
     }
 
     let guard = self.inner.read().await;
     let value = guard.get(key.borrow()).cloned();
     if let Some((owned_key, _)) = guard.get_key_value(key.borrow()) {
-      patch_delete(&mut self.patch, owned_key.clone());
+      self.patch.delete(owned_key.clone());
     }
     Ok(value)
   }
@@ -166,7 +162,7 @@ where
     let patch = self.patch.clone();
     stream! {
       let guard = inner.read().await;
-      let merged = merge_transaction_patch_range(&*guard, &patch, range);
+      let merged = patch.merge_range(&*guard, range);
 
       for (key, value) in merged {
         yield Ok((key, value));
@@ -186,7 +182,7 @@ where
     let inner = self.inner.clone();
     Ok(InMemoryBTreeTransaction {
       inner,
-      patch: BTreeMap::new(),
+      patch: TransactionPatch::default(),
     })
   }
 }

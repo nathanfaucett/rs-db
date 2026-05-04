@@ -1,4 +1,7 @@
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::{
+  borrow::Borrow,
+  ops::{Deref, DerefMut, RangeBounds},
+};
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
@@ -22,90 +25,113 @@ impl<V> TransactionEntry<V> {
   }
 }
 
-pub type TransactionPatch<K, V> = BTreeMap<K, TransactionEntry<V>>;
+#[derive(Debug, Clone)]
+pub struct TransactionPatch<K, V>(BTreeMap<K, TransactionEntry<V>>);
 
-pub fn patch_get<K, V, Q>(patch: &TransactionPatch<K, V>, key: &Q) -> Option<V>
-where
-  K: Ord,
-  V: Clone,
-  Q: Borrow<K>,
-{
-  patch
-    .get(key.borrow())
-    .and_then(|entry| entry.as_option().cloned())
-}
-
-pub fn patch_insert<K, V>(patch: &mut TransactionPatch<K, V>, key: K, value: V)
-where
-  K: Ord,
-{
-  patch.insert(key, TransactionEntry::Present(value));
-}
-
-pub fn patch_delete<K, V, Q>(patch: &mut TransactionPatch<K, V>, key: Q)
-where
-  K: Ord + Clone,
-  Q: Borrow<K>,
-{
-  patch.insert(key.borrow().clone(), TransactionEntry::Deleted);
-}
-
-pub fn patch_remove<K, V, Q>(patch: &mut TransactionPatch<K, V>, key: Q) -> Option<V>
-where
-  K: Ord + Clone,
-  V: Clone,
-  Q: Borrow<K>,
-{
-  if let Some((owned_key, entry)) = patch
-    .get_key_value(key.borrow())
-    .map(|(owned_key, entry)| (owned_key.clone(), entry.clone()))
-  {
-    let result = entry.as_option().cloned();
-    patch.insert(owned_key, TransactionEntry::Deleted);
-    result
-  } else {
-    None
+impl<K, V> Default for TransactionPatch<K, V> {
+  fn default() -> Self {
+    Self(BTreeMap::new())
   }
 }
 
-pub fn commit_transaction_patch<K, V>(base: &mut BTreeMap<K, V>, patch: TransactionPatch<K, V>)
-where
-  K: Ord,
-{
-  for (key, entry) in patch {
-    match entry {
-      TransactionEntry::Present(value) => {
-        base.insert(key, value);
-      }
-      TransactionEntry::Deleted => {
-        base.remove(&key);
+impl<K, V> Deref for TransactionPatch<K, V> {
+  type Target = BTreeMap<K, TransactionEntry<V>>;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+impl<K, V> DerefMut for TransactionPatch<K, V> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.0
+  }
+}
+
+impl<K, V> TransactionPatch<K, V> {
+  pub fn get_value<Q>(&self, key: &Q) -> Option<V>
+  where
+    K: Ord,
+    V: Clone,
+    Q: Borrow<K>,
+  {
+    self
+      .0
+      .get(key.borrow())
+      .and_then(|e| e.as_option().cloned())
+  }
+
+  pub fn insert(&mut self, key: K, value: V)
+  where
+    K: Ord,
+  {
+    self.0.insert(key, TransactionEntry::Present(value));
+  }
+
+  pub fn delete<Q>(&mut self, key: Q)
+  where
+    K: Ord + Clone,
+    Q: Borrow<K>,
+  {
+    self
+      .0
+      .insert(key.borrow().clone(), TransactionEntry::Deleted);
+  }
+
+  pub fn remove<Q>(&mut self, key: Q) -> Option<V>
+  where
+    K: Ord + Clone,
+    V: Clone,
+    Q: Borrow<K>,
+  {
+    if let Some((owned_key, entry)) = self
+      .0
+      .get_key_value(key.borrow())
+      .map(|(k, e)| (k.clone(), e.clone()))
+    {
+      let result = entry.as_option().cloned();
+      self.0.insert(owned_key, TransactionEntry::Deleted);
+      result
+    } else {
+      None
+    }
+  }
+
+  pub fn commit_into(self, base: &mut BTreeMap<K, V>)
+  where
+    K: Ord,
+  {
+    for (key, entry) in self.0 {
+      match entry {
+        TransactionEntry::Present(value) => {
+          base.insert(key, value);
+        }
+        TransactionEntry::Deleted => {
+          base.remove(&key);
+        }
       }
     }
   }
-}
 
-pub fn merge_transaction_patch_range<K, V, R>(
-  base: &BTreeMap<K, V>,
-  patch: &TransactionPatch<K, V>,
-  range: R,
-) -> BTreeMap<K, V>
-where
-  K: Ord + Clone,
-  V: Clone,
-  R: RangeBounds<K>,
-{
-  merge_range_maps(
-    base,
-    patch,
-    range,
-    |k| !matches!(patch.get(k), Some(TransactionEntry::Deleted)),
-    |k, entry, merged| match entry {
-      TransactionEntry::Present(value) => {
-        merged.insert(k.clone(), value.clone());
-      }
-      TransactionEntry::Deleted => {
-        merged.remove(k);
-      }
-    },
-  )
+  pub fn merge_range<R>(&self, base: &BTreeMap<K, V>, range: R) -> BTreeMap<K, V>
+  where
+    K: Ord + Clone,
+    V: Clone,
+    R: RangeBounds<K>,
+  {
+    merge_range_maps(
+      base,
+      &self.0,
+      range,
+      |k| !matches!(self.0.get(k), Some(TransactionEntry::Deleted)),
+      |k, entry, merged| match entry {
+        TransactionEntry::Present(value) => {
+          merged.insert(k.clone(), value.clone());
+        }
+        TransactionEntry::Deleted => {
+          merged.remove(k);
+        }
+      },
+    )
+  }
 }

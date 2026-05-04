@@ -3,8 +3,7 @@ use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
 use db_core::{
   BTree, BTreeExecutor, BTreeResult, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
-  TransactionEntry, TransactionPatch, commit_transaction_patch, merge_transaction_patch_range,
-  patch_delete, patch_get, patch_insert, patch_remove,
+  TransactionEntry, TransactionPatch,
 };
 use futures::Stream;
 
@@ -135,7 +134,7 @@ where
   async fn commit(self) -> BTreeResult<()> {
     let mut guard = self.inner.write().await;
     let tree = guard.entry(self.name).or_default();
-    commit_transaction_patch(tree, self.patch);
+    self.patch.commit_into(tree);
     Ok(())
   }
 
@@ -154,7 +153,7 @@ where
     K: Ord,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = patch_get(&self.patch, key.borrow()) {
+    if let Some(value) = self.patch.get_value(key.borrow()) {
       return Ok(Some(value));
     }
 
@@ -171,7 +170,7 @@ where
   where
     K: Ord,
   {
-    patch_insert(&mut self.patch, key, value);
+    self.patch.insert(key, value);
     Ok(())
   }
 
@@ -180,7 +179,7 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = patch_remove(&mut self.patch, key.borrow().clone()) {
+    if let Some(value) = self.patch.remove(key.borrow().clone()) {
       return Ok(Some(value));
     }
 
@@ -196,7 +195,7 @@ where
     drop(guard);
 
     if let Some(key) = existing_key {
-      patch_delete(&mut self.patch, key);
+      self.patch.delete(key);
     }
 
     Ok(value)
@@ -215,7 +214,7 @@ where
       let guard = inner.read().await;
       let empty = BTreeMap::new();
       let tree = guard.get(&name).unwrap_or(&empty);
-      let merged = merge_transaction_patch_range(tree, &patch, range);
+      let merged = patch.merge_range(tree, range);
       for (key, value) in merged {
         yield Ok((key, value));
       }
@@ -234,7 +233,7 @@ where
     Ok(InMemoryNamedTreeTransaction {
       inner: Arc::clone(&self.inner),
       name: self.name.clone(),
-      patch: BTreeMap::new(),
+      patch: TransactionPatch::default(),
     })
   }
 }
@@ -264,7 +263,7 @@ where
     K: Ord,
   {
     let patch = self.patches.entry(tree.to_string()).or_default();
-    patch_insert(patch, key, value);
+    patch.insert(key, value);
     Ok(())
   }
 
@@ -275,7 +274,7 @@ where
     let tree_owned = tree.to_string();
     {
       let patch = self.patches.entry(tree_owned.clone()).or_default();
-      if let Some(existing) = patch_remove(patch, key.clone()) {
+      if let Some(existing) = patch.remove(key.clone()) {
         return Ok(Some(existing));
       }
     }
@@ -289,7 +288,7 @@ where
     drop(guard);
     if let Some(k) = existing_key {
       let patch = self.patches.entry(tree_owned).or_default();
-      patch_delete(patch, k);
+      patch.delete(k);
     }
     Ok(value)
   }
@@ -311,7 +310,7 @@ where
       let guard = inner.read().await;
       let empty = BTreeMap::new();
       let sub_map = guard.get(&tree).unwrap_or(&empty);
-      let merged = merge_transaction_patch_range(sub_map, &patch, range);
+      let merged = patch.merge_range(sub_map, range);
       for (k, v) in merged {
         yield Ok((k, v));
       }
@@ -322,7 +321,7 @@ where
     let mut guard = self.inner.write().await;
     for (name, patch) in self.patches {
       let sub = guard.entry(name).or_default();
-      commit_transaction_patch(sub, patch);
+      patch.commit_into(sub);
     }
     Ok(())
   }

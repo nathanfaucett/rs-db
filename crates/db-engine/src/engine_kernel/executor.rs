@@ -3,9 +3,47 @@ use super::operators::Scan;
 use super::plan::LogicalPlan;
 use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{
-  EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, index_maintainer::IndexMaintainer,
-  query::QualifiedPredicate,
+  EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, query::QualifiedPredicate,
 };
+
+async fn ensure_indexes_unique<TX>(
+  tx: &mut TX,
+  indexes: &[IndexSchema],
+  row: &EngineRow,
+  row_pk: &EngineKey,
+) -> Result<(), EngineError>
+where
+  TX: crate::store_adapter::EngineStoreTransaction,
+{
+  for index in indexes.iter().filter(|index| index.unique) {
+    let index_key = index.key_for(row)?;
+    if tx
+      .find_conflicting_index_entry(index, &index_key, row_pk)
+      .await?
+      .is_some()
+    {
+      return Err(EngineError::UniqueIndexViolation(index.name.clone()));
+    }
+  }
+  Ok(())
+}
+
+async fn insert_all_index_entries<TX>(
+  tx: &mut TX,
+  indexes: &[IndexSchema],
+  row: &EngineRow,
+  primary_key: &EngineKey,
+) -> Result<(), EngineError>
+where
+  TX: crate::store_adapter::EngineStoreTransaction,
+{
+  for index in indexes {
+    let index_key = index.key_for(row)?;
+    tx.insert_index_entry(index, &index_key, primary_key)
+      .await?;
+  }
+  Ok(())
+}
 
 #[derive(Debug)]
 pub(crate) struct EngineWriteTxn<'db, S>
@@ -47,12 +85,12 @@ where
       return Err(EngineError::DuplicatePrimaryKey(pk));
     }
 
-    IndexMaintainer::ensure_unique(tx, &indexes, &row, &pk).await?;
+    ensure_indexes_unique(tx, &indexes, &row, &pk).await?;
 
     tx.insert_table_row(table_name, pk.clone(), row.clone())
       .await?;
 
-    IndexMaintainer::insert_entries(tx, &indexes, &row, &pk).await?;
+    insert_all_index_entries(tx, &indexes, &row, &pk).await?;
 
     Ok(())
   }
@@ -99,12 +137,12 @@ where
       }
 
       Self::delete_row(tx, table_name, &old_pk, &row, &indexes).await?;
-      IndexMaintainer::ensure_unique(tx, &indexes, &updated_row, &new_pk).await?;
+      ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
 
       tx.insert_table_row(table_name, new_pk.clone(), updated_row.clone())
         .await?;
 
-      IndexMaintainer::insert_entries(tx, &indexes, &updated_row, &new_pk).await?;
+      insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
     }
 
     Ok(())

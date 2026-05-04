@@ -1,7 +1,4 @@
-use crate::{
-  BTree, BTreeError, BTreeExecutor, BTreeTransaction, TransactionPatch, commit_transaction_patch,
-  merge_transaction_patch_range, patch_delete, patch_get, patch_insert, patch_remove,
-};
+use crate::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, TransactionPatch};
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
@@ -97,7 +94,7 @@ where
 {
   async fn commit(self) -> Result<(), BTreeError> {
     let mut guard = self.inner.write().await;
-    commit_transaction_patch(&mut guard, self.patch);
+    self.patch.commit_into(&mut guard);
     Ok(())
   }
 
@@ -116,7 +113,7 @@ where
     K: Ord,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = patch_get(&self.patch, &key) {
+    if let Some(value) = self.patch.get_value(&key) {
       return Ok(Some(value));
     }
     let guard = self.inner.read().await;
@@ -127,7 +124,7 @@ where
   where
     K: Ord,
   {
-    patch_insert(&mut self.patch, key, value);
+    self.patch.insert(key, value);
     Ok(())
   }
 
@@ -136,13 +133,13 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = patch_remove(&mut self.patch, key.borrow().clone()) {
+    if let Some(value) = self.patch.remove(key.borrow().clone()) {
       return Ok(Some(value));
     }
     let guard = self.inner.read().await;
     let val = guard.get(key.borrow()).cloned();
     if let Some((owned_key, _)) = guard.get_key_value(key.borrow()) {
-      patch_delete(&mut self.patch, owned_key.clone());
+      self.patch.delete(owned_key.clone());
     }
     Ok(val)
   }
@@ -156,7 +153,7 @@ where
     let patch = self.patch.clone();
     stream! {
       let guard = inner.read().await;
-      let merged = merge_transaction_patch_range(&*guard, &patch, range);
+      let merged = patch.merge_range(&*guard, range);
 
       for (k, v) in merged {
         yield Ok((k, v));
@@ -175,7 +172,7 @@ where
   async fn transaction(&self) -> Result<Self::Transaction, BTreeError> {
     Ok(MockBTreeTransaction {
       inner: self.inner.clone(),
-      patch: BTreeMap::new(),
+      patch: TransactionPatch::default(),
     })
   }
 }

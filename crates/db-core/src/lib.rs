@@ -5,8 +5,6 @@ extern crate alloc;
 mod blocking;
 mod btree;
 mod codec;
-mod codec_helpers;
-mod codec_primitives;
 #[cfg(feature = "registry")]
 mod codec_registry;
 mod named_tree;
@@ -19,24 +17,23 @@ mod transaction_patch;
 
 pub use blocking::block_on;
 pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeResult, BTreeTransaction};
-pub use codec::BufferSink;
 pub use codec::{
-  CURRENT_CODEC_VERSION, DecodeError, FastKeyCodec, FastValueCodec, KeyCodec, KeyScratch,
-  StorageCodec, ValueCodec, compare_encoded_keys, decode_value_to_vec, encode_key_into_scratch,
-  encode_key_to_vec, encode_value_to_vec,
+  BufferSink, CURRENT_CODEC_VERSION, Cursor, DecodeError, FastKeyCodec, FastValueCodec, KeyCodec,
+  KeyScratch, StorageCodec, ValueCodec, canonical_f64_bits, canonical_f64_bits_into_sink,
+  compare_encoded_keys, decode_bool, decode_bytes, decode_from_slice, decode_len, decode_string,
+  decode_usize, decode_value_to_vec, decode_version, decode_with_version, encode_bool,
+  encode_bool_into_sink, encode_bytes, encode_bytes_into_sink, encode_i64, encode_i64_into_sink,
+  encode_key_into_scratch, encode_key_to_vec, encode_len, encode_len_into_sink, encode_string,
+  encode_string_into_sink, encode_u32, encode_u32_into_sink, encode_u64, encode_u64_into_sink,
+  encode_usize, encode_usize_into_sink, encode_value_to_vec, encode_version,
+  encode_version_into_sink, encode_with_version,
 };
-
-pub use codec_helpers::{decode_from_slice, decode_with_version, encode_with_version};
-pub use codec_primitives::*;
 
 pub use range_merge::merge_range_maps;
 
 pub use simple_key::{IntegerI64Codec, Tuple2Codec, Utf8Codec};
 
-pub use transaction_patch::{
-  TransactionEntry, TransactionPatch, commit_transaction_patch, merge_transaction_patch_range,
-  patch_delete, patch_get, patch_insert, patch_remove,
-};
+pub use transaction_patch::{TransactionEntry, TransactionPatch};
 
 #[cfg(feature = "registry")]
 pub use codec_registry::{CodecRegistry, EncodedComparator, TypedComparatorAdapter};
