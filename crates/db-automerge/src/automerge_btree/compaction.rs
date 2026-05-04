@@ -6,15 +6,34 @@ use uuid::Uuid;
 
 use super::{AutomergeEntry, DocumentChangeKey, DocumentType};
 
-/// Simple compaction policy helper.
-pub fn should_compact(
-  delta_count: usize,
-  delta_bytes: usize,
-  threshold_count: usize,
-  threshold_bytes: usize,
-) -> bool {
-  (threshold_count > 0 && delta_count >= threshold_count)
-    || (threshold_bytes > 0 && delta_bytes >= threshold_bytes)
+pub trait CompactionPolicy: Send + Sync {
+  fn should_compact(&self, delta_count: usize, delta_bytes: usize) -> bool;
+}
+
+pub struct ThresholdPolicy {
+  pub threshold_count: usize,
+  pub threshold_bytes: usize,
+}
+
+impl ThresholdPolicy {
+  pub const DEFAULT_COUNT: usize = 100;
+  pub const DEFAULT_BYTES: usize = 1024 * 1024;
+}
+
+impl Default for ThresholdPolicy {
+  fn default() -> Self {
+    Self {
+      threshold_count: Self::DEFAULT_COUNT,
+      threshold_bytes: Self::DEFAULT_BYTES,
+    }
+  }
+}
+
+impl CompactionPolicy for ThresholdPolicy {
+  fn should_compact(&self, delta_count: usize, delta_bytes: usize) -> bool {
+    (self.threshold_count > 0 && delta_count >= self.threshold_count)
+      || (self.threshold_bytes > 0 && delta_bytes >= self.threshold_bytes)
+  }
 }
 
 #[derive(Debug)]
@@ -105,8 +124,12 @@ mod tests {
 
   #[test]
   fn thresholds_respected() {
-    assert!(should_compact(10, 0, 5, 0));
-    assert!(should_compact(0, 1024, 0, 512));
-    assert!(!should_compact(2, 10, 5, 100));
+    let policy = ThresholdPolicy {
+      threshold_count: 5,
+      threshold_bytes: 512,
+    };
+    assert!(policy.should_compact(10, 0));
+    assert!(policy.should_compact(0, 1024));
+    assert!(!policy.should_compact(2, 10));
   }
 }

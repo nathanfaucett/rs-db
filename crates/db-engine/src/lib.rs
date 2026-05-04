@@ -1,5 +1,6 @@
 mod engine;
 mod engine_kernel;
+mod predicate;
 mod query;
 mod schema_resolver;
 mod store_adapter;

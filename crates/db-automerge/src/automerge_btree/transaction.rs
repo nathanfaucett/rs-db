@@ -9,10 +9,9 @@ use futures::{Stream, StreamExt};
 
 use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
-use sha2::Digest;
 use uuid::Uuid;
 
-use super::{AutomergeEntry, DocumentChangeKey, DocumentType, reconstruct};
+use super::{AutomergeEntry, DocumentChangeKey, DocumentType, hash::make_change_hash, reconstruct};
 
 fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
   let start = DocumentChangeKey {
@@ -45,22 +44,6 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
       s.buf
     },
   )
-}
-
-fn make_change_hash(payload: &[u8]) -> [u8; 32] {
-  let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-    Ok(d) => d.as_nanos(),
-    Err(_) => 0u128,
-  };
-  let mut hasher = sha2::Sha256::new();
-  hasher.update(payload);
-  let digest = hasher.finalize();
-
-  let mut out = [0u8; 32];
-  let ts_be = ts.to_be_bytes();
-  out[0..8].copy_from_slice(&ts_be[8..16]);
-  out[8..32].copy_from_slice(&digest[0..24]);
-  out
 }
 
 #[derive(Debug)]

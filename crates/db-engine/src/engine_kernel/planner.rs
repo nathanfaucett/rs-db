@@ -2,27 +2,20 @@ use std::collections::{HashMap, HashSet};
 
 use futures::future::FutureExt;
 
+use crate::predicate::{GroupRowContext, JoinedRowContext, eval_having_predicate, eval_predicate};
 use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, TableSchema, query::EngineQuery,
-  query::EngineResult, query::HavingPredicate, query::JoinKind, query::JoinOn,
-  query::QualifiedColumn, query::QualifiedOperand, query::QualifiedPredicate, query::RefOrAgg,
-  query::SelectOptions,
+  query::EngineResult, query::JoinKind, query::JoinOn, query::QualifiedColumn,
+  query::QualifiedPredicate, query::SelectOptions,
 };
 
 use super::catalog::EngineCatalog;
 use super::executor::{EngineWriteTxn, Executor};
+use super::operators::nested_loop_join::{
+  apply_full_join, apply_inner_join, apply_left_join, apply_right_join,
+};
 use super::plan::LogicalPlan;
-
-fn get_partial_column_value(
-  partial: &HashMap<String, Option<EngineRow>>,
-  qc: &QualifiedColumn,
-) -> Option<EngineValue> {
-  match partial.get(&qc.table) {
-    Some(Some(row)) => row.get(qc.column_index).cloned(),
-    _ => None,
-  }
-}
 
 fn collect_subqueries(pred: &QualifiedPredicate, acc: &mut Vec<crate::EngineQuery>) {
   match pred {
@@ -45,304 +38,6 @@ fn is_simple_select(options: &crate::query::SelectOptions) -> bool {
     && options.offset.is_none()
     && !options.distinct
     && options.having.is_none()
-}
-
-fn eval_qualified_predicate(
-  pred: &QualifiedPredicate,
-  partial: &HashMap<String, Option<EngineRow>>,
-  subquery_cache: &HashMap<String, HashSet<EngineValue>>,
-) -> bool {
-  fn operand_value(
-    op: &QualifiedOperand,
-    partial: &HashMap<String, Option<EngineRow>>,
-  ) -> Option<EngineValue> {
-    match op {
-      QualifiedOperand::Value(v) => Some(v.clone()),
-      QualifiedOperand::Column(qc) => get_partial_column_value(partial, qc),
-    }
-  }
-
-  match pred {
-    QualifiedPredicate::Equals(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv == rv)
-    }
-    QualifiedPredicate::NotEquals(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv != rv)
-    }
-    QualifiedPredicate::LessThan(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv < rv)
-    }
-    QualifiedPredicate::LessThanOrEquals(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv <= rv)
-    }
-    QualifiedPredicate::GreaterThan(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv > rv)
-    }
-    QualifiedPredicate::GreaterThanOrEquals(l, r) => {
-      let lv = operand_value(l, partial);
-      let rv = operand_value(r, partial);
-      matches!((lv, rv), (Some(lv), Some(rv)) if lv >= rv)
-    }
-    QualifiedPredicate::IsNull(qc) => match partial.get(&qc.table) {
-      Some(Some(row)) => matches!(row.get(qc.column_index), Some(crate::EngineValue::Null)),
-      _ => false,
-    },
-    QualifiedPredicate::IsNotNull(qc) => match partial.get(&qc.table) {
-      Some(Some(row)) => match row.get(qc.column_index) {
-        Some(crate::EngineValue::Null) => false,
-        Some(_) => true,
-        None => false,
-      },
-      _ => false,
-    },
-    QualifiedPredicate::InList {
-      expr,
-      list,
-      negated,
-    } => {
-      let found = match get_partial_column_value(partial, expr) {
-        Some(v) => list.iter().any(|x| x == &v),
-        None => false,
-      };
-      if *negated { !found } else { found }
-    }
-    QualifiedPredicate::InSubquery {
-      expr,
-      subquery,
-      negated,
-    } => {
-      let lv = get_partial_column_value(partial, expr);
-      let key = format!("{:?}", subquery);
-      let set = subquery_cache.get(&key);
-      let found = match (lv, set) {
-        (Some(v), Some(s)) => s.contains(&v),
-        _ => false,
-      };
-      if *negated { !found } else { found }
-    }
-    QualifiedPredicate::And(l, r) => {
-      eval_qualified_predicate(l, partial, subquery_cache)
-        && eval_qualified_predicate(r, partial, subquery_cache)
-    }
-    QualifiedPredicate::Or(l, r) => {
-      eval_qualified_predicate(l, partial, subquery_cache)
-        || eval_qualified_predicate(r, partial, subquery_cache)
-    }
-    QualifiedPredicate::Not(p) => !eval_qualified_predicate(p, partial, subquery_cache),
-  }
-}
-
-fn apply_inner_join(
-  partial_results: &[HashMap<String, Option<EngineRow>>],
-  right_rows: &[EngineRow],
-  right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
-) -> Vec<HashMap<String, Option<EngineRow>>> {
-  let mut new_results = Vec::new();
-  for partial in partial_results {
-    let left_val = get_partial_column_value(partial, left_qc);
-    if left_val.is_none() {
-      continue;
-    }
-
-    for rr in right_rows {
-      let right_val = rr.get(right_qc.column_index).cloned();
-      if let (Some(lv), Some(rv)) = (left_val.clone(), right_val)
-        && lv == rv
-      {
-        let mut np = partial.clone();
-        np.insert(right_table.to_string(), Some(rr.clone()));
-        new_results.push(np);
-      }
-    }
-  }
-  new_results
-}
-
-fn apply_left_join(
-  partial_results: &[HashMap<String, Option<EngineRow>>],
-  right_rows: &[EngineRow],
-  right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
-) -> Vec<HashMap<String, Option<EngineRow>>> {
-  let mut new_results = Vec::new();
-  for partial in partial_results {
-    let mut matched = false;
-    let left_val = get_partial_column_value(partial, left_qc);
-    if let Some(lv) = left_val.clone() {
-      for rr in right_rows {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          matched = true;
-        }
-      }
-    }
-
-    if !matched {
-      let mut np = partial.clone();
-      np.insert(right_table.to_string(), None);
-      new_results.push(np);
-    }
-  }
-  new_results
-}
-
-fn apply_right_join(
-  partial_results: &[HashMap<String, Option<EngineRow>>],
-  right_rows: &[EngineRow],
-  right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
-  template: &HashMap<String, Option<EngineRow>>,
-) -> Vec<HashMap<String, Option<EngineRow>>> {
-  let mut new_results = Vec::new();
-  let mut matched = vec![false; right_rows.len()];
-
-  for (ri, rr) in right_rows.iter().enumerate() {
-    let mut any = false;
-    for partial in partial_results {
-      let left_val = get_partial_column_value(partial, left_qc);
-      if let Some(lv) = left_val.clone() {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          matched[ri] = true;
-          any = true;
-        }
-      }
-    }
-
-    if !any {
-      let mut np = template.clone();
-      np.insert(right_table.to_string(), Some(rr.clone()));
-      new_results.push(np);
-    }
-  }
-
-  new_results
-}
-
-fn apply_full_join(
-  partial_results: &[HashMap<String, Option<EngineRow>>],
-  right_rows: &[EngineRow],
-  right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
-  template: &HashMap<String, Option<EngineRow>>,
-) -> Vec<HashMap<String, Option<EngineRow>>> {
-  let mut new_results = Vec::new();
-  let mut matched = vec![false; right_rows.len()];
-
-  for partial in partial_results {
-    let mut any = false;
-    let left_val = get_partial_column_value(partial, left_qc);
-    if let Some(lv) = left_val.clone() {
-      for (ri, rr) in right_rows.iter().enumerate() {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          matched[ri] = true;
-          any = true;
-        }
-      }
-    }
-
-    if !any {
-      let mut np = partial.clone();
-      np.insert(right_table.to_string(), None);
-      new_results.push(np);
-    }
-  }
-
-  for (ri, rr) in right_rows.iter().enumerate() {
-    if !matched[ri] {
-      let mut np = template.clone();
-      np.insert(right_table.to_string(), Some(rr.clone()));
-      new_results.push(np);
-    }
-  }
-
-  new_results
-}
-
-fn resolve_having_ref(
-  r: &RefOrAgg,
-  row: &EngineRow,
-  group_by: &[QualifiedColumn],
-) -> Option<EngineValue> {
-  match r {
-    RefOrAgg::Column(qc) => group_by
-      .iter()
-      .position(|g| g == qc)
-      .and_then(|pos| row.get(pos).cloned()),
-    RefOrAgg::AggregateIndex(i) => row.get(group_by.len() + *i).cloned(),
-  }
-}
-
-fn eval_having(h: &HavingPredicate, row: &EngineRow, group_by: &[QualifiedColumn]) -> bool {
-  match h {
-    HavingPredicate::Equals(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv == *v,
-      None => false,
-    },
-    HavingPredicate::NotEquals(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv != *v,
-      None => false,
-    },
-    HavingPredicate::LessThan(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv < *v,
-      None => false,
-    },
-    HavingPredicate::LessThanOrEquals(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv <= *v,
-      None => false,
-    },
-    HavingPredicate::GreaterThan(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv > *v,
-      None => false,
-    },
-    HavingPredicate::GreaterThanOrEquals(r, v) => match resolve_having_ref(r, row, group_by) {
-      Some(rv) => rv >= *v,
-      None => false,
-    },
-    HavingPredicate::IsNull(r) => matches!(
-      resolve_having_ref(r, row, group_by),
-      Some(crate::EngineValue::Null)
-    ),
-    HavingPredicate::IsNotNull(r) => match resolve_having_ref(r, row, group_by) {
-      Some(crate::EngineValue::Null) => false,
-      Some(_) => true,
-      None => false,
-    },
-    HavingPredicate::And(l, r) => eval_having(l, row, group_by) && eval_having(r, row, group_by),
-    HavingPredicate::Or(l, r) => eval_having(l, row, group_by) || eval_having(r, row, group_by),
-    HavingPredicate::Not(p) => !eval_having(p, row, group_by),
-  }
 }
 
 #[derive(Debug, Clone)]
@@ -558,7 +253,10 @@ where
         subquery_cache.insert(key, set);
       }
 
-      partial_results.retain(|p| eval_qualified_predicate(qpred, p, &subquery_cache));
+      partial_results.retain(|p| {
+        let ctx = JoinedRowContext { partial: p };
+        eval_predicate(qpred, &ctx, &subquery_cache)
+      });
     }
 
     if !needs_grouping {
@@ -822,7 +520,13 @@ where
 
     // Apply HAVING filter if present
     if let Some(having) = &options.having {
-      out_rows.retain(|r| eval_having(having, r, &options.group_by));
+      out_rows.retain(|r| {
+        let ctx = GroupRowContext {
+          row: r,
+          group_by: &options.group_by,
+        };
+        eval_having_predicate(having, &ctx)
+      });
     }
 
     // If ORDER BY is requested in a grouped query, only support ordering by group keys or by aggregates

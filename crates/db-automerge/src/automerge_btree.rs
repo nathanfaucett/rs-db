@@ -5,7 +5,6 @@ use automerge::AutoCommit;
 use db_core::BufferSink;
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use futures::{Stream, StreamExt};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
@@ -87,34 +86,30 @@ impl core::cmp::PartialOrd for DocumentChangeKey {
   }
 }
 
-mod codec;
 mod compaction;
+mod hash;
 mod reconstruction;
 mod transaction;
 
-use self::compaction::{run_compaction, should_compact};
+use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
+use self::hash::make_change_hash;
 use self::reconstruction::reconstruct;
 use self::transaction::AutomergeTransaction;
 
 /// Backend-agnostic Automerge wrapper. Parameterized over any `BTree` backend.
 pub struct AutomergeBTree<B> {
   inner: B,
-  compaction_threshold_count: usize,
-  compaction_threshold_bytes: usize,
+  policy: Box<dyn CompactionPolicy>,
 }
 
 impl<B> AutomergeBTree<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  pub const DEFAULT_COMPACTION_THRESHOLD_COUNT: usize = 100;
-  pub const DEFAULT_COMPACTION_THRESHOLD_BYTES: usize = 1024 * 1024;
-
   pub fn new(inner: B) -> Self {
     Self {
       inner,
-      compaction_threshold_count: Self::DEFAULT_COMPACTION_THRESHOLD_COUNT,
-      compaction_threshold_bytes: Self::DEFAULT_COMPACTION_THRESHOLD_BYTES,
+      policy: Box::new(ThresholdPolicy::default()),
     }
   }
 
@@ -125,36 +120,20 @@ where
   ) -> Self {
     Self {
       inner,
-      compaction_threshold_count,
-      compaction_threshold_bytes,
+      policy: Box::new(ThresholdPolicy {
+        threshold_count: compaction_threshold_count,
+        threshold_bytes: compaction_threshold_bytes,
+      }),
     }
   }
 
-  /// Helper: compute change_hash = timestamp_prefix (8 bytes BE) + sha256(payload) truncated to 24 bytes
-  fn make_change_hash(payload: &[u8]) -> [u8; 32] {
-    let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-      Ok(d) => d.as_nanos(),
-      Err(_) => 0u128,
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(payload);
-    let digest = hasher.finalize();
-
-    let mut out = [0u8; 32];
-    let ts_be = ts.to_be_bytes();
-    out[0..8].copy_from_slice(&ts_be[8..16]);
-    out[8..32].copy_from_slice(&digest[0..24]);
-    out
+  pub fn new_with_policy(inner: B, policy: Box<dyn CompactionPolicy>) -> Self {
+    Self { inner, policy }
   }
 
-  /// Reconstruct the latest document state for `doc_id` + `doc_type`.
-  /// If compaction thresholds are exceeded, perform inline compaction (atomic snapshot + cleanup).
-  async fn get_document(
-    &self,
-    doc_id: Uuid,
-    compaction_threshold_count: usize,
-    compaction_threshold_bytes: usize,
-  ) -> Option<Vec<u8>> {
+  /// Reconstruct the latest document state for `doc_id`.
+  /// If the compaction policy triggers, perform inline compaction (atomic snapshot + cleanup).
+  async fn get_document(&self, doc_id: Uuid) -> Option<Vec<u8>> {
     // scan across all type variants for this doc_id
     let start = DocumentChangeKey {
       doc_id,
@@ -202,12 +181,7 @@ where
     let mut state = latest_snapshot.unwrap_or_default();
     state = reconstruct(&state, &deltas_after_snapshot);
 
-    if should_compact(
-      delta_count,
-      delta_bytes,
-      compaction_threshold_count,
-      compaction_threshold_bytes,
-    ) {
+    if self.policy.should_compact(delta_count, delta_bytes) {
       match self.inner.transaction().await {
         Ok(tx) => {
           if let Err(err) = run_compaction(
@@ -216,7 +190,7 @@ where
             end.clone(),
             doc_id,
             state.clone(),
-            Self::make_change_hash,
+            make_change_hash,
           )
           .await
           {
@@ -244,17 +218,8 @@ where
     Q: Borrow<Uuid> + Send + 'a,
   {
     let doc_id = *key.borrow();
-    let compaction_threshold_count = self.compaction_threshold_count;
-    let compaction_threshold_bytes = self.compaction_threshold_bytes;
 
-    match self
-      .get_document(
-        doc_id,
-        compaction_threshold_count,
-        compaction_threshold_bytes,
-      )
-      .await
-    {
+    match self.get_document(doc_id).await {
       None => Ok(None),
       Some(bytes) => match AutoCommit::load(&bytes) {
         Ok(doc) => Ok(Some(doc)),
@@ -295,20 +260,7 @@ where
       }
     }
 
-    let change_hash = {
-      let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_nanos(),
-        Err(_) => 0u128,
-      };
-      let mut hasher = Sha256::new();
-      hasher.update(&bytes);
-      let digest = hasher.finalize();
-      let mut out = [0u8; 32];
-      let ts_be = ts.to_be_bytes();
-      out[0..8].copy_from_slice(&ts_be[8..16]);
-      out[8..32].copy_from_slice(&digest[0..24]);
-      out
-    };
+    let change_hash = make_change_hash(&bytes);
     let internal_key = DocumentChangeKey {
       doc_id: key,
       doc_type: DocumentType::Snapshot,
@@ -324,13 +276,7 @@ where
   {
     let doc_id = *key.borrow();
     // capture previous state
-    let prev = self
-      .get_document(
-        doc_id,
-        self.compaction_threshold_count,
-        self.compaction_threshold_bytes,
-      )
-      .await;
+    let prev = self.get_document(doc_id).await;
 
     // Prefer atomic removal via transaction on the underlying tree.
     let start = DocumentChangeKey {
@@ -531,24 +477,6 @@ where
   ) -> Result<DocumentChangeKey, db_core::DecodeError> {
     <KC2 as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(data)
   }
-
-  /// Helper: compute change_hash = timestamp_prefix (8 bytes BE) + sha256(payload) truncated to 24 bytes
-  #[allow(dead_code)]
-  fn make_change_hash(payload: &[u8]) -> [u8; 32] {
-    let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-      Ok(d) => d.as_nanos(),
-      Err(_) => 0u128,
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(payload);
-    let digest = hasher.finalize();
-
-    let mut out = [0u8; 32];
-    let ts_be = ts.to_be_bytes();
-    out[0..8].copy_from_slice(&ts_be[8..16]);
-    out[8..32].copy_from_slice(&digest[0..24]);
-    out
-  }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -729,20 +657,7 @@ where
       return Ok(());
     }
 
-    let change_hash = {
-      let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_nanos(),
-        Err(_) => 0u128,
-      };
-      let mut hasher = Sha256::new();
-      hasher.update(&bytes);
-      let digest = hasher.finalize();
-      let mut out = [0u8; 32];
-      let ts_be = ts.to_be_bytes();
-      out[0..8].copy_from_slice(&ts_be[8..16]);
-      out[8..32].copy_from_slice(&digest[0..24]);
-      out
-    };
+    let change_hash = make_change_hash(&bytes);
     let internal_key = DocumentChangeKey {
       doc_id: key,
       doc_type: DocumentType::Snapshot,
@@ -1026,16 +941,13 @@ mod tests {
   fn compaction_with_concurrent_writer() {
     block_on(async {
       let underlying = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
-      let automerge = AutomergeBTree::new(underlying.clone());
+      let automerge = AutomergeBTree::with_compaction(underlying.clone(), 1, 1);
       let doc_id = Uuid::new_v4();
 
       let delta_key = DocumentChangeKey {
         doc_id,
         doc_type: DocumentType::Incremental,
-        change_hash:
-          AutomergeBTree::<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>::make_change_hash(
-            b"hello",
-          ),
+        change_hash: super::hash::make_change_hash(b"hello"),
       };
 
       // insert initial delta directly into underlying storage
@@ -1052,12 +964,11 @@ mod tests {
       let writer_key = DocumentChangeKey {
         doc_id,
         doc_type: DocumentType::Incremental,
-        change_hash:
-          AutomergeBTree::<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>::make_change_hash(b"!"),
+        change_hash: super::hash::make_change_hash(b"!"),
       };
       let writer_key_clone = writer_key.clone();
 
-      let read_future = reader.get_document(doc_id, 1, 1);
+      let read_future = reader.get_document(doc_id);
       let write_future = async move {
         let mut tx = writer_store.transaction().await.expect("start writer tx");
         tx.insert(writer_key_clone, b"!".to_vec())
@@ -1069,9 +980,9 @@ mod tests {
       let (read_state, ()) = future::join(read_future, write_future).await;
       assert_eq!(read_state.unwrap(), b"hello".to_vec());
 
-      let final_store = AutomergeBTree::new(underlying.clone());
+      let final_store = AutomergeBTree::with_compaction(underlying.clone(), 1, 1);
       let final_state = final_store
-        .get_document(doc_id, 1, 1)
+        .get_document(doc_id)
         .await
         .expect("final get_document");
       assert_eq!(final_state, b"hello".to_vec());

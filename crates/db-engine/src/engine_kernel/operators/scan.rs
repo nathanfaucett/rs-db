@@ -1,6 +1,6 @@
 use crate::{
   EngineError, EngineRow, EngineValue,
-  query::{QualifiedColumn, QualifiedOperand, QualifiedPredicate},
+  query::{QualifiedColumn, QualifiedPredicate},
 };
 
 pub struct Scan {
@@ -70,80 +70,13 @@ impl Scan {
   }
 
   fn eval_predicate(&self, pred: &QualifiedPredicate, row: &EngineRow) -> bool {
-    let operand_value = |op: &QualifiedOperand| match op {
-      QualifiedOperand::Value(v) => Some(v.clone()),
-      QualifiedOperand::Column(qc) => {
-        if qc.table != self.table {
-          return None;
-        }
-        row.get(qc.column_index).cloned()
-      }
+    use crate::predicate::{SingleRowContext, eval_predicate as do_eval};
+    use std::collections::HashMap;
+    let ctx = SingleRowContext {
+      table: &self.table,
+      row,
     };
-
-    match pred {
-      QualifiedPredicate::Equals(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv == rv)
-      }
-      QualifiedPredicate::NotEquals(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv != rv)
-      }
-      QualifiedPredicate::LessThan(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv < rv)
-      }
-      QualifiedPredicate::LessThanOrEquals(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv <= rv)
-      }
-      QualifiedPredicate::GreaterThan(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv > rv)
-      }
-      QualifiedPredicate::GreaterThanOrEquals(left, right) => {
-        let lv = operand_value(left);
-        let rv = operand_value(right);
-        matches!((lv, rv), (Some(lv), Some(rv)) if lv >= rv)
-      }
-      QualifiedPredicate::IsNull(qc) => {
-        matches!(
-          operand_value(&QualifiedOperand::Column(qc.clone())),
-          Some(EngineValue::Null)
-        )
-      }
-      QualifiedPredicate::IsNotNull(qc) => {
-        match operand_value(&QualifiedOperand::Column(qc.clone())) {
-          Some(EngineValue::Null) => false,
-          Some(_) => true,
-          None => false,
-        }
-      }
-      QualifiedPredicate::InList {
-        expr,
-        list,
-        negated,
-      } => {
-        let found = match operand_value(&QualifiedOperand::Column(expr.clone())) {
-          Some(v) => list.iter().any(|x| x == &v),
-          None => false,
-        };
-        if *negated { !found } else { found }
-      }
-      QualifiedPredicate::InSubquery { .. } => false,
-      QualifiedPredicate::And(left, right) => {
-        self.eval_predicate(left, row) && self.eval_predicate(right, row)
-      }
-      QualifiedPredicate::Or(left, right) => {
-        self.eval_predicate(left, row) || self.eval_predicate(right, row)
-      }
-      QualifiedPredicate::Not(inner) => !self.eval_predicate(inner, row),
-    }
+    do_eval(pred, &ctx, &HashMap::new())
   }
 }
 

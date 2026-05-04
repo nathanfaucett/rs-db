@@ -81,74 +81,12 @@ pub enum QualifiedPredicate {
   Not(Box<QualifiedPredicate>),
 }
 
-fn eval_operand_single(op: &QualifiedOperand, table: &str, row: &EngineRow) -> Option<EngineValue> {
-  match op {
-    QualifiedOperand::Value(v) => Some(v.clone()),
-    QualifiedOperand::Column(qc) if qc.table == table => row.get(qc.column_index).cloned(),
-    QualifiedOperand::Column(_) => None,
-  }
-}
-
 impl QualifiedPredicate {
   pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
-    match self {
-      QualifiedPredicate::Equals(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a == b)
-      }
-      QualifiedPredicate::NotEquals(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a != b)
-      }
-      QualifiedPredicate::LessThan(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a < b)
-      }
-      QualifiedPredicate::LessThanOrEquals(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a <= b)
-      }
-      QualifiedPredicate::GreaterThan(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a > b)
-      }
-      QualifiedPredicate::GreaterThanOrEquals(l, r) => {
-        let lv = eval_operand_single(l, table, row);
-        let rv = eval_operand_single(r, table, row);
-        matches!((lv, rv), (Some(a), Some(b)) if a >= b)
-      }
-      QualifiedPredicate::IsNull(qc) if qc.table == table => row
-        .get(qc.column_index)
-        .map(|v| matches!(v, EngineValue::Null))
-        .unwrap_or(false),
-      QualifiedPredicate::IsNull(_) => false,
-      QualifiedPredicate::IsNotNull(qc) if qc.table == table => row
-        .get(qc.column_index)
-        .map(|v| !matches!(v, EngineValue::Null))
-        .unwrap_or(false),
-      QualifiedPredicate::IsNotNull(_) => false,
-      QualifiedPredicate::InList {
-        expr,
-        list,
-        negated,
-      } if expr.table == table => {
-        let found = row
-          .get(expr.column_index)
-          .map(|v| list.iter().any(|x| x == v))
-          .unwrap_or(false);
-        if *negated { !found } else { found }
-      }
-      QualifiedPredicate::InList { .. } => false,
-      QualifiedPredicate::InSubquery { .. } => false,
-      QualifiedPredicate::And(l, r) => l.matches_row(table, row) && r.matches_row(table, row),
-      QualifiedPredicate::Or(l, r) => l.matches_row(table, row) || r.matches_row(table, row),
-      QualifiedPredicate::Not(p) => !p.matches_row(table, row),
-    }
+    use crate::predicate::{SingleRowContext, eval_predicate};
+    use std::collections::HashMap;
+    let ctx = SingleRowContext { table, row };
+    eval_predicate(self, &ctx, &HashMap::new())
   }
 
   pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {
