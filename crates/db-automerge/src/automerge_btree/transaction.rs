@@ -2,7 +2,6 @@ use std::{
   borrow::Borrow,
   collections::BTreeMap,
   ops::{Bound, RangeBounds},
-  sync::Arc,
 };
 
 use async_stream::stream;
@@ -12,11 +11,7 @@ use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
-use super::{
-  AutomergeEntry, DocumentChangeKey, DocumentType,
-  hash::{HashStrategy, make_change_hash},
-  reconstruct,
-};
+use super::{AutomergeEntry, DocumentChangeKey, DocumentType, hash::hash_heads, reconstruct};
 
 fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
   let start = DocumentChangeKey {
@@ -54,18 +49,16 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
 pub struct AutomergeTransaction<T> {
   inner_tx: T,
   pending: BTreeMap<Uuid, Option<AutoCommit>>,
-  hash_strategy: Arc<dyn HashStrategy>,
 }
 
 impl<T> AutomergeTransaction<T>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry> + Send,
 {
-  pub fn new(inner_tx: T, hash_strategy: Arc<dyn HashStrategy>) -> Self {
+  pub fn new(inner_tx: T) -> Self {
     Self {
       inner_tx,
       pending: BTreeMap::new(),
-      hash_strategy,
     }
   }
 
@@ -147,12 +140,12 @@ where
     let AutomergeTransaction {
       mut inner_tx,
       pending,
-      hash_strategy,
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
         // staged insert: write a snapshot internal entry
         let mut doc = snapshot_doc;
+        let change_hash = hash_heads(&doc.get_heads());
         let bytes = doc.save();
 
         // If an identical snapshot already exists in the underlying
@@ -185,7 +178,6 @@ where
           continue;
         }
 
-        let change_hash = hash_strategy.make_change_hash(&bytes);
         let key = DocumentChangeKey {
           doc_id,
           doc_type: DocumentType::Snapshot,
@@ -483,6 +475,7 @@ where
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
         let mut doc = snapshot_doc;
+        let change_hash = hash_heads(&doc.get_heads());
         let bytes = doc.save();
 
         let (start_enc, end_enc) = uuid_prefix_range(doc_id);
@@ -506,7 +499,6 @@ where
           continue;
         }
 
-        let change_hash = make_change_hash(&bytes);
         let key = DocumentChangeKey {
           doc_id,
           doc_type: DocumentType::Snapshot,

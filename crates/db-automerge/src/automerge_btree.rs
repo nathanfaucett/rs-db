@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds, sync::Arc};
+use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds};
 
 use async_stream::stream;
 use automerge::AutoCommit;
@@ -91,8 +91,9 @@ mod hash;
 mod reconstruction;
 mod transaction;
 
+use crate::automerge_btree::hash::{hash_hashes, hash_heads};
+
 use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
-use self::hash::{HashStrategy, Sha256TimestampStrategy, make_change_hash};
 use self::reconstruction::reconstruct;
 use self::transaction::AutomergeTransaction;
 
@@ -136,7 +137,6 @@ fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
 pub struct AutomergeBTree<B> {
   inner: B,
   policy: Box<dyn CompactionPolicy>,
-  hash_strategy: Arc<dyn HashStrategy>,
 }
 
 impl<B> AutomergeBTree<B>
@@ -147,7 +147,6 @@ where
     Self {
       inner,
       policy: Box::new(ThresholdPolicy::default()),
-      hash_strategy: Arc::new(Sha256TimestampStrategy),
     }
   }
 
@@ -162,28 +161,11 @@ where
         threshold_count: compaction_threshold_count,
         threshold_bytes: compaction_threshold_bytes,
       }),
-      hash_strategy: Arc::new(Sha256TimestampStrategy),
     }
   }
 
   pub fn new_with_policy(inner: B, policy: Box<dyn CompactionPolicy>) -> Self {
-    Self {
-      inner,
-      policy,
-      hash_strategy: Arc::new(Sha256TimestampStrategy),
-    }
-  }
-
-  pub fn new_with_hash_strategy(
-    inner: B,
-    policy: Box<dyn CompactionPolicy>,
-    hash_strategy: Arc<dyn HashStrategy>,
-  ) -> Self {
-    Self {
-      inner,
-      policy,
-      hash_strategy,
-    }
+    Self { inner, policy }
   }
 
   /// Reconstruct the latest document state for `doc_id`.
@@ -234,15 +216,8 @@ where
     if self.policy.should_compact(delta_count, delta_bytes) {
       match self.inner.transaction().await {
         Ok(tx) => {
-          if let Err(err) = run_compaction(
-            tx,
-            start.clone(),
-            end.clone(),
-            doc_id,
-            state.clone(),
-            &self.hash_strategy,
-          )
-          .await
+          if let Err(err) =
+            run_compaction(tx, start.clone(), end.clone(), doc_id, state.clone()).await
           {
             eprintln!("Automerge compaction failed: {err}");
           }
@@ -275,44 +250,39 @@ where
     }
   }
 
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
+  async fn insert<'a>(&'a mut self, key: Uuid, mut value: AutoCommit) -> Result<(), BTreeError>
   where
     Uuid: Ord,
   {
-    let mut doc = value;
-    let bytes = doc.save();
-
-    // Check for an identical snapshot already stored for this doc_id.
-    // If found, treat insert as idempotent and do nothing.
-    let start = DocumentChangeKey {
-      doc_id: key,
-      doc_type: DocumentType::Snapshot,
-      change_hash: [0u8; 32],
-    };
-    let end = DocumentChangeKey {
-      doc_id: key,
-      doc_type: DocumentType::Snapshot,
-      change_hash: [255u8; 32],
-    };
-
-    {
-      let stream = self.inner.range(start.clone()..=end.clone());
-      futures::pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        let (_k, v) = item?;
-        if v == bytes {
-          // identical snapshot already present; idempotent insert
-          return Ok(());
-        }
+    let (internal_key, bytes) = if let Some(mut current_doc) = self.get(key).await? {
+      let changes = value.get_changes(&current_doc.get_heads());
+      let mut bytes = Vec::new();
+      let mut change_hashes = Vec::with_capacity(changes.len());
+      for c in &changes {
+        bytes.extend_from_slice(c.raw_bytes());
+        change_hashes.push(c.hash().0);
       }
-    }
+      let change_hash = hash_hashes(change_hashes);
 
-    let change_hash = make_change_hash(&bytes);
-    let internal_key = DocumentChangeKey {
-      doc_id: key,
-      doc_type: DocumentType::Snapshot,
-      change_hash,
+      let internal_key = DocumentChangeKey {
+        doc_id: key,
+        doc_type: DocumentType::Incremental,
+        change_hash,
+      };
+      (internal_key, bytes)
+    } else {
+      let heads = value.get_heads();
+      let change_hash = hash_heads(&heads);
+
+      let internal_key = DocumentChangeKey {
+        doc_id: key,
+        doc_type: DocumentType::Snapshot,
+        change_hash,
+      };
+      let bytes = value.save();
+      (internal_key, bytes)
     };
+
     self.inner.insert(internal_key, bytes).await
   }
 
@@ -457,10 +427,7 @@ where
 
   async fn transaction(&self) -> Result<Self::Transaction, BTreeError> {
     let inner_tx = self.inner.transaction().await?;
-    Ok(AutomergeTransaction::new(
-      inner_tx,
-      Arc::clone(&self.hash_strategy),
-    ))
+    Ok(AutomergeTransaction::new(inner_tx))
   }
 }
 
@@ -656,6 +623,7 @@ where
     Uuid: Ord,
   {
     let mut doc = value;
+    let change_hash = hash_heads(&doc.get_heads());
     let bytes = doc.save();
 
     let (start_enc, end_enc) = uuid_prefix_range(key);
@@ -679,7 +647,6 @@ where
       return Ok(());
     }
 
-    let change_hash = make_change_hash(&bytes);
     let internal_key = DocumentChangeKey {
       doc_id: key,
       doc_type: DocumentType::Snapshot,
@@ -941,16 +908,26 @@ mod tests {
       let automerge = AutomergeBTree::with_compaction(underlying.clone(), 1, 1);
       let doc_id = Uuid::new_v4();
 
+      let mut base_doc = AutoCommit::new();
+      base_doc
+        .put(&automerge::ROOT, "message", "hello")
+        .expect("put base value");
+      let base_changes = base_doc.get_changes(&[]);
+      let mut base_delta = Vec::new();
+      for change in &base_changes {
+        base_delta.extend_from_slice(change.raw_bytes());
+      }
+
       let delta_key = DocumentChangeKey {
         doc_id,
         doc_type: DocumentType::Incremental,
-        change_hash: super::hash::make_change_hash(b"hello"),
+        change_hash: super::hash::hash_hashes(base_changes.iter().map(|c| c.hash().0)),
       };
 
       // insert initial delta directly into underlying storage
       {
         let mut tx = underlying.transaction().await.expect("start tx");
-        tx.insert(delta_key.clone(), b"hello".to_vec())
+        tx.insert(delta_key.clone(), base_delta.clone())
           .await
           .expect("insert delta");
         tx.commit().await.expect("commit tx");
@@ -958,38 +935,50 @@ mod tests {
 
       let reader = automerge;
       let writer_store = underlying.clone();
+      let mut writer_doc = base_doc.clone();
+      writer_doc
+        .put(&automerge::ROOT, "tail", "!")
+        .expect("put writer value");
+      let writer_changes = writer_doc.get_changes(&base_doc.get_heads());
+      let mut writer_delta = Vec::new();
+      for change in &writer_changes {
+        writer_delta.extend_from_slice(change.raw_bytes());
+      }
       let writer_key = DocumentChangeKey {
         doc_id,
         doc_type: DocumentType::Incremental,
-        change_hash: super::hash::make_change_hash(b"!"),
+        change_hash: super::hash::hash_hashes(writer_changes.iter().map(|c| c.hash().0)),
       };
       let writer_key_clone = writer_key.clone();
+      let writer_delta_clone = writer_delta.clone();
+
+      let expected_read_state = base_delta.clone();
 
       let read_future = reader.get_document(doc_id);
       let write_future = async move {
         let mut tx = writer_store.transaction().await.expect("start writer tx");
-        tx.insert(writer_key_clone, b"!".to_vec())
+        tx.insert(writer_key_clone, writer_delta_clone)
           .await
           .expect("insert writer delta");
         tx.commit().await.expect("commit writer tx");
       };
 
       let (read_state, ()) = future::join(read_future, write_future).await;
-      assert_eq!(read_state.unwrap(), b"hello".to_vec());
+      assert_eq!(read_state.unwrap(), expected_read_state.clone());
 
       let final_store = AutomergeBTree::with_compaction(underlying.clone(), 1, 1);
       let final_state = final_store
         .get_document(doc_id)
         .await
         .expect("final get_document");
-      assert_eq!(final_state, b"hello".to_vec());
+      assert_eq!(final_state, expected_read_state);
 
       let actual_writer_value = underlying
         .get(&writer_key)
         .await
         .expect("get writer key failed")
         .expect("writer key missing");
-      assert_eq!(actual_writer_value, b"!".to_vec());
+      assert_eq!(actual_writer_value, writer_delta);
     });
   }
 

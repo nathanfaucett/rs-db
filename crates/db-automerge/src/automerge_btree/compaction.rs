@@ -1,11 +1,11 @@
 use core::fmt;
 
+use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeTransaction};
 use futures::StreamExt;
-use std::sync::Arc;
 use uuid::Uuid;
 
-use super::hash::HashStrategy;
+use super::hash::hash_heads;
 use super::{AutomergeEntry, DocumentChangeKey, DocumentType};
 
 pub trait CompactionPolicy: Send + Sync {
@@ -41,6 +41,7 @@ impl CompactionPolicy for ThresholdPolicy {
 #[derive(Debug)]
 pub enum CompactionError {
   Scan(BTreeError),
+  DecodeState(BTreeError),
   Insert(BTreeError),
   Remove(DocumentChangeKey, BTreeError),
   Commit(BTreeError),
@@ -51,6 +52,9 @@ impl fmt::Display for CompactionError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       CompactionError::Scan(source) => write!(f, "compaction scan failed: {source}"),
+      CompactionError::DecodeState(source) => {
+        write!(f, "compaction state decode failed: {source}")
+      }
       CompactionError::Insert(source) => write!(f, "compaction insert failed: {source}"),
       CompactionError::Remove(key, source) => {
         write!(f, "compaction remove failed for key {:?}: {source}", key)
@@ -70,18 +74,21 @@ pub async fn run_compaction<T>(
   end: DocumentChangeKey,
   doc_id: Uuid,
   state: Vec<u8>,
-  hash_strategy: &Arc<dyn HashStrategy>,
 ) -> Result<(), CompactionError>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry>,
 {
-  let new_hash = hash_strategy.make_change_hash(&state);
+  let mut compacted_doc = AutoCommit::load(&state)
+    .map_err(BTreeError::other)
+    .map_err(CompactionError::DecodeState)?;
+  let new_hash = hash_heads(&compacted_doc.get_heads());
+
   let new_key = DocumentChangeKey {
     doc_id,
     doc_type: DocumentType::Snapshot,
     change_hash: new_hash,
   };
-  let new_entry = state.clone();
+  let new_entry = state;
 
   let to_remove: alloc::vec::Vec<DocumentChangeKey> = {
     let range_stream = tx.range(start.clone()..=end.clone());

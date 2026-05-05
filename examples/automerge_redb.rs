@@ -9,8 +9,16 @@ use futures::executor::block_on;
 fn main() {
   #[cfg(all(feature = "automerge", feature = "redb"))]
   block_on(async {
+    use std::time;
+
     let mut path = std::env::temp_dir();
-    path.push("aicacia_automerge_redb.db");
+    path.push(format!(
+      "aicacia_automerge_redb_{}.db",
+      time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_secs()
+    ));
 
     let mut db = Database::open_automerge_with_redb(path, "automerge_store")
       .await
