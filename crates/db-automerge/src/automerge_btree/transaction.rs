@@ -2,6 +2,7 @@ use std::{
   borrow::Borrow,
   collections::BTreeMap,
   ops::{Bound, RangeBounds},
+  sync::Arc,
 };
 
 use async_stream::stream;
@@ -11,7 +12,11 @@ use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
-use super::{AutomergeEntry, DocumentChangeKey, DocumentType, hash::make_change_hash, reconstruct};
+use super::{
+  AutomergeEntry, DocumentChangeKey, DocumentType,
+  hash::{HashStrategy, make_change_hash},
+  reconstruct,
+};
 
 fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
   let start = DocumentChangeKey {
@@ -46,20 +51,21 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
   )
 }
 
-#[derive(Debug)]
 pub struct AutomergeTransaction<T> {
   inner_tx: T,
   pending: BTreeMap<Uuid, Option<AutoCommit>>,
+  hash_strategy: Arc<dyn HashStrategy>,
 }
 
 impl<T> AutomergeTransaction<T>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry> + Send,
 {
-  pub fn new(inner_tx: T) -> Self {
+  pub fn new(inner_tx: T, hash_strategy: Arc<dyn HashStrategy>) -> Self {
     Self {
       inner_tx,
       pending: BTreeMap::new(),
+      hash_strategy,
     }
   }
 
@@ -141,6 +147,7 @@ where
     let AutomergeTransaction {
       mut inner_tx,
       pending,
+      hash_strategy,
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
@@ -178,7 +185,7 @@ where
           continue;
         }
 
-        let change_hash = make_change_hash(&bytes);
+        let change_hash = hash_strategy.make_change_hash(&bytes);
         let key = DocumentChangeKey {
           doc_id,
           doc_type: DocumentType::Snapshot,

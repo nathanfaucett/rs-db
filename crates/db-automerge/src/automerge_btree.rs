@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds};
+use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds, sync::Arc};
 
 use async_stream::stream;
 use automerge::AutoCommit;
@@ -92,7 +92,7 @@ mod reconstruction;
 mod transaction;
 
 use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
-use self::hash::make_change_hash;
+use self::hash::{HashStrategy, Sha256TimestampStrategy, make_change_hash};
 use self::reconstruction::reconstruct;
 use self::transaction::AutomergeTransaction;
 
@@ -136,6 +136,7 @@ fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
 pub struct AutomergeBTree<B> {
   inner: B,
   policy: Box<dyn CompactionPolicy>,
+  hash_strategy: Arc<dyn HashStrategy>,
 }
 
 impl<B> AutomergeBTree<B>
@@ -146,6 +147,7 @@ where
     Self {
       inner,
       policy: Box::new(ThresholdPolicy::default()),
+      hash_strategy: Arc::new(Sha256TimestampStrategy),
     }
   }
 
@@ -160,11 +162,28 @@ where
         threshold_count: compaction_threshold_count,
         threshold_bytes: compaction_threshold_bytes,
       }),
+      hash_strategy: Arc::new(Sha256TimestampStrategy),
     }
   }
 
   pub fn new_with_policy(inner: B, policy: Box<dyn CompactionPolicy>) -> Self {
-    Self { inner, policy }
+    Self {
+      inner,
+      policy,
+      hash_strategy: Arc::new(Sha256TimestampStrategy),
+    }
+  }
+
+  pub fn new_with_hash_strategy(
+    inner: B,
+    policy: Box<dyn CompactionPolicy>,
+    hash_strategy: Arc<dyn HashStrategy>,
+  ) -> Self {
+    Self {
+      inner,
+      policy,
+      hash_strategy,
+    }
   }
 
   /// Reconstruct the latest document state for `doc_id`.
@@ -221,7 +240,7 @@ where
             end.clone(),
             doc_id,
             state.clone(),
-            make_change_hash,
+            &self.hash_strategy,
           )
           .await
           {
@@ -438,7 +457,10 @@ where
 
   async fn transaction(&self) -> Result<Self::Transaction, BTreeError> {
     let inner_tx = self.inner.transaction().await?;
-    Ok(AutomergeTransaction::new(inner_tx))
+    Ok(AutomergeTransaction::new(
+      inner_tx,
+      Arc::clone(&self.hash_strategy),
+    ))
   }
 }
 

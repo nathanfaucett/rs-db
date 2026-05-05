@@ -1,10 +1,12 @@
-pub mod aggregator;
+pub mod aggregate;
+mod aggregator;
 pub mod index_join;
 pub mod nested_loop_join;
 pub mod scan;
 pub mod sorter;
 
-pub use scan::Scan;
+pub use aggregate::Aggregator;
+pub use sorter::Sorter;
 
 #[allow(dead_code)]
 pub trait Operator {

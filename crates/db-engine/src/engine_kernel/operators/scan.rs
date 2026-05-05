@@ -1,5 +1,6 @@
 use crate::{
   EngineError, EngineRow, EngineValue,
+  predicate::EvalContext,
   query::{QualifiedColumn, QualifiedPredicate},
 };
 
@@ -8,21 +9,25 @@ pub struct Scan {
   rows: Vec<EngineRow>,
   projection: Vec<QualifiedColumn>,
   predicate: Option<QualifiedPredicate>,
+  eval_ctx: EvalContext,
   pos: usize,
 }
 
 impl Scan {
+  #[cfg_attr(not(test), allow(dead_code))]
   pub fn new(
     table: String,
     rows: Vec<EngineRow>,
     projection: Vec<QualifiedColumn>,
     predicate: Option<QualifiedPredicate>,
+    eval_ctx: EvalContext,
   ) -> Self {
     Self {
       table,
       rows,
       projection,
       predicate,
+      eval_ctx,
       pos: 0,
     }
   }
@@ -71,12 +76,11 @@ impl Scan {
 
   fn eval_predicate(&self, pred: &QualifiedPredicate, row: &EngineRow) -> bool {
     use crate::predicate::{SingleRowContext, eval_predicate as do_eval};
-    use std::collections::HashMap;
     let ctx = SingleRowContext {
       table: &self.table,
       row,
     };
-    do_eval(pred, &ctx, &HashMap::new())
+    do_eval(pred, &ctx, &self.eval_ctx)
   }
 }
 
@@ -111,7 +115,13 @@ mod tests {
       QualifiedOperand::Value(EngineValue::Integer(1)),
     ));
 
-    let mut scan = Scan::new("users".into(), rows, projection, predicate);
+    let mut scan = Scan::new(
+      "users".into(),
+      rows,
+      projection,
+      predicate,
+      crate::predicate::EvalContext::empty(),
+    );
 
     let mut results = Vec::new();
     while let Some(result) = scan.next() {

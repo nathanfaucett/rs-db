@@ -1,6 +1,4 @@
 use super::catalog::EngineCatalog;
-use super::operators::Scan;
-use super::plan::LogicalPlan;
 use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, query::QualifiedPredicate,
@@ -194,65 +192,5 @@ where
       tx.rollback().await?;
     }
     Ok(())
-  }
-}
-
-pub(crate) struct Executor<'db, S>
-where
-  S: EngineStore,
-  S::Transaction: EngineStoreTransaction,
-{
-  tx: &'db mut S::Transaction,
-  catalog: &'db EngineCatalog,
-}
-
-impl<'db, S> Executor<'db, S>
-where
-  S: EngineStore,
-  S::Transaction: EngineStoreTransaction,
-{
-  pub(crate) fn new(tx: &'db mut S::Transaction, catalog: &'db EngineCatalog) -> Self {
-    Self { tx, catalog }
-  }
-
-  pub(crate) async fn execute_plan(
-    &mut self,
-    plan: &LogicalPlan,
-  ) -> Result<crate::query::EngineResult, EngineError> {
-    match plan {
-      LogicalPlan::Select {
-        table,
-        projection,
-        predicate,
-        options,
-      } if plan.is_simple_select() => {
-        self
-          .execute_simple_select(table, projection, predicate.clone())
-          .await
-      }
-      _ => Err(EngineError::SchemaMismatch(
-        "only simple SELECT execution is handled by the new executor path".into(),
-      )),
-    }
-  }
-
-  async fn execute_simple_select(
-    &mut self,
-    table: &str,
-    projection: &[crate::query::QualifiedColumn],
-    predicate: Option<crate::query::QualifiedPredicate>,
-  ) -> Result<crate::query::EngineResult, EngineError> {
-    self.catalog.table(table)?;
-
-    let rows_with_pk = EngineWriteTxn::<S>::collect_table_rows(self.tx, table, None).await?;
-    let rows = rows_with_pk.into_iter().map(|(_pk, row)| row).collect();
-
-    let mut scan = Scan::new(table.to_string(), rows, projection.to_vec(), predicate);
-    let mut output_rows = Vec::new();
-    while let Some(result) = scan.next() {
-      output_rows.push(result?);
-    }
-
-    Ok(crate::query::EngineResult::new(output_rows))
   }
 }

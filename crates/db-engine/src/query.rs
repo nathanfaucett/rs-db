@@ -83,10 +83,9 @@ pub enum QualifiedPredicate {
 
 impl QualifiedPredicate {
   pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
-    use crate::predicate::{SingleRowContext, eval_predicate};
-    use std::collections::HashMap;
+    use crate::predicate::{EvalContext, SingleRowContext, eval_predicate};
     let ctx = SingleRowContext { table, row };
-    eval_predicate(self, &ctx, &HashMap::new())
+    eval_predicate(self, &ctx, &EvalContext::empty())
   }
 
   pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {

@@ -51,6 +51,22 @@ impl<'a> RowContext for GroupRowContext<'a> {
   }
 }
 
+pub struct EvalContext {
+  pub subquery_cache: HashMap<String, HashSet<EngineValue>>,
+}
+
+impl EvalContext {
+  pub fn empty() -> Self {
+    Self {
+      subquery_cache: HashMap::new(),
+    }
+  }
+
+  pub fn with_cache(subquery_cache: HashMap<String, HashSet<EngineValue>>) -> Self {
+    Self { subquery_cache }
+  }
+}
+
 fn resolve_operand(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<EngineValue> {
   match op {
     QualifiedOperand::Value(v) => Some(v.clone()),
@@ -61,7 +77,7 @@ fn resolve_operand(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<Engine
 pub fn eval_predicate(
   pred: &QualifiedPredicate,
   ctx: &dyn RowContext,
-  subquery_cache: &HashMap<String, HashSet<EngineValue>>,
+  eval_ctx: &EvalContext,
 ) -> bool {
   match pred {
     QualifiedPredicate::Equals(l, r) => {
@@ -123,19 +139,19 @@ pub fn eval_predicate(
     } => {
       let lv = ctx.get_value(&expr.table, expr.column_index).cloned();
       let key = format!("{:?}", subquery);
-      let found = match (lv, subquery_cache.get(&key)) {
+      let found = match (lv, eval_ctx.subquery_cache.get(&key)) {
         (Some(v), Some(s)) => s.contains(&v),
         _ => false,
       };
       if *negated { !found } else { found }
     }
     QualifiedPredicate::And(l, r) => {
-      eval_predicate(l, ctx, subquery_cache) && eval_predicate(r, ctx, subquery_cache)
+      eval_predicate(l, ctx, eval_ctx) && eval_predicate(r, ctx, eval_ctx)
     }
     QualifiedPredicate::Or(l, r) => {
-      eval_predicate(l, ctx, subquery_cache) || eval_predicate(r, ctx, subquery_cache)
+      eval_predicate(l, ctx, eval_ctx) || eval_predicate(r, ctx, eval_ctx)
     }
-    QualifiedPredicate::Not(p) => !eval_predicate(p, ctx, subquery_cache),
+    QualifiedPredicate::Not(p) => !eval_predicate(p, ctx, eval_ctx),
   }
 }
 
@@ -189,10 +205,6 @@ mod tests {
   use super::*;
   use crate::{EngineValue, query::QualifiedOperand};
 
-  fn empty_cache() -> HashMap<String, HashSet<EngineValue>> {
-    HashMap::new()
-  }
-
   #[test]
   fn single_row_equals() {
     let row = vec![EngineValue::Integer(42)];
@@ -207,7 +219,7 @@ mod tests {
       }),
       QualifiedOperand::Value(EngineValue::Integer(42)),
     );
-    assert!(eval_predicate(&pred, &ctx, &empty_cache()));
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 
   #[test]
@@ -224,7 +236,7 @@ mod tests {
       }),
       QualifiedOperand::Value(EngineValue::Integer(42)),
     );
-    assert!(!eval_predicate(&pred, &ctx, &empty_cache()));
+    assert!(!eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 
   #[test]
@@ -246,7 +258,7 @@ mod tests {
         column_index: 0,
       }),
     );
-    assert!(eval_predicate(&pred, &ctx, &empty_cache()));
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 
   #[test]
@@ -266,7 +278,7 @@ mod tests {
         column_index: 0,
       })),
     );
-    assert!(!eval_predicate(&pred, &ctx, &empty_cache()));
+    assert!(!eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 
   #[test]
@@ -284,7 +296,7 @@ mod tests {
       list: vec![EngineValue::Integer(1), EngineValue::Integer(2)],
       negated: true,
     };
-    assert!(eval_predicate(&pred, &ctx, &empty_cache()));
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 
   #[test]
@@ -301,5 +313,98 @@ mod tests {
 
     let pred = HavingPredicate::GreaterThan(RefOrAgg::AggregateIndex(0), EngineValue::Integer(50));
     assert!(eval_having_predicate(&pred, &ctx));
+  }
+
+  #[test]
+  fn in_subquery_matches_prepopulated_cache() {
+    use crate::query::{EngineQuery, SelectOptions};
+
+    let row = vec![EngineValue::Integer(7)];
+    let ctx = SingleRowContext {
+      table: "t",
+      row: &row,
+    };
+
+    let subquery = EngineQuery::Select {
+      table: "other".into(),
+      projection: vec![],
+      predicate: None,
+      options: Box::new(SelectOptions::default()),
+    };
+    let key = format!("{:?}", &subquery);
+    let mut cache: HashMap<String, HashSet<EngineValue>> = HashMap::new();
+    cache.insert(key, [EngineValue::Integer(7)].into());
+
+    let pred = QualifiedPredicate::InSubquery {
+      expr: QualifiedColumn {
+        table: "t".into(),
+        column_index: 0,
+      },
+      subquery: Box::new(subquery),
+      negated: false,
+    };
+
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::with_cache(cache)));
+  }
+
+  #[test]
+  fn in_subquery_empty_cache_returns_false() {
+    use crate::query::{EngineQuery, SelectOptions};
+
+    let row = vec![EngineValue::Integer(7)];
+    let ctx = SingleRowContext {
+      table: "t",
+      row: &row,
+    };
+    let subquery = EngineQuery::Select {
+      table: "other".into(),
+      projection: vec![],
+      predicate: None,
+      options: Box::new(SelectOptions::default()),
+    };
+    let pred = QualifiedPredicate::InSubquery {
+      expr: QualifiedColumn {
+        table: "t".into(),
+        column_index: 0,
+      },
+      subquery: Box::new(subquery),
+      negated: false,
+    };
+
+    assert!(!eval_predicate(&pred, &ctx, &EvalContext::empty()));
+  }
+
+  #[test]
+  fn not_in_subquery_with_cache() {
+    use crate::query::{EngineQuery, SelectOptions};
+
+    let row = vec![EngineValue::Integer(99)];
+    let ctx = SingleRowContext {
+      table: "t",
+      row: &row,
+    };
+    let subquery = EngineQuery::Select {
+      table: "other".into(),
+      projection: vec![],
+      predicate: None,
+      options: Box::new(SelectOptions::default()),
+    };
+    let key = format!("{:?}", &subquery);
+    let mut cache: HashMap<String, HashSet<EngineValue>> = HashMap::new();
+    cache.insert(
+      key,
+      [EngineValue::Integer(1), EngineValue::Integer(2)].into(),
+    );
+
+    let pred = QualifiedPredicate::InSubquery {
+      expr: QualifiedColumn {
+        table: "t".into(),
+        column_index: 0,
+      },
+      subquery: Box::new(subquery),
+      negated: true,
+    };
+
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::with_cache(cache)));
   }
 }

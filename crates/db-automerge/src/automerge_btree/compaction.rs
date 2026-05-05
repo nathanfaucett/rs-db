@@ -2,8 +2,10 @@ use core::fmt;
 
 use db_core::{BTreeError, BTreeTransaction};
 use futures::StreamExt;
+use std::sync::Arc;
 use uuid::Uuid;
 
+use super::hash::HashStrategy;
 use super::{AutomergeEntry, DocumentChangeKey, DocumentType};
 
 pub trait CompactionPolicy: Send + Sync {
@@ -68,12 +70,12 @@ pub async fn run_compaction<T>(
   end: DocumentChangeKey,
   doc_id: Uuid,
   state: Vec<u8>,
-  make_change_hash: fn(&[u8]) -> [u8; 32],
+  hash_strategy: &Arc<dyn HashStrategy>,
 ) -> Result<(), CompactionError>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry>,
 {
-  let new_hash = make_change_hash(&state);
+  let new_hash = hash_strategy.make_change_hash(&state);
   let new_key = DocumentChangeKey {
     doc_id,
     doc_type: DocumentType::Snapshot,
