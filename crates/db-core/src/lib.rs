@@ -8,7 +8,6 @@ mod codec;
 mod named_tree;
 mod port;
 mod range_merge;
-mod simple_key;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
 mod transaction_patch;
@@ -27,8 +26,6 @@ pub use codec::{
 };
 
 pub use range_merge::merge_range_maps;
-
-pub use simple_key::{IntegerI64Codec, Tuple2Codec, Utf8Codec};
 
 pub use transaction_patch::{TransactionEntry, TransactionPatch};
 

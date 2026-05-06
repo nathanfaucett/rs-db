@@ -5,17 +5,20 @@ use async_stream::stream;
 use core::future::Future;
 use db_core::{NamedTreeProvider, NamedTreeTransaction};
 use db_types::EngineValue;
-use futures::{Stream, StreamExt, pin_mut};
-
-mod persistence;
-
-pub use persistence::EngineStoreTransaction;
-
-use persistence::{
+use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_row, decode_table_schema_row,
   encode_index_schema, encode_table_schema, index_tree, make_index_entry_key, row_tree,
   split_index_entry_key,
 };
+use futures::{Stream, StreamExt, pin_mut};
+
+mod transaction;
+
+pub use transaction::EngineStoreTransaction;
+
+fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
+  EngineError::SchemaMismatch(error.to_string())
+}
 
 pub trait EngineStore: Clone + Send + Sync + 'static {
   type Transaction: EngineStoreTransaction + Send + 'static;
@@ -173,7 +176,7 @@ where
         pin_mut!(stream);
         while let Some(item) = stream.next().await {
           let (_key, row) = item.map_err(EngineError::from)?;
-          tables.push(decode_table_schema_row(&row)?);
+          tables.push(decode_table_schema_row(&row).map_err(schema_decode_error)?);
         }
       }
       let mut indexes = Vec::new();
@@ -182,7 +185,7 @@ where
         pin_mut!(stream);
         while let Some(item) = stream.next().await {
           let (_key, row) = item.map_err(EngineError::from)?;
-          indexes.push(decode_index_schema_row(&row)?);
+          indexes.push(decode_index_schema_row(&row).map_err(schema_decode_error)?);
         }
       }
       Ok((tables, indexes))

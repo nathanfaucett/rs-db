@@ -368,15 +368,51 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::IntegerI64Codec;
+  use core::cmp::Ordering;
+
+  #[derive(Debug, Clone, Copy, Default)]
+  struct TestI64Codec;
+
+  impl ValueCodec<i64> for TestI64Codec {
+    type Bytes<'a>
+      = [u8; 8]
+    where
+      Self: 'a,
+      i64: 'a;
+
+    fn fixed_width() -> Option<usize> {
+      Some(8)
+    }
+
+    fn encode<'a>(value: &'a i64) -> Self::Bytes<'a> {
+      let bits = (*value as u64) ^ 0x8000_0000_0000_0000_u64;
+      bits.to_be_bytes()
+    }
+
+    fn decode(data: &[u8]) -> i64 {
+      let mut bytes = [0_u8; 8];
+      bytes.copy_from_slice(&data[..8]);
+      let encoded = u64::from_be_bytes(bytes);
+      let bits = encoded ^ 0x8000_0000_0000_0000_u64;
+      i64::from_be_bytes(bits.to_be_bytes())
+    }
+  }
+
+  impl KeyCodec<i64> for TestI64Codec {
+    fn compare(left: &[u8], right: &[u8]) -> Ordering {
+      left.cmp(right)
+    }
+  }
+
+  impl FastKeyCodec<i64> for TestI64Codec {}
 
   #[test]
   fn fast_key_codec_encode_into_matches_value_codec() {
-    let codec = IntegerI64Codec;
-    let encoded = <IntegerI64Codec as ValueCodec<i64>>::encode(&42);
+    let codec = TestI64Codec;
+    let encoded = <TestI64Codec as ValueCodec<i64>>::encode(&42);
 
     let mut s = KeyScratch::with_capacity(32);
-    <IntegerI64Codec as FastKeyCodec<i64>>::encode_into(&codec, &42, &mut s);
+    <TestI64Codec as FastKeyCodec<i64>>::encode_into(&codec, &42, &mut s);
 
     assert_eq!(s.as_slice(), encoded.as_slice());
   }
@@ -393,11 +429,11 @@ mod tests {
 
   #[test]
   fn key_codec_compare_matches_domain_ordering() {
-    let left = <IntegerI64Codec as ValueCodec<i64>>::encode(&-10);
-    let right = <IntegerI64Codec as ValueCodec<i64>>::encode(&10);
+    let left = <TestI64Codec as ValueCodec<i64>>::encode(&-10);
+    let right = <TestI64Codec as ValueCodec<i64>>::encode(&10);
 
     assert_eq!(
-      <IntegerI64Codec as KeyCodec<i64>>::compare(left.as_ref(), right.as_ref()),
+      <TestI64Codec as KeyCodec<i64>>::compare(left.as_ref(), right.as_ref()),
       (-10i64).cmp(&10i64)
     );
   }

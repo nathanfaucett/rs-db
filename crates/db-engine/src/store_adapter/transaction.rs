@@ -1,94 +1,7 @@
 use core::future::Future;
-
-use db_types::codec::{
-  decode_index_schema, decode_table_schema, encode_index_schema_into_sink,
-  encode_table_schema_into_sink,
-};
 use futures::{Stream, StreamExt, pin_mut};
 
-use crate::{EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, TableSchema};
-
-/// Prefix used for row trees: `"t:{table_name}"`.
-pub(crate) fn row_tree(table_name: &str) -> String {
-  format!("t:{}", table_name)
-}
-
-/// Prefix used for index trees: `"i:{index_name}"`.
-pub(crate) fn index_tree(index_name: &str) -> String {
-  format!("i:{}", index_name)
-}
-
-/// Well-known tree holding all table schemas.
-pub(crate) const TABLE_SCHEMA_TREE: &str = "sys:table_schemas";
-/// Well-known tree holding all index schemas.
-pub(crate) const INDEX_SCHEMA_TREE: &str = "sys:index_schemas";
-
-/// Encode a `TableSchema` as a single-element `EngineRow` containing its
-/// serialised bytes.
-pub(crate) fn encode_table_schema(schema: &TableSchema) -> EngineRow {
-  let mut buf = Vec::new();
-  encode_table_schema_into_sink(&mut buf, schema);
-  vec![EngineValue::Blob(buf)]
-}
-
-/// Decode a `TableSchema` from an `EngineRow` produced by [`encode_table_schema`].
-pub(crate) fn decode_table_schema_row(row: &EngineRow) -> Result<TableSchema, EngineError> {
-  match row.first() {
-    Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode_table_schema)
-      .map_err(|e| EngineError::SchemaMismatch(e.to_string())),
-    _ => Err(EngineError::SchemaMismatch(
-      "invalid table schema encoding".into(),
-    )),
-  }
-}
-
-/// Encode an `IndexSchema` as a single-element `EngineRow` containing its
-/// serialised bytes.
-pub(crate) fn encode_index_schema(schema: &IndexSchema) -> EngineRow {
-  let mut buf = Vec::new();
-  encode_index_schema_into_sink(&mut buf, schema);
-  vec![EngineValue::Blob(buf)]
-}
-
-/// Decode an `IndexSchema` from an `EngineRow` produced by [`encode_index_schema`].
-pub(crate) fn decode_index_schema_row(row: &EngineRow) -> Result<IndexSchema, EngineError> {
-  match row.first() {
-    Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode_index_schema)
-      .map_err(|e| EngineError::SchemaMismatch(e.to_string())),
-    _ => Err(EngineError::SchemaMismatch(
-      "invalid index schema encoding".into(),
-    )),
-  }
-}
-
-/// Flatten an index key and row primary key into a single composite
-/// `EngineKey` for storage in the index tree.
-///
-/// The first `n_index_cols` values in the result belong to `index_key`;
-/// the remaining values belong to `row_pk`.
-pub(crate) fn make_index_entry_key(
-  index: &IndexSchema,
-  index_key: &EngineKey,
-  row_pk: &EngineKey,
-) -> EngineKey {
-  let n = index.column_indices.len();
-  let mut values = Vec::with_capacity(n + row_pk.values().len());
-  values.extend_from_slice(index_key.values());
-  values.extend_from_slice(row_pk.values());
-  EngineKey::from_values(values)
-}
-
-/// Split a composite index entry key back into `(index_key, row_pk)`.
-pub(crate) fn split_index_entry_key(
-  composite: &EngineKey,
-  n_index_cols: usize,
-) -> (EngineKey, EngineKey) {
-  let values = composite.values();
-  let n = n_index_cols.min(values.len());
-  let index_key = EngineKey::from_values(values[..n].to_vec());
-  let row_pk = EngineKey::from_values(values[n..].to_vec());
-  (index_key, row_pk)
-}
+use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
 
 /// An engine-level storage transaction. All methods operate on typed engine
 /// values; no storage-level key encoding appears in this interface.
@@ -312,38 +225,5 @@ pub trait EngineStoreTransaction: Send + 'static {
       }
       Ok(rows)
     }
-  }
-
-  // Backward-compat aliases.
-
-  fn get_row<'a>(
-    &'a mut self,
-    table_name: &'a str,
-    primary_key: &'a EngineKey,
-  ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
-    self.get_table_row(table_name, primary_key)
-  }
-
-  fn insert_row<'a>(
-    &'a mut self,
-    table_name: &'a str,
-    primary_key: EngineKey,
-    row: EngineRow,
-  ) -> impl Future<Output = Result<(), EngineError>> + 'a {
-    self.insert_table_row(table_name, primary_key, row)
-  }
-
-  fn get_table_rows<'a>(
-    &'a mut self,
-    table_name: &'a str,
-    predicate: Option<crate::QualifiedPredicate>,
-  ) -> impl Future<Output = Result<Vec<(EngineKey, EngineRow)>, EngineError>> + 'a {
-    self.collect_table_rows(table_name, predicate)
-  }
-
-  fn load_catalog_entries<'a>(
-    &'a mut self,
-  ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a {
-    self.load_catalog()
   }
 }
