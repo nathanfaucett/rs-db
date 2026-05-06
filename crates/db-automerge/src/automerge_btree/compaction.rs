@@ -83,11 +83,6 @@ where
     .map_err(CompactionError::DecodeState)?;
   let new_hash = hash_heads(&compacted_doc.get_heads());
 
-  let new_key = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash: new_hash,
-  };
   let new_entry = state;
 
   let to_remove: alloc::vec::Vec<DocumentChangeKey> = {
@@ -104,6 +99,12 @@ where
       }
     }
     collected
+  };
+
+  let new_key = DocumentChangeKey {
+    doc_id,
+    doc_type: DocumentType::Snapshot,
+    change_hash: new_hash,
   };
 
   if let Err(err) = tx.insert(new_key.clone(), new_entry).await {

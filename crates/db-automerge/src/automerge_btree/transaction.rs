@@ -356,6 +356,9 @@ where
       }
 
       for (doc_id, state) in merged.into_iter() {
+        if !Self::key_in_range(&range, &doc_id) {
+          continue;
+        }
         match AutoCommit::load(&state) {
           Ok(doc) => yield Ok((doc_id, doc)),
           Err(e) => yield Err(BTreeError::other(e)),
@@ -660,6 +663,9 @@ where
       }
 
       for (doc_id, state) in merged.into_iter() {
+        if !Self::key_in_range(&range, &doc_id) {
+          continue;
+        }
         match AutoCommit::load(&state) { Ok(doc) => yield Ok((doc_id, doc)), Err(e) => yield Err(BTreeError::other(e)), }
       }
     }

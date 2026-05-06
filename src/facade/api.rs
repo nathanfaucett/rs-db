@@ -137,3 +137,101 @@ impl<'db> Transaction<'db> {
     dispatch::transaction_rollback(self).await
   }
 }
+
+#[cfg(all(test, feature = "automerge"))]
+mod tests {
+  use super::*;
+  use futures::executor::block_on;
+
+  #[test]
+  fn automerge_two_create_tables() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory().await.expect("open");
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+        .await
+        .expect("create users");
+      db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);")
+        .await
+        .expect("create orders");
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_join_returns_two_rows() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+        .await
+        .expect("create users");
+      db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, amount INT);")
+        .await
+        .expect("create orders");
+
+      db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+        .await
+        .expect("insert user 1");
+      db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob');")
+        .await
+        .expect("insert user 2");
+
+      db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (1,1,100);")
+        .await
+        .expect("insert order 1");
+      db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (2,2,200);")
+        .await
+        .expect("insert order 2");
+
+      let sql = "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;";
+      let res = db.execute_sql(sql).await.expect("execute select");
+      assert_eq!(res.rows.len(), 2);
+    });
+  }
+
+  #[cfg(feature = "redb")]
+  #[test]
+  fn automerge_redb_join_returns_two_rows() {
+    block_on(async {
+      let mut path = std::env::temp_dir();
+      path.push(format!(
+        "aicacia_automerge_redb_test_{}.db",
+        std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .expect("time went backwards")
+          .as_nanos()
+      ));
+      let _ = std::fs::remove_file(&path);
+
+      let mut db = Database::open_automerge_with_redb(path, "automerge_store")
+        .await
+        .expect("open automerge redb");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+        .await
+        .expect("create users");
+      db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, amount INT);")
+        .await
+        .expect("create orders");
+
+      db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+        .await
+        .expect("insert user 1");
+      db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob');")
+        .await
+        .expect("insert user 2");
+
+      db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (1,1,100);")
+        .await
+        .expect("insert order 1");
+      db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (2,2,200);")
+        .await
+        .expect("insert order 2");
+
+      let sql = "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;";
+      let res = db.execute_sql(sql).await.expect("execute select");
+      assert_eq!(res.rows.len(), 2);
+    });
+  }
+}

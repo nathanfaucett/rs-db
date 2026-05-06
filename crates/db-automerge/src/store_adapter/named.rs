@@ -5,19 +5,22 @@ use automerge::AutoCommit;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
+use db_core::encode_with_version;
 use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
 };
+use db_types::codec::encode_engine_key_into_sink;
 use db_types::{EngineKey, EngineRow};
 
+use super::AutomergeEngineStore;
 use super::snapshot::{
   EngineSnapshotAdapter, decode_snapshot_base64, encode_snapshot_base64, find_entry, parse_entries,
-  remove_entry, set_entry,
+  set_entry,
 };
-use super::{AutomergeEngineStore, make_doc_id};
 
 fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, EngineRow)>, BTreeError> {
   parse_entries::<EngineSnapshotAdapter>(buf)
@@ -52,15 +55,41 @@ fn set_in_named_snapshot(
   set_entry::<EngineSnapshotAdapter>(buf, &key, &row)
 }
 
-fn remove_from_named_snapshot(
-  buf: Option<&[u8]>,
-  key: &EngineKey,
-) -> Result<(Option<EngineRow>, Option<Vec<u8>>), BTreeError> {
-  remove_entry::<EngineSnapshotAdapter>(buf, key)
+/// Derive a UUID for a specific row in a named tree.
+/// Layout: first 8 bytes = SHA-256("named:", tree)[0..8]
+///         last  8 bytes = SHA-256(encoded_key)[0..8]
+/// This keeps all rows for a given tree contiguous in UUID space.
+fn row_doc_id(tree: &str, key: &EngineKey) -> Uuid {
+  let mut hasher = Sha256::new();
+  hasher.update(b"named:");
+  hasher.update(tree.as_bytes());
+  let tree_digest = hasher.finalize_reset();
+
+  let mut key_buf: Vec<u8> = Vec::new();
+  encode_with_version(&mut key_buf, |sink| encode_engine_key_into_sink(sink, key));
+  hasher.update(&key_buf);
+  let key_digest = hasher.finalize();
+
+  let mut bytes = [0u8; 16];
+  bytes[..8].copy_from_slice(&tree_digest[..8]);
+  bytes[8..].copy_from_slice(&key_digest[..8]);
+  Uuid::from_bytes(bytes)
 }
 
-fn named_doc_id(tree: &str) -> Uuid {
-  make_doc_id("named:", tree)
+/// UUID range covering all rows stored for `tree`.
+fn tree_uuid_range(tree: &str) -> (Uuid, Uuid) {
+  let mut hasher = Sha256::new();
+  hasher.update(b"named:");
+  hasher.update(tree.as_bytes());
+  let digest = hasher.finalize();
+
+  let mut start_bytes = [0u8; 16];
+  let mut end_bytes = [0u8; 16];
+  start_bytes[..8].copy_from_slice(&digest[..8]);
+  end_bytes[..8].copy_from_slice(&digest[..8]);
+  end_bytes[8..].fill(0xff);
+
+  (Uuid::from_bytes(start_bytes), Uuid::from_bytes(end_bytes))
 }
 
 fn in_engine_key_range<R>(key: &EngineKey, range: &R) -> bool
@@ -116,7 +145,7 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = named_doc_id(tree);
+    let doc_id = row_doc_id(tree, key);
     let Some(doc) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
@@ -135,14 +164,8 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = named_doc_id(tree);
-    let existing = self.inner.get(&doc_id).await?;
-    let bytes = if let Some(doc) = existing.as_ref() {
-      named_snapshot_bytes(doc)?
-    } else {
-      None
-    };
-    let snapshot = set_in_named_snapshot(bytes.as_deref(), key, value)?;
+    let doc_id = row_doc_id(tree, &key);
+    let snapshot = set_in_named_snapshot(None, key, value)?;
     self
       .inner
       .insert(doc_id, named_snapshot_doc(&snapshot)?)
@@ -157,22 +180,19 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = named_doc_id(tree);
+    let doc_id = row_doc_id(tree, key);
     let Some(existing) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
     let bytes = named_snapshot_bytes(&existing)?;
-    let (removed, snapshot) = remove_from_named_snapshot(bytes.as_deref(), key)?;
-
-    if let Some(snapshot) = snapshot.as_deref() {
-      self
-        .inner
-        .insert(doc_id, named_snapshot_doc(snapshot)?)
-        .await?;
+    let removed = if let Some(ref b) = bytes {
+      find_in_named_snapshot(b, key)?
     } else {
+      None
+    };
+    if removed.is_some() {
       let _ = self.inner.remove(&doc_id).await?;
     }
-
     Ok(removed)
   }
 
@@ -185,28 +205,26 @@ where
     EngineKey: Ord,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
   {
-    let doc_id = named_doc_id(tree);
+    let (tree_start, tree_end) = tree_uuid_range(tree);
     let inner = &self.inner;
     stream! {
-      let Some(doc) = (match inner.get(&doc_id).await {
-        Ok(doc) => doc,
-        Err(e) => { yield Err(e); return; }
-      }) else {
-        return;
-      };
+      let doc_stream = inner.range(tree_start..=tree_end);
+      pin_mut!(doc_stream);
 
-      let bytes = match named_snapshot_bytes(&doc) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return,
-        Err(e) => { yield Err(e); return; }
-      };
-
-      let mut entries = match parse_named_snapshot(&bytes) {
-        Ok(entries) => entries,
-        Err(e) => { yield Err(e); return; }
-      };
-      entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-
+      let mut entries: alloc::vec::Vec<(EngineKey, EngineRow)> = alloc::vec::Vec::new();
+      while let Some(item) = doc_stream.next().await {
+        let (_uuid, doc) = item?;
+        let bytes = match named_snapshot_bytes(&doc) {
+          Ok(Some(b)) => b,
+          Ok(None) => continue,
+          Err(e) => { yield Err(e); return; }
+        };
+        match parse_named_snapshot(&bytes) {
+          Ok(pairs) => entries.extend(pairs),
+          Err(e) => { yield Err(e); return; }
+        }
+      }
+      entries.sort_by(|(a, _), (b, _)| a.cmp(b));
       for (key, row) in entries {
         if in_engine_key_range(&key, &range) {
           yield Ok((key, row));
@@ -303,7 +321,7 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let doc_id = named_doc_id(&self.name);
+    let doc_id = row_doc_id(&self.name, key.borrow());
     let Some(doc) = self.inner.inner.get(&doc_id).await? else {
       return Ok(None);
     };

@@ -5,12 +5,14 @@ use async_stream::stream;
 use automerge::AutoCommit;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
+use db_core::encode_with_version;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
+use db_types::codec::encode_engine_key_into_sink;
 use db_types::{StoreKey, StoreValue};
 
 mod named;
@@ -19,7 +21,7 @@ mod snapshot;
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 use snapshot::{
   StoreSnapshotAdapter, decode_snapshot_base64, encode_snapshot_base64, find_entry, parse_entries,
-  remove_entry, set_entry,
+  set_entry,
 };
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
@@ -54,9 +56,43 @@ pub(crate) fn make_doc_id(prefix: &str, name: &str) -> Uuid {
 
 fn doc_id_for_key(key: &StoreKey) -> Uuid {
   match key {
-    StoreKey::TableRow { table_name, .. } => make_doc_id("table:rows:", table_name),
+    StoreKey::TableRow {
+      table_name,
+      primary_key,
+    } => {
+      let mut hasher = Sha256::new();
+      hasher.update(b"table:row:");
+      hasher.update(table_name.as_bytes());
+      let mut key_buf: Vec<u8> = Vec::new();
+      encode_with_version(&mut key_buf, |sink| {
+        encode_engine_key_into_sink(sink, primary_key)
+      });
+      hasher.update(&key_buf);
+      let digest = hasher.finalize();
+      Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
+    }
+    StoreKey::IndexEntry {
+      index_name,
+      index_key,
+      row_pk,
+    } => {
+      let mut hasher = Sha256::new();
+      hasher.update(b"index:entry:");
+      hasher.update(index_name.as_bytes());
+      let mut key_buf: Vec<u8> = Vec::new();
+      encode_with_version(&mut key_buf, |sink| {
+        encode_engine_key_into_sink(sink, index_key)
+      });
+      hasher.update(&key_buf);
+      let mut pk_buf: Vec<u8> = Vec::new();
+      encode_with_version(&mut pk_buf, |sink| {
+        encode_engine_key_into_sink(sink, row_pk)
+      });
+      hasher.update(&pk_buf);
+      let digest = hasher.finalize();
+      Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
+    }
     StoreKey::TableSchema { table_name } => make_doc_id("table:schema:", table_name),
-    StoreKey::IndexEntry { index_name, .. } => make_doc_id("index:entries:", index_name),
     StoreKey::IndexSchema { index_name } => make_doc_id("index:schema:", index_name),
   }
 }
@@ -75,10 +111,6 @@ fn set_in_snapshot(
   value: &StoreValue,
 ) -> Result<Vec<u8>, BTreeError> {
   set_entry::<StoreSnapshotAdapter>(buf, key, value)
-}
-
-fn remove_from_snapshot(buf: Option<&[u8]>, key: &StoreKey) -> Result<Option<Vec<u8>>, BTreeError> {
-  Ok(remove_entry::<StoreSnapshotAdapter>(buf, key)?.1)
 }
 
 pub struct AutomergeEngineStoreTransaction<B>
@@ -128,18 +160,7 @@ where
     let inner = &mut self.inner;
     async move {
       let doc_id = doc_id_for_key(&key);
-      let existing = inner.get(&doc_id).await?;
-      let buf_opt = if let Some(doc) = existing {
-        if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-          Some(decode_snapshot_base64(value)?)
-        } else {
-          None
-        }
-      } else {
-        None
-      };
-
-      let new_buf = set_in_snapshot(buf_opt.as_deref(), &key, &value)?;
+      let new_buf = set_in_snapshot(None, &key, &value)?;
       let snapshot_str = encode_snapshot_base64(&new_buf);
       let mut doc = AutoCommit::new();
       doc
@@ -176,20 +197,7 @@ where
       } else {
         None
       };
-      let new_opt = remove_from_snapshot(buf_opt.as_deref(), &key)?;
-      match new_opt {
-        None => {
-          let _ = inner.remove(&doc_id).await?;
-        }
-        Some(new_buf) => {
-          let snapshot_str = encode_snapshot_base64(&new_buf);
-          let mut new_doc = AutoCommit::new();
-          new_doc
-            .put(&automerge::ROOT, "snapshot", snapshot_str)
-            .map_err(BTreeError::other)?;
-          inner.insert(doc_id, new_doc).await?;
-        }
-      }
+      let _ = inner.remove(&doc_id).await?;
       Ok(prev)
     }
   }
@@ -297,19 +305,7 @@ where
       let doc_id = doc_id_for_key(&key);
       let guard = automerge.read().await;
       let mut tx = guard.transaction().await?;
-
-      let existing = tx.get(&doc_id).await?;
-      let buf_opt = if let Some(doc) = existing {
-        if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-          Some(decode_snapshot_base64(value)?)
-        } else {
-          None
-        }
-      } else {
-        None
-      };
-
-      let new_buf = set_in_snapshot(buf_opt.as_deref(), &key, &value)?;
+      let new_buf = set_in_snapshot(None, &key, &value)?;
       let snapshot_str = encode_snapshot_base64(&new_buf);
       let mut doc = AutoCommit::new();
       doc
@@ -349,20 +345,7 @@ where
       } else {
         None
       };
-      let new_opt = remove_from_snapshot(buf_opt.as_deref(), &key)?;
-      match new_opt {
-        None => {
-          let _ = tx.remove(&doc_id).await?;
-        }
-        Some(new_buf) => {
-          let snapshot_str = encode_snapshot_base64(&new_buf);
-          let mut new_doc = AutoCommit::new();
-          new_doc
-            .put(&automerge::ROOT, "snapshot", snapshot_str)
-            .map_err(BTreeError::other)?;
-          tx.insert(doc_id, new_doc).await?;
-        }
-      }
+      let _ = tx.remove(&doc_id).await?;
       tx.commit().await?;
       Ok(prev)
     }
@@ -476,6 +459,110 @@ mod tests {
         read.get("second", &key).await.expect("get second"),
         Some(vec![EngineValue::Text("second".into())])
       );
+    });
+  }
+  #[test]
+  fn named_transaction_range_returns_all_rows() {
+    block_on(async {
+      let store = store();
+      let mut tx = store.begin_transaction().await.expect("begin");
+      let key1 = EngineKey::from_values(vec![EngineValue::Integer(1)]);
+      let row1 = vec![EngineValue::Text("alice".into())];
+      let key2 = EngineKey::from_values(vec![EngineValue::Integer(2)]);
+      let row2 = vec![EngineValue::Text("bob".into())];
+
+      tx.insert("users", key1.clone(), row1.clone())
+        .await
+        .expect("insert alice");
+      tx.insert("users", key2.clone(), row2.clone())
+        .await
+        .expect("insert bob");
+      tx.commit().await.expect("commit");
+
+      let read = store.begin_transaction().await.expect("read");
+      let mut rows = Vec::new();
+      let stream = read.range("users", ..);
+      futures::pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        let (key, value) = item.expect("range failed");
+        rows.push((key, value));
+      }
+
+      assert_eq!(rows.len(), 2);
+      assert_eq!(rows[0].0, key1);
+      assert_eq!(rows[0].1, row1);
+      assert_eq!(rows[1].0, key2);
+      assert_eq!(rows[1].1, row2);
+    });
+  }
+
+  #[test]
+  fn named_range_after_two_separate_committed_transactions() {
+    block_on(async {
+      let store = store();
+
+      let key1 = EngineKey::from_values(vec![EngineValue::Integer(1)]);
+      let row1 = vec![EngineValue::Text("alice".into())];
+      let key2 = EngineKey::from_values(vec![EngineValue::Integer(2)]);
+      let row2 = vec![EngineValue::Text("bob".into())];
+
+      {
+        let mut tx = store.begin_transaction().await.expect("begin tx1");
+        tx.insert("schemas", key1.clone(), row1.clone())
+          .await
+          .expect("insert 1");
+        tx.commit().await.expect("commit tx1");
+      }
+      {
+        let mut tx = store.begin_transaction().await.expect("begin tx2");
+        tx.insert("schemas", key2.clone(), row2.clone())
+          .await
+          .expect("insert 2");
+        tx.commit().await.expect("commit tx2");
+      }
+
+      let read = store.begin_transaction().await.expect("begin read");
+      let mut rows = Vec::new();
+      let stream = read.range("schemas", ..);
+      futures::pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        rows.push(item.expect("range item"));
+      }
+
+      assert_eq!(rows.len(), 2, "expected 2 rows, got: {:?}", rows);
+    });
+  }
+
+  #[test]
+  fn two_separate_tables_load_catalog() {
+    block_on(async {
+      let store = store();
+
+      // First schema
+      let key1 = EngineKey::from_values(vec![EngineValue::Text("users".into())]);
+      let val1 = vec![EngineValue::Blob(b"users_schema_bytes".to_vec())];
+
+      {
+        let mut tx = store.begin_transaction().await.expect("tx1");
+        tx.insert("sys:table_schemas", key1.clone(), val1.clone())
+          .await
+          .expect("insert schema 1");
+        tx.commit().await.expect("commit tx1");
+      }
+
+      // Range should return 1 row
+      {
+        let read = store.begin_transaction().await.expect("read tx");
+        let mut rows = Vec::new();
+        let stream = read.range("sys:table_schemas", ..);
+        futures::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+          rows.push(item.expect("range item"));
+        }
+        assert_eq!(rows.len(), 1, "expected 1 schema row, got: {:?}", rows);
+        assert_eq!(rows[0].0, key1);
+        assert_eq!(rows[0].1, val1);
+      }
     });
   }
 }

@@ -18,6 +18,7 @@ pub(crate) trait SnapshotAdapter {
 }
 
 type SnapshotEntries<A> = Vec<(<A as SnapshotAdapter>::Key, <A as SnapshotAdapter>::Value)>;
+#[cfg(test)]
 type SnapshotRemoveOutcome<A> = (Option<<A as SnapshotAdapter>::Value>, Option<Vec<u8>>);
 
 pub(crate) struct StoreSnapshotAdapter;
@@ -134,6 +135,7 @@ pub(crate) fn set_entry<A: SnapshotAdapter>(
   Ok(encode_entries::<A>(&entries))
 }
 
+#[cfg(test)]
 pub(crate) fn remove_entry<A: SnapshotAdapter>(
   buf: Option<&[u8]>,
   key: &A::Key,
