@@ -1,7 +1,8 @@
-use db_core::{FastKeyCodec, KeyCodec};
+use db_core::KeyCodec;
 use proptest::prelude::*;
 
-use db_engine::{EngineKey, EngineKeyCodec, EngineRowCodec, EngineValue};
+use db_engine::{EngineKey, EngineValue};
+use db_types::{EngineKeyCodec, EngineRowCodec};
 
 /// Use the fully-qualified trait methods for encoding/decoding to avoid
 /// needing to import the trait into the test scope.
@@ -32,14 +33,8 @@ proptest! {
     let left_key = EngineKey::from_values(vec![a.clone()]);
     let right_key = EngineKey::from_values(vec![b.clone()]);
 
-    let codec = EngineKeyCodec;
-    let mut left_scratch = db_core::KeyScratch::with_capacity(128);
-    codec.encode_into(&left_key, &mut left_scratch);
-    let left_encoded = left_scratch.as_slice().to_vec();
-
-    let mut right_scratch = db_core::KeyScratch::with_capacity(128);
-    codec.encode_into(&right_key, &mut right_scratch);
-    let right_encoded = right_scratch.as_slice().to_vec();
+    let left_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&left_key);
+    let right_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&right_key);
 
     let cmp_encoded = EngineKeyCodec::compare(&left_encoded, &right_encoded);
     let cmp_keys = left_key.cmp(&right_key);

@@ -57,34 +57,6 @@ pub enum DecodeError {
   Malformed,
 }
 
-/// Minimal codec trait that engine code can depend on at the storage boundary.
-/// Implementations live in engine/backends and must guarantee that
-/// `compare_encoded_keys(encode_key(k1), encode_key(k2)) == k1.cmp(&k2)`.
-pub trait StorageCodec<K, V>: Send + Sync + 'static {
-  /// Encode a canonical, ordering-preserving key into `dst`.
-  /// Implementations SHOULD prefix a version byte and append the payload.
-  fn encode_key(&self, key: &K, dst: &mut Vec<u8>);
-
-  /// Encode a value blob into `dst` (may include versioning metadata).
-  fn encode_value(&self, value: &V, dst: &mut Vec<u8>);
-
-  /// Decode a value previously produced by `encode_value`.
-  fn decode_value(&self, src: &[u8]) -> Result<V, DecodeError>;
-
-  /// Compare two encoded keys (byte slices). Must be consistent across versions.
-  fn compare_encoded_keys(&self, a: &[u8], b: &[u8]) -> Ordering;
-
-  /// Convenience helper: encode `key` into a provided `KeyScratch` to avoid
-  /// allocating temporary `Vec<u8>` on hot paths. Implementations may
-  /// override this to provide more efficient, allocation-free encoders.
-  fn encode_key_into_scratch(&self, key: &K, scratch: &mut KeyScratch) {
-    // Default fallback: encode into a temporary Vec and append to scratch.
-    let mut tmp: Vec<u8> = Vec::new();
-    self.encode_key(key, &mut tmp);
-    scratch.buf.extend_from_slice(&tmp);
-  }
-}
-
 /// Reusable scratch buffer used by hot-path encode helpers to avoid allocations.
 pub struct KeyScratch {
   pub buf: Vec<u8>,
@@ -145,50 +117,6 @@ impl<T: std::io::Write> BufferSink for T {
     // intentionally simple for hot-path encoders.
     let _ = self.write_all(bytes);
   }
-}
-
-/// Encode `key` using `codec` and return an owned `Vec<u8>`.
-pub fn encode_key_to_vec<S, K, V>(codec: &S, key: &K) -> Vec<u8>
-where
-  S: StorageCodec<K, V>,
-{
-  let mut out: Vec<u8> = Vec::new();
-  codec.encode_key(key, &mut out);
-  out
-}
-
-/// Encode `key` into the provided scratch buffer (avoids allocation).
-pub fn encode_key_into_scratch<S, K, V>(codec: &S, key: &K, scratch: &mut KeyScratch)
-where
-  S: StorageCodec<K, V>,
-{
-  codec.encode_key_into_scratch(key, scratch);
-}
-
-/// Compare two encoded keys using the codec's comparison function.
-pub fn compare_encoded_keys<S, K, V>(codec: &S, a: &[u8], b: &[u8]) -> Ordering
-where
-  S: StorageCodec<K, V>,
-{
-  codec.compare_encoded_keys(a, b)
-}
-
-/// Encode a value into an owned `Vec<u8>`.
-pub fn encode_value_to_vec<S, K, V>(codec: &S, value: &V) -> Vec<u8>
-where
-  S: StorageCodec<K, V>,
-{
-  let mut out: Vec<u8> = Vec::new();
-  codec.encode_value(value, &mut out);
-  out
-}
-
-/// Decode a stored value produced by `encode_value`.
-pub fn decode_value_to_vec<S, K, V>(codec: &S, src: &[u8]) -> Result<V, DecodeError>
-where
-  S: StorageCodec<K, V>,
-{
-  codec.decode_value(src)
 }
 
 /// Fast-path helpers for common engine callers. Implementations SHOULD provide
@@ -442,50 +370,35 @@ mod tests {
   use super::*;
   use crate::IntegerI64Codec;
 
-  struct TestStorageCodec;
-
-  impl StorageCodec<i64, ()> for TestStorageCodec {
-    fn encode_key(&self, key: &i64, dst: &mut Vec<u8>) {
-      // simple version prefix + integer encoding
-      dst.push(CURRENT_CODEC_VERSION);
-      let enc = <IntegerI64Codec as ValueCodec<i64>>::encode(key);
-      dst.extend_from_slice(enc.as_ref());
-    }
-
-    fn encode_value(&self, _value: &(), _dst: &mut Vec<u8>) {
-      // no-op for test
-    }
-
-    fn decode_value(&self, _src: &[u8]) -> Result<(), DecodeError> {
-      Ok(())
-    }
-
-    fn compare_encoded_keys(&self, a: &[u8], b: &[u8]) -> Ordering {
-      let a_payload = if !a.is_empty() { &a[1..] } else { a };
-      let b_payload = if !b.is_empty() { &b[1..] } else { b };
-      <IntegerI64Codec as KeyCodec<i64>>::compare(a_payload, b_payload)
-    }
-  }
-
   #[test]
-  fn encode_into_scratch_matches_encode_key() {
-    let codec = TestStorageCodec;
-    let mut tmp = Vec::new();
-    codec.encode_key(&42, &mut tmp);
+  fn fast_key_codec_encode_into_matches_value_codec() {
+    let codec = IntegerI64Codec;
+    let encoded = <IntegerI64Codec as ValueCodec<i64>>::encode(&42);
 
     let mut s = KeyScratch::with_capacity(32);
-    codec.encode_key_into_scratch(&42, &mut s);
+    <IntegerI64Codec as FastKeyCodec<i64>>::encode_into(&codec, &42, &mut s);
 
-    assert_eq!(s.as_slice(), tmp.as_slice());
+    assert_eq!(s.as_slice(), encoded.as_slice());
   }
 
   #[test]
-  fn compare_encoded_consistent_with_domain() {
-    let codec = TestStorageCodec;
-    let mut a = Vec::new();
-    codec.encode_key(&-10, &mut a);
-    let mut b = Vec::new();
-    codec.encode_key(&10, &mut b);
-    assert_eq!(codec.compare_encoded_keys(&a, &b), (-10i64).cmp(&10i64));
+  fn decode_with_version_round_trips_payload() {
+    let mut encoded = Vec::new();
+    encode_with_version(&mut encoded, |sink| encode_i64_into_sink(sink, -10));
+
+    let decoded = decode_with_version(&encoded, |cursor| cursor.read_i64()).expect("decode failed");
+
+    assert_eq!(decoded, -10);
+  }
+
+  #[test]
+  fn key_codec_compare_matches_domain_ordering() {
+    let left = <IntegerI64Codec as ValueCodec<i64>>::encode(&-10);
+    let right = <IntegerI64Codec as ValueCodec<i64>>::encode(&10);
+
+    assert_eq!(
+      <IntegerI64Codec as KeyCodec<i64>>::compare(left.as_ref(), right.as_ref()),
+      (-10i64).cmp(&10i64)
+    );
   }
 }

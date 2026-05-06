@@ -13,7 +13,6 @@ default = ["std"]
 std = ["futures/std", "serde/std"]
 test-helpers = ["async-lock", "async-stream"]
 ts = ["tsify"]
-registry = []
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = [] }

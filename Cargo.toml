@@ -42,6 +42,9 @@ db-sql-to-engine = { path = "crates/db-sql-to-engine", default-features = false,
 db-core = { path = "crates/db-core", default-features = false, features = [
     "std",
 ] }
+db-types = { path = "crates/db-types", default-features = false, features = [
+    "std",
+] }
 redb = { version = "4.0", default-features = false, features = [
 ], optional = true }
 

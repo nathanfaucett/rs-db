@@ -117,11 +117,12 @@ mod tests {
     SelectOptions,
   };
   use crate::{
-    ColumnSchema, EngineError, EngineKey, EngineKeyCodec, EngineQuery, EngineRow, EngineRowCodec,
-    EngineType, EngineValue, IndexSchema, TableSchema,
+    ColumnSchema, EngineError, EngineKey, EngineQuery, EngineRow, EngineType, EngineValue,
+    IndexSchema, TableSchema,
   };
   use db_in_memory::InMemoryNamedBTree;
   use db_redb::REDBNamedBTree;
+  use db_types::{EngineKeyCodec, EngineRowCodec};
   use futures::executor::block_on;
   use std::{
     fs,

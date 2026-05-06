@@ -267,6 +267,7 @@ dependencies = [
  "db-in-memory",
  "db-redb",
  "db-sql-to-engine",
+ "db-types",
  "futures",
  "redb",
  "thiserror 1.0.69",

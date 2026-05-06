@@ -4,7 +4,6 @@ mod predicate;
 mod query;
 mod schema_resolver;
 mod store_adapter;
-mod store_codec;
 mod types;
 
 pub use db_types::schema::{ColumnSchema, IndexSchema, TableSchema};
@@ -15,5 +14,4 @@ pub use query::{
 };
 pub use query::{EngineQuery, EngineResult};
 pub use schema_resolver::SchemaResolver;
-pub use store_codec::{EngineKeyCodec, EngineRowCodec};
 pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue};

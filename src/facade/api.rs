@@ -6,13 +6,13 @@ use db_automerge::{
   AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentChangeKeyCodec, VecBytesCodec,
 };
 use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow};
-#[cfg(feature = "redb")]
-use db_engine::{EngineKeyCodec, EngineRowCodec};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::{REDBBTree, REDBNamedBTree};
+#[cfg(feature = "redb")]
+use db_types::{EngineKeyCodec, EngineRowCodec};
 #[cfg(feature = "redb")]
 use std::path::Path;
 

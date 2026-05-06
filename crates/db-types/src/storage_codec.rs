@@ -1,21 +1,21 @@
-use std::cmp::Ordering;
+#[cfg(feature = "std")]
 use std::vec::Vec;
 
-use db_core::{
-  FastKeyCodec, KeyCodec, KeyScratch, ValueCodec, decode_with_version, encode_version_into_sink,
-};
-use db_types::{
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use db_core::{KeyCodec, ValueCodec, decode_with_version, encode_version_into_sink};
+
+use crate::{
   EngineKey, EngineRow,
   codec::{
     decode_engine_key, decode_engine_row, encode_engine_key_into_sink, encode_engine_row_into_sink,
   },
 };
 
-/// Encodes and compares engine keys for codec-backed named-tree backends.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EngineKeyCodec;
 
-/// Encodes engine row payloads for codec-backed named-tree backends.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EngineRowCodec;
 
@@ -43,21 +43,10 @@ impl ValueCodec<EngineKey> for EngineKeyCodec {
 }
 
 impl KeyCodec<EngineKey> for EngineKeyCodec {
-  fn compare(left: &[u8], right: &[u8]) -> Ordering {
+  fn compare(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
     let left = <Self as ValueCodec<EngineKey>>::decode(left);
     let right = <Self as ValueCodec<EngineKey>>::decode(right);
     left.cmp(&right)
-  }
-}
-
-impl FastKeyCodec<EngineKey> for EngineKeyCodec {
-  fn encode_into(&self, value: &EngineKey, scratch: &mut KeyScratch) {
-    encode_version_into_sink(&mut scratch.buf);
-    encode_engine_key_into_sink(&mut scratch.buf, value);
-  }
-
-  fn compare_encoded(&self, left: &[u8], right: &[u8]) -> Ordering {
-    <Self as KeyCodec<EngineKey>>::compare(left, right)
   }
 }
 
@@ -87,7 +76,7 @@ impl ValueCodec<EngineRow> for EngineRowCodec {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_types::EngineValue;
+  use crate::EngineValue;
 
   #[test]
   fn engine_key_round_trips() {
@@ -123,15 +112,11 @@ mod tests {
     let left = EngineKey::from_values(vec![EngineValue::Integer(2)]);
     let right = EngineKey::from_values(vec![EngineValue::Float(3.0)]);
 
-    let codec = EngineKeyCodec;
-    let mut left_scratch = KeyScratch::with_capacity(128);
-    codec.encode_into(&left, &mut left_scratch);
-
-    let mut right_scratch = KeyScratch::with_capacity(128);
-    codec.encode_into(&right, &mut right_scratch);
+    let left_encoded = <EngineKeyCodec as ValueCodec<EngineKey>>::encode_to_vec(&left);
+    let right_encoded = <EngineKeyCodec as ValueCodec<EngineKey>>::encode_to_vec(&right);
 
     assert_eq!(
-      EngineKeyCodec::compare(left_scratch.as_slice(), right_scratch.as_slice()),
+      EngineKeyCodec::compare(&left_encoded, &right_encoded),
       left.cmp(&right)
     );
   }
