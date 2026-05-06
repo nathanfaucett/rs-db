@@ -466,14 +466,14 @@ impl<T, KC, VC> BTreeTransaction<Uuid, AutoCommit> for AutomergeEncodedTransacti
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn commit(self) -> Result<(), BTreeError> {
     let AutomergeEncodedTransaction {
       mut inner_tx,
       pending,
       key_codec,
-      val_codec,
+      val_codec: _,
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
@@ -513,12 +513,9 @@ where
           &key,
           &mut key_scratch,
         );
-        let mut val_enc: Vec<u8> = Vec::new();
-        <VC as db_core::FastValueCodec<AutomergeEntry>>::encode_into(
-          &val_codec,
-          &bytes,
-          &mut val_enc,
-        );
+        let val_enc: Vec<u8> = <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&bytes)
+          .as_ref()
+          .to_vec();
         inner_tx.insert(key_scratch.buf, val_enc).await?;
       } else {
         let (start_enc, end_enc) = uuid_prefix_range(doc_id);
@@ -551,7 +548,7 @@ impl<T, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where

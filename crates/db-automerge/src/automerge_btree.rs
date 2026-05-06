@@ -579,7 +579,7 @@ impl<B, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC,
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
@@ -658,12 +658,9 @@ where
       &internal_key,
       &mut key_scratch,
     );
-    let mut val_enc: Vec<u8> = Vec::new();
-    <VC as db_core::FastValueCodec<AutomergeEntry>>::encode_into(
-      &self.val_codec,
-      &bytes,
-      &mut val_enc,
-    );
+    let val_enc: Vec<u8> = <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&bytes)
+      .as_ref()
+      .to_vec();
     self.inner.insert(key_scratch.buf, val_enc).await
   }
 
@@ -816,7 +813,7 @@ impl<B, KC, VC> BTree<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
-  VC: db_core::FastValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   type Transaction =
     crate::automerge_btree::transaction::AutomergeEncodedTransaction<B::Transaction, KC, VC>;

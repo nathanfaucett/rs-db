@@ -15,14 +15,12 @@ mod transaction_patch;
 pub use blocking::block_on;
 pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeResult, BTreeTransaction};
 pub use codec::{
-  BufferSink, CURRENT_CODEC_VERSION, Cursor, DecodeError, FastKeyCodec, FastValueCodec, KeyCodec,
-  KeyScratch, ValueCodec, canonical_f64_bits, canonical_f64_bits_into_sink, decode_bool,
-  decode_bytes, decode_from_slice, decode_len, decode_string, decode_usize, decode_version,
-  decode_with_version, encode_bool, encode_bool_into_sink, encode_bytes, encode_bytes_into_sink,
-  encode_i64, encode_i64_into_sink, encode_len, encode_len_into_sink, encode_string,
-  encode_string_into_sink, encode_u32, encode_u32_into_sink, encode_u64, encode_u64_into_sink,
-  encode_usize, encode_usize_into_sink, encode_version, encode_version_into_sink,
-  encode_with_version,
+  BufferSink, CURRENT_CODEC_VERSION, Cursor, DecodeError, FastKeyCodec, KeyCodec, KeyScratch,
+  ValueCodec, canonical_f64_bits, canonical_f64_bits_into_sink, decode_bool, decode_bytes,
+  decode_from_slice, decode_len, decode_string, decode_usize, decode_version, decode_with_version,
+  encode_bool_into_sink, encode_bytes_into_sink, encode_i64_into_sink, encode_len_into_sink,
+  encode_string_into_sink, encode_u32_into_sink, encode_u64_into_sink, encode_usize_into_sink,
+  encode_version_into_sink, encode_with_version,
 };
 
 pub use range_merge::merge_range_maps;

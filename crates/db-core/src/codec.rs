@@ -139,16 +139,6 @@ pub trait FastKeyCodec<T>: KeyCodec<T> {
   }
 }
 
-/// Extends a value codec with an allocation-free encoding path.
-pub trait FastValueCodec<T>: ValueCodec<T> {
-  /// Encode `value` directly into `dst`.
-  fn encode_into(&self, value: &T, dst: &mut Vec<u8>) {
-    dst.extend_from_slice(<Self as ValueCodec<T>>::encode(value).as_ref());
-  }
-}
-
-impl<T, V> FastValueCodec<V> for T where T: ValueCodec<V> {}
-
 // --- Primitives (was codec_primitives.rs) ----------------------------
 
 use alloc::string::String;
@@ -252,20 +242,12 @@ impl<'a> Cursor<'a> {
   }
 }
 
-pub fn encode_version(buffer: &mut Vec<u8>) {
-  encode_version_into_sink(buffer);
-}
-
 pub fn decode_version(cursor: &mut Cursor<'_>) -> Result<(), DecodeError> {
   let version = cursor.read_u8()?;
   if version != CURRENT_CODEC_VERSION {
     return Err(DecodeError::InvalidVersion(version));
   }
   Ok(())
-}
-
-pub fn encode_bool(buffer: &mut Vec<u8>, value: bool) {
-  encode_bool_into_sink(buffer, value);
 }
 
 pub fn decode_bool(cursor: &mut Cursor<'_>) -> Result<bool, DecodeError> {
@@ -276,29 +258,9 @@ pub fn decode_bool(cursor: &mut Cursor<'_>) -> Result<bool, DecodeError> {
   }
 }
 
-pub fn encode_u32(buffer: &mut Vec<u8>, value: u32) {
-  encode_u32_into_sink(buffer, value);
-}
-
-pub fn encode_u64(buffer: &mut Vec<u8>, value: u64) {
-  encode_u64_into_sink(buffer, value);
-}
-
-pub fn encode_i64(buffer: &mut Vec<u8>, value: i64) {
-  encode_i64_into_sink(buffer, value);
-}
-
-pub fn encode_len(buffer: &mut Vec<u8>, len: usize) {
-  encode_len_into_sink(buffer, len);
-}
-
 pub fn decode_len(cursor: &mut Cursor<'_>) -> Result<usize, DecodeError> {
   let v = cursor.read_u32()?;
   usize::try_from(v).map_err(|_| DecodeError::Malformed)
-}
-
-pub fn encode_string(buffer: &mut Vec<u8>, value: &str) {
-  encode_string_into_sink(buffer, value);
 }
 
 pub fn decode_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
@@ -307,17 +269,9 @@ pub fn decode_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
   String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Malformed)
 }
 
-pub fn encode_bytes(buffer: &mut Vec<u8>, value: &[u8]) {
-  encode_bytes_into_sink(buffer, value);
-}
-
 pub fn decode_bytes(cursor: &mut Cursor<'_>) -> Result<Vec<u8>, DecodeError> {
   let len = decode_len(cursor)?;
   Ok(cursor.read_exact(len)?.to_vec())
-}
-
-pub fn encode_usize(buffer: &mut Vec<u8>, value: usize) {
-  encode_usize_into_sink(buffer, value);
 }
 
 pub fn decode_usize(cursor: &mut Cursor<'_>) -> Result<usize, DecodeError> {
@@ -341,7 +295,7 @@ pub fn encode_with_version<F>(buffer: &mut Vec<u8>, f: F)
 where
   F: FnOnce(&mut Vec<u8>),
 {
-  encode_version(buffer);
+  encode_version_into_sink(buffer);
   f(buffer);
 }
 
