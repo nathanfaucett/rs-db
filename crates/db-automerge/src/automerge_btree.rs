@@ -7,7 +7,15 @@ use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
+#[cfg(test)]
 fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
+  encode_doc_key_range(doc_id, &DocumentChangeKeyCodec)
+}
+
+pub(super) fn encode_doc_key_range<KC>(doc_id: Uuid, codec: &KC) -> (Vec<u8>, Vec<u8>)
+where
+  KC: db_core::FastKeyCodec<DocumentChangeKey>,
+{
   let start = DocumentChangeKey {
     doc_id,
     doc_type: DocumentType::Incremental,
@@ -21,17 +29,34 @@ fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
 
   let mut s1 = db_core::KeyScratch::with_capacity(49);
   let mut s2 = db_core::KeyScratch::with_capacity(49);
-  <DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-    &DocumentChangeKeyCodec,
-    &start,
-    &mut s1,
-  );
-  <DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-    &DocumentChangeKeyCodec,
-    &end,
-    &mut s2,
-  );
+  <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(codec, &start, &mut s1);
+  <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(codec, &end, &mut s2);
   (s1.buf, s2.buf)
+}
+
+pub(super) fn encode_doc_key_range_value_codec<KC>(doc_id: Uuid) -> (Vec<u8>, Vec<u8>)
+where
+  KC: db_core::ValueCodec<DocumentChangeKey>,
+{
+  let start = DocumentChangeKey {
+    doc_id,
+    doc_type: DocumentType::Incremental,
+    change_hash: [0u8; 32],
+  };
+  let end = DocumentChangeKey {
+    doc_id,
+    doc_type: DocumentType::Snapshot,
+    change_hash: [255u8; 32],
+  };
+
+  (
+    <KC as db_core::ValueCodec<DocumentChangeKey>>::encode(&start)
+      .as_ref()
+      .to_vec(),
+    <KC as db_core::ValueCodec<DocumentChangeKey>>::encode(&end)
+      .as_ref()
+      .to_vec(),
+  )
 }
 
 /// Document change key: (doc_id, doc_type, change_hash)
@@ -131,6 +156,32 @@ impl ReconstructionAccumulator {
 
 fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
   AutoCommit::load(bytes).map_err(BTreeError::other)
+}
+
+fn uuid_in_range<R>(range: &R, doc_id: &Uuid) -> bool
+where
+  R: RangeBounds<Uuid>,
+{
+  let start_ok = match range.start_bound() {
+    std::ops::Bound::Included(lower) => doc_id >= lower,
+    std::ops::Bound::Excluded(lower) => doc_id > lower,
+    std::ops::Bound::Unbounded => true,
+  };
+  let end_ok = match range.end_bound() {
+    std::ops::Bound::Included(upper) => doc_id <= upper,
+    std::ops::Bound::Excluded(upper) => doc_id < upper,
+    std::ops::Bound::Unbounded => true,
+  };
+  start_ok && end_ok
+}
+
+fn flush_reconstructed_doc(
+  current_doc: &mut Option<Uuid>,
+  accumulator: &mut ReconstructionAccumulator,
+) -> Option<Result<(Uuid, AutoCommit), BTreeError>> {
+  let doc_id = current_doc.take()?;
+  let state = core::mem::replace(accumulator, ReconstructionAccumulator::new()).finish();
+  Some(load_document(&state).map(|doc| (doc_id, doc)))
 }
 
 /// Backend-agnostic Automerge wrapper. Parameterized over any `BTree` backend.
@@ -376,42 +427,28 @@ where
 
       while let Some(item) = inner_stream.next().await {
         let (k, v) = item?;
-        // filter by requested Uuid range
-        let in_range = match range.start_bound() {
-          std::ops::Bound::Included(lower) => &k.doc_id >= lower,
-          std::ops::Bound::Excluded(lower) => &k.doc_id > lower,
-          std::ops::Bound::Unbounded => true,
-        } && match range.end_bound() {
-          std::ops::Bound::Included(upper) => &k.doc_id <= upper,
-          std::ops::Bound::Excluded(upper) => &k.doc_id < upper,
-          std::ops::Bound::Unbounded => true,
-        };
-
-        if !in_range {
+        if !uuid_in_range(&range, &k.doc_id) {
           continue;
         }
 
         if current_doc.is_none() {
           current_doc = Some(k.doc_id);
         } else if current_doc.as_ref().expect("doc id present") != &k.doc_id {
-          if let Some(doc_id_to_yield) = current_doc.take() {
-            let state = accumulator.finish();
-            match load_document(&state) {
-              Ok(doc) => yield Ok((doc_id_to_yield, doc)),
+          if let Some(item) = flush_reconstructed_doc(&mut current_doc, &mut accumulator) {
+            match item {
+              Ok(pair) => yield Ok(pair),
               Err(e) => yield Err(e),
             }
           }
           current_doc = Some(k.doc_id);
-          accumulator = ReconstructionAccumulator::new();
         }
 
         accumulator.apply(k.doc_type, v.clone());
       }
 
-      if let Some(doc_id) = current_doc {
-        let state = accumulator.finish();
-        match load_document(&state) {
-          Ok(doc) => yield Ok((doc_id, doc)),
+      if let Some(item) = flush_reconstructed_doc(&mut current_doc, &mut accumulator) {
+        match item {
+          Ok(pair) => yield Ok(pair),
           Err(e) => yield Err(e),
         }
       }
@@ -574,6 +611,58 @@ impl db_core::ValueCodec<AutomergeEntry> for VecBytesCodec {
   }
 }
 
+impl<B, KC, VC> AutomergeBTreeEncoded<B, KC, VC>
+where
+  B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  fn decode_entry_value(data: &[u8]) -> Vec<u8> {
+    <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(data)
+      .unwrap_or_else(|_| data.to_vec())
+  }
+
+  fn doc_scan_bounds(&self, doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
+    encode_doc_key_range(doc_id, &self.key_codec)
+  }
+
+  fn full_scan_bounds(&self) -> (Vec<u8>, Vec<u8>) {
+    let start = Uuid::from_u128(0);
+    let end = Uuid::from_u128(u128::MAX);
+    let (start_enc, _) = encode_doc_key_range(start, &self.key_codec);
+    let (_, end_enc) = encode_doc_key_range(end, &self.key_codec);
+    (start_enc, end_enc)
+  }
+
+  async fn scan_doc_entries(
+    &self,
+    doc_id: Uuid,
+  ) -> Result<(ReconstructionAccumulator, bool), BTreeError> {
+    let (start_enc, end_enc) = self.doc_scan_bounds(doc_id);
+    let stream = self.inner.range(start_enc..=end_enc);
+    futures::pin_mut!(stream);
+
+    let mut accumulator = ReconstructionAccumulator::new();
+    let mut has_entries = false;
+
+    while let Some(item) = stream.next().await {
+      let (k_enc, entry_enc) = match item {
+        Ok(pair) => pair,
+        Err(_) => continue,
+      };
+      has_entries = true;
+      let k = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
+        Ok(kd) => kd,
+        Err(_) => continue,
+      };
+      let value = Self::decode_entry_value(&entry_enc);
+      accumulator.apply(k.doc_type, value);
+    }
+
+    Ok((accumulator, has_entries))
+  }
+}
+
 #[allow(clippy::needless_lifetimes)]
 impl<B, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
@@ -587,28 +676,7 @@ where
     Q: Borrow<Uuid> + Send + 'a,
   {
     let doc_id = *key.borrow();
-
-    // reconstruct by scanning encoded entries for this doc_id
-    let (start_enc, end_enc) = uuid_prefix_range(doc_id);
-
-    let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
-    futures::pin_mut!(stream);
-
-    let mut accumulator = ReconstructionAccumulator::new();
-
-    while let Some(item) = stream.next().await {
-      let (k_enc, entry_enc) = match item {
-        Ok(pair) => pair,
-        Err(_) => continue,
-      };
-      let k = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
-        Ok(kd) => kd,
-        Err(_) => continue,
-      };
-      let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-        .unwrap_or_else(|_| entry_enc.clone());
-      accumulator.apply(k.doc_type, value);
-    }
+    let (accumulator, _) = self.scan_doc_entries(doc_id).await?;
 
     if accumulator.is_empty() {
       return Ok(None);
@@ -626,7 +694,7 @@ where
     let change_hash = hash_heads(&doc.get_heads());
     let bytes = doc.save();
 
-    let (start_enc, end_enc) = uuid_prefix_range(key);
+    let (start_enc, end_enc) = self.doc_scan_bounds(key);
 
     let found_identical = {
       let mut found = false;
@@ -634,8 +702,7 @@ where
       futures::pin_mut!(stream);
       while let Some(item) = stream.next().await {
         let (_k_enc, v_enc) = item?;
-        let existing = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc)
-          .unwrap_or_else(|_| v_enc.clone());
+        let existing = Self::decode_entry_value(&v_enc);
         if existing == bytes {
           found = true;
           break;
@@ -670,43 +737,16 @@ where
     Q: Borrow<Uuid> + Send + 'a,
   {
     let doc_id = *key.borrow();
-    // capture previous state by scanning
-    let prev = {
-      // reuse get logic but without compaction
-      let (start_enc, end_enc) = uuid_prefix_range(doc_id);
-
-      let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
-      futures::pin_mut!(stream);
-      let mut accumulator = ReconstructionAccumulator::new();
-      let mut has_entries = false;
-
-      while let Some(item) = stream.next().await {
-        let (k_enc, entry_enc) = match item {
-          Ok(pair) => pair,
-          Err(_) => continue,
-        };
-        has_entries = true;
-        let k = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
-          Ok(kd) => kd,
-          Err(_) => continue,
-        };
-        let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-          .unwrap_or_else(|_| entry_enc.clone());
-        accumulator.apply(k.doc_type, value);
-      }
-
-      if !has_entries {
-        None
-      } else {
-        Some(accumulator.finish())
-      }
+    let (accumulator, has_entries) = self.scan_doc_entries(doc_id).await?;
+    let prev = if !has_entries {
+      None
+    } else {
+      Some(accumulator.finish())
     };
 
     // non-atomic removal: collect keys and remove
-    let (start_enc, _) = uuid_prefix_range(Uuid::from_u128(0));
-    let (_, end_enc) = uuid_prefix_range(Uuid::from_u128(u128::MAX));
+    let (start_enc, end_enc) = self.full_scan_bounds();
 
-    let _keys_to_remove: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
     let keys_to_remove: alloc::vec::Vec<Vec<u8>> = {
       let mut collected: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
       let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
@@ -736,23 +776,7 @@ where
     R: RangeBounds<Uuid> + Send + 'a,
   {
     stream! {
-      let start_doc = DocumentChangeKey { doc_id: Uuid::from_u128(0), doc_type: DocumentType::Incremental, change_hash: [0u8;32] };
-      let end_doc = DocumentChangeKey { doc_id: Uuid::from_u128(u128::MAX), doc_type: DocumentType::Snapshot, change_hash: [255u8;32] };
-
-      let mut start_scratch = db_core::KeyScratch::with_capacity(49);
-      let mut end_scratch = db_core::KeyScratch::with_capacity(49);
-      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &self.key_codec,
-        &start_doc,
-        &mut start_scratch,
-      );
-      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &self.key_codec,
-        &end_doc,
-        &mut end_scratch,
-      );
-      let start_enc = start_scratch.buf;
-      let end_enc = end_scratch.buf;
+      let (start_enc, end_enc) = self.full_scan_bounds();
 
       let inner_stream = self.inner.range(start_enc.clone()..=end_enc.clone());
       futures::pin_mut!(inner_stream);
@@ -766,42 +790,27 @@ where
           Ok(kd) => kd,
           Err(_) => continue,
         };
-        // filter by requested Uuid range
-        let in_range = match range.start_bound() {
-          std::ops::Bound::Included(lower) => &k.doc_id >= lower,
-          std::ops::Bound::Excluded(lower) => &k.doc_id > lower,
-          std::ops::Bound::Unbounded => true,
-        } && match range.end_bound() {
-          std::ops::Bound::Included(upper) => &k.doc_id <= upper,
-          std::ops::Bound::Excluded(upper) => &k.doc_id < upper,
-          std::ops::Bound::Unbounded => true,
-        };
-
-        if !in_range { continue; }
+        if !uuid_in_range(&range, &k.doc_id) { continue; }
 
         if current_doc.is_none() {
           current_doc = Some(k.doc_id);
         } else if current_doc.as_ref().expect("doc id present") != &k.doc_id {
-          if let Some(doc_id_to_yield) = current_doc.take() {
-            let state = accumulator.finish();
-            match load_document(&state) {
-              Ok(doc) => yield Ok((doc_id_to_yield, doc)),
+          if let Some(item) = flush_reconstructed_doc(&mut current_doc, &mut accumulator) {
+            match item {
+              Ok(pair) => yield Ok(pair),
               Err(e) => yield Err(e),
             }
           }
           current_doc = Some(k.doc_id);
-          accumulator = ReconstructionAccumulator::new();
         }
 
-        let value = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc)
-          .unwrap_or_else(|_| v_enc.clone());
+        let value = Self::decode_entry_value(&v_enc);
         accumulator.apply(k.doc_type, value);
       }
 
-      if let Some(doc_id) = current_doc {
-        let state = accumulator.finish();
-        match load_document(&state) {
-          Ok(doc) => yield Ok((doc_id, doc)),
+      if let Some(item) = flush_reconstructed_doc(&mut current_doc, &mut accumulator) {
+        match item {
+          Ok(pair) => yield Ok(pair),
           Err(e) => yield Err(e),
         }
       }

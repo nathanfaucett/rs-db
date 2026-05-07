@@ -13,6 +13,28 @@ use crate::{
   },
 };
 
+fn encode_key_versioned(value: &EngineKey) -> Vec<u8> {
+  let mut out = Vec::new();
+  encode_version_into_sink(&mut out);
+  encode_engine_key_into_sink(&mut out, value);
+  out
+}
+
+fn decode_key_versioned(data: &[u8]) -> Result<EngineKey, db_core::DecodeError> {
+  decode_with_version(data, decode_engine_key)
+}
+
+fn encode_row_versioned(value: &EngineRow) -> Vec<u8> {
+  let mut out = Vec::new();
+  encode_version_into_sink(&mut out);
+  encode_engine_row_into_sink(&mut out, value);
+  out
+}
+
+fn decode_row_versioned(data: &[u8]) -> Result<EngineRow, db_core::DecodeError> {
+  decode_with_version(data, decode_engine_row)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EngineKeyCodec;
 
@@ -27,18 +49,15 @@ impl ValueCodec<EngineKey> for EngineKeyCodec {
     EngineKey: 'a;
 
   fn encode<'a>(value: &'a EngineKey) -> Self::Bytes<'a> {
-    let mut out = Vec::new();
-    encode_version_into_sink(&mut out);
-    encode_engine_key_into_sink(&mut out, value);
-    out
+    encode_key_versioned(value)
   }
 
   fn decode(data: &[u8]) -> EngineKey {
-    decode_with_version(data, decode_engine_key).expect("decode engine key failed")
+    decode_key_versioned(data).expect("decode engine key failed")
   }
 
   fn decode_checked(data: &[u8]) -> Result<EngineKey, db_core::DecodeError> {
-    decode_with_version(data, decode_engine_key)
+    decode_key_versioned(data)
   }
 }
 
@@ -58,18 +77,15 @@ impl ValueCodec<EngineRow> for EngineRowCodec {
     EngineRow: 'a;
 
   fn encode<'a>(value: &'a EngineRow) -> Self::Bytes<'a> {
-    let mut out = Vec::new();
-    encode_version_into_sink(&mut out);
-    encode_engine_row_into_sink(&mut out, value);
-    out
+    encode_row_versioned(value)
   }
 
   fn decode(data: &[u8]) -> EngineRow {
-    decode_with_version(data, decode_engine_row).expect("decode engine row failed")
+    decode_row_versioned(data).expect("decode engine row failed")
   }
 
   fn decode_checked(data: &[u8]) -> Result<EngineRow, db_core::DecodeError> {
-    decode_with_version(data, decode_engine_row)
+    decode_row_versioned(data)
   }
 }
 

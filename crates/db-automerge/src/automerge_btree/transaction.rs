@@ -11,39 +11,94 @@ use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
-use super::{AutomergeEntry, DocumentChangeKey, DocumentType, hash::hash_heads, reconstruct};
+use super::{
+  AutomergeEntry, DocumentChangeKey, DocumentType, encode_doc_key_range,
+  encode_doc_key_range_value_codec, hash::hash_heads, reconstruct,
+};
 
-fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
-  let start = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Incremental,
-    change_hash: [0u8; 32],
-  };
-  let end = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash: [255u8; 32],
-  };
-  (
-    {
-      let mut s = db_core::KeyScratch::with_capacity(49);
-      <super::DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &super::DocumentChangeKeyCodec,
-        &start,
-        &mut s,
-      );
-      s.buf
-    },
-    {
-      let mut s = db_core::KeyScratch::with_capacity(49);
-      <super::DocumentChangeKeyCodec as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &super::DocumentChangeKeyCodec,
-        &end,
-        &mut s,
-      );
-      s.buf
-    },
-  )
+fn key_in_range<K: Ord, R: RangeBounds<K>>(range: &R, key: &K) -> bool {
+  match range.start_bound() {
+    Bound::Included(lower) => {
+      if key < lower {
+        return false;
+      }
+    }
+    Bound::Excluded(lower) => {
+      if key <= lower {
+        return false;
+      }
+    }
+    Bound::Unbounded => {}
+  }
+
+  match range.end_bound() {
+    Bound::Included(upper) => {
+      if key > upper {
+        return false;
+      }
+    }
+    Bound::Excluded(upper) => {
+      if key >= upper {
+        return false;
+      }
+    }
+    Bound::Unbounded => {}
+  }
+
+  true
+}
+
+fn reconstruct_state(
+  latest_snapshot: Option<Vec<u8>>,
+  deltas_after_snapshot: &[Vec<u8>],
+) -> Vec<u8> {
+  let state = latest_snapshot.unwrap_or_default();
+  reconstruct(&state, deltas_after_snapshot)
+}
+
+fn flush_current_doc(
+  merged: &mut BTreeMap<Uuid, Vec<u8>>,
+  current_doc: &mut Option<Uuid>,
+  latest_snapshot: &mut Option<Vec<u8>>,
+  deltas_after_snapshot: &mut Vec<Vec<u8>>,
+) {
+  if let Some(doc_id) = current_doc.take() {
+    let state = reconstruct_state(latest_snapshot.take(), deltas_after_snapshot);
+    deltas_after_snapshot.clear();
+    merged.insert(doc_id, state);
+  }
+}
+
+fn apply_pending_overrides<R>(
+  range: &R,
+  pending: &BTreeMap<Uuid, Option<AutoCommit>>,
+  merged: &mut BTreeMap<Uuid, Vec<u8>>,
+) where
+  R: RangeBounds<Uuid>,
+{
+  for (doc_id, op) in pending {
+    if !key_in_range(range, doc_id) {
+      continue;
+    }
+
+    if let Some(doc) = op {
+      merged.insert(*doc_id, doc.clone().save());
+    } else {
+      merged.remove(doc_id);
+    }
+  }
+}
+
+fn load_autocommit(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
+  AutoCommit::load(bytes).map_err(BTreeError::other)
+}
+
+fn decode_entry_or_raw<VC>(data: &[u8]) -> Vec<u8>
+where
+  VC: db_core::ValueCodec<AutomergeEntry>,
+{
+  <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(data)
+    .unwrap_or_else(|_| data.to_vec())
 }
 
 pub struct AutomergeTransaction<T> {
@@ -94,41 +149,10 @@ where
       return Ok(None);
     }
 
-    let mut state = latest_snapshot.unwrap_or_default();
-    state = reconstruct(&state, &deltas_after_snapshot);
-    Ok(Some(state))
-  }
-
-  fn key_in_range<K: Ord, R: RangeBounds<K>>(range: &R, key: &K) -> bool {
-    match range.start_bound() {
-      Bound::Included(lower) => {
-        if key < lower {
-          return false;
-        }
-      }
-      Bound::Excluded(lower) => {
-        if key <= lower {
-          return false;
-        }
-      }
-      Bound::Unbounded => {}
-    }
-
-    match range.end_bound() {
-      Bound::Included(upper) => {
-        if key > upper {
-          return false;
-        }
-      }
-      Bound::Excluded(upper) => {
-        if key >= upper {
-          return false;
-        }
-      }
-      Bound::Unbounded => {}
-    }
-
-    true
+    Ok(Some(reconstruct_state(
+      latest_snapshot,
+      &deltas_after_snapshot,
+    )))
   }
 }
 
@@ -236,10 +260,7 @@ where
       return Ok(pending.clone());
     }
     match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
   }
@@ -269,11 +290,8 @@ where
       self.pending.insert(doc_id, None);
     }
     match existing_bytes {
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
     }
   }
 
@@ -315,11 +333,12 @@ where
         }
 
         if current_doc.unwrap() != k.doc_id {
-          let doc_id = current_doc.take().unwrap();
-          let mut state = latest_snapshot.take().unwrap_or_default();
-          state = reconstruct(&state, &deltas_after_snapshot);
-          deltas_after_snapshot.clear();
-          merged.insert(doc_id, state);
+          flush_current_doc(
+            &mut merged,
+            &mut current_doc,
+            &mut latest_snapshot,
+            &mut deltas_after_snapshot,
+          );
           current_doc = Some(k.doc_id);
         }
 
@@ -331,37 +350,22 @@ where
         }
       }
 
-      if let Some(doc_id) = current_doc {
-        let mut state = latest_snapshot.take().unwrap_or_default();
-        state = reconstruct(&state, &deltas_after_snapshot);
-        merged.insert(doc_id, state);
-      }
+      flush_current_doc(
+        &mut merged,
+        &mut current_doc,
+        &mut latest_snapshot,
+        &mut deltas_after_snapshot,
+      );
 
-      // Apply pending overrides/removals within the requested uuid range
-      let mut pending_items: Vec<(Uuid, Option<AutoCommit>)> = Vec::new();
-      for (k, v_opt) in self.pending.iter() {
-        if Self::key_in_range(&range, k) {
-          pending_items.push((*k, v_opt.clone()));
-        }
-      }
-
-      for (k, v_opt) in pending_items.into_iter() {
-        if let Some(v_doc) = v_opt {
-          let mut d = v_doc;
-          let bytes = d.save();
-          merged.insert(k, bytes);
-        } else {
-          merged.remove(&k);
-        }
-      }
+      apply_pending_overrides(&range, &self.pending, &mut merged);
 
       for (doc_id, state) in merged.into_iter() {
-        if !Self::key_in_range(&range, &doc_id) {
+        if !key_in_range(&range, &doc_id) {
           continue;
         }
-        match AutoCommit::load(&state) {
+        match load_autocommit(&state) {
           Ok(doc) => yield Ok((doc_id, doc)),
-          Err(e) => yield Err(BTreeError::other(e)),
+          Err(e) => yield Err(e),
         }
       }
     }
@@ -375,7 +379,7 @@ pub struct AutomergeEncodedTransaction<T, KC, VC> {
   inner_tx: T,
   pending: BTreeMap<Uuid, Option<AutoCommit>>,
   key_codec: KC,
-  val_codec: VC,
+  _val_codec: VC,
 }
 
 impl<T, KC, VC> AutomergeEncodedTransaction<T, KC, VC>
@@ -389,12 +393,12 @@ where
       inner_tx,
       pending: BTreeMap::new(),
       key_codec,
-      val_codec,
+      _val_codec: val_codec,
     }
   }
 
   async fn reconstruct_inner_doc(&self, doc_id: Uuid) -> Result<Option<Vec<u8>>, BTreeError> {
-    let (start_enc, end_enc) = uuid_prefix_range(doc_id);
+    let (start_enc, end_enc) = encode_doc_key_range_value_codec::<KC>(doc_id);
 
     let mut latest_snapshot: Option<Vec<u8>> = None;
     let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
@@ -410,13 +414,11 @@ where
         Err(_) => continue,
       };
       if k.doc_type.is_snapshot() {
-        let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-          .unwrap_or_else(|_| entry_enc.clone());
+        let v = decode_entry_or_raw::<VC>(&entry_enc);
         latest_snapshot = Some(v);
         deltas_after_snapshot.clear();
       } else {
-        let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&entry_enc)
-          .unwrap_or_else(|_| entry_enc.clone());
+        let v = decode_entry_or_raw::<VC>(&entry_enc);
         deltas_after_snapshot.push(v);
       }
     }
@@ -425,40 +427,10 @@ where
       return Ok(None);
     }
 
-    let mut state = latest_snapshot.unwrap_or_default();
-    state = reconstruct(&state, &deltas_after_snapshot);
-    Ok(Some(state))
-  }
-
-  fn key_in_range<K: Ord, R: RangeBounds<K>>(range: &R, key: &K) -> bool {
-    // reuse existing helper logic
-    match range.start_bound() {
-      Bound::Included(lower) => {
-        if key < lower {
-          return false;
-        }
-      }
-      Bound::Excluded(lower) => {
-        if key <= lower {
-          return false;
-        }
-      }
-      Bound::Unbounded => {}
-    }
-    match range.end_bound() {
-      Bound::Included(upper) => {
-        if key > upper {
-          return false;
-        }
-      }
-      Bound::Excluded(upper) => {
-        if key >= upper {
-          return false;
-        }
-      }
-      Bound::Unbounded => {}
-    }
-    true
+    Ok(Some(reconstruct_state(
+      latest_snapshot,
+      &deltas_after_snapshot,
+    )))
   }
 }
 
@@ -473,7 +445,7 @@ where
       mut inner_tx,
       pending,
       key_codec,
-      val_codec: _,
+      _val_codec: _,
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
@@ -481,7 +453,7 @@ where
         let change_hash = hash_heads(&doc.get_heads());
         let bytes = doc.save();
 
-        let (start_enc, end_enc) = uuid_prefix_range(doc_id);
+        let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
 
         let mut found_identical = false;
         {
@@ -489,8 +461,7 @@ where
           futures::pin_mut!(stream);
           while let Some(item) = stream.next().await {
             let (_k_enc, v_enc) = item?;
-            let v = <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc)
-              .unwrap_or_else(|_| v_enc.clone());
+            let v = decode_entry_or_raw::<VC>(&v_enc);
             if v == bytes {
               found_identical = true;
               break;
@@ -518,7 +489,7 @@ where
           .to_vec();
         inner_tx.insert(key_scratch.buf, val_enc).await?;
       } else {
-        let (start_enc, end_enc) = uuid_prefix_range(doc_id);
+        let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
 
         let keys_to_remove: alloc::vec::Vec<Vec<u8>> = {
           let mut collected: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
@@ -560,10 +531,7 @@ where
       return Ok(pending.clone());
     }
     match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
   }
@@ -591,11 +559,8 @@ where
       self.pending.insert(doc_id, None);
     }
     match existing_bytes {
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
-      Some(bytes) => match AutoCommit::load(&bytes) {
-        Ok(doc) => Ok(Some(doc)),
-        Err(e) => Err(BTreeError::other(e)),
-      },
     }
   }
 
@@ -608,22 +573,8 @@ where
     R: RangeBounds<Uuid> + Send + 'a,
   {
     stream! {
-      let start_doc = DocumentChangeKey { doc_id: Uuid::from_u128(0), doc_type: DocumentType::Incremental, change_hash: [0u8;32] };
-      let end_doc = DocumentChangeKey { doc_id: Uuid::from_u128(u128::MAX), doc_type: DocumentType::Snapshot, change_hash: [255u8;32] };
-      let mut start_scratch = db_core::KeyScratch::with_capacity(49);
-      let mut end_scratch = db_core::KeyScratch::with_capacity(49);
-      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &self.key_codec,
-        &start_doc,
-        &mut start_scratch,
-      );
-      <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-        &self.key_codec,
-        &end_doc,
-        &mut end_scratch,
-      );
-      let start_enc = start_scratch.buf;
-      let end_enc = end_scratch.buf;
+      let (start_enc, _) = encode_doc_key_range(Uuid::from_u128(0), &self.key_codec);
+      let (_, end_enc) = encode_doc_key_range(Uuid::from_u128(u128::MAX), &self.key_codec);
 
       let mut merged: std::collections::BTreeMap<Uuid, Vec<u8>> = std::collections::BTreeMap::new();
 
@@ -639,31 +590,32 @@ where
         let k = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) { Ok(kd) => kd, Err(_) => continue };
         if current_doc.is_none() { current_doc = Some(k.doc_id); }
         if current_doc.unwrap() != k.doc_id {
-          let doc_id = current_doc.take().unwrap();
-          let mut state = latest_snapshot.take().unwrap_or_default();
-          state = reconstruct(&state, &deltas_after_snapshot);
-          deltas_after_snapshot.clear();
-          merged.insert(doc_id, state);
+          flush_current_doc(
+            &mut merged,
+            &mut current_doc,
+            &mut latest_snapshot,
+            &mut deltas_after_snapshot,
+          );
           current_doc = Some(k.doc_id);
         }
-        if k.doc_type.is_snapshot() { latest_snapshot = Some(<VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc).unwrap_or_else(|_| v_enc.clone())); deltas_after_snapshot.clear(); }
-        else { deltas_after_snapshot.push(<VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(&v_enc).unwrap_or_else(|_| v_enc.clone())); }
+        if k.doc_type.is_snapshot() { latest_snapshot = Some(decode_entry_or_raw::<VC>(&v_enc)); deltas_after_snapshot.clear(); }
+        else { deltas_after_snapshot.push(decode_entry_or_raw::<VC>(&v_enc)); }
       }
 
-      if let Some(doc_id) = current_doc { let mut state = latest_snapshot.take().unwrap_or_default(); state = reconstruct(&state, &deltas_after_snapshot); merged.insert(doc_id, state); }
+      flush_current_doc(
+        &mut merged,
+        &mut current_doc,
+        &mut latest_snapshot,
+        &mut deltas_after_snapshot,
+      );
 
-      let mut pending_items: Vec<(Uuid, Option<AutoCommit>)> = Vec::new();
-      for (k, v_opt) in self.pending.iter() { if Self::key_in_range(&range, k) { pending_items.push((*k, v_opt.clone())); } }
-
-      for (k, v_opt) in pending_items.into_iter() {
-        if let Some(v_doc) = v_opt { let mut d = v_doc; let bytes = d.save(); merged.insert(k, bytes); } else { merged.remove(&k); }
-      }
+      apply_pending_overrides(&range, &self.pending, &mut merged);
 
       for (doc_id, state) in merged.into_iter() {
-        if !Self::key_in_range(&range, &doc_id) {
+        if !key_in_range(&range, &doc_id) {
           continue;
         }
-        match AutoCommit::load(&state) { Ok(doc) => yield Ok((doc_id, doc)), Err(e) => yield Err(BTreeError::other(e)), }
+        match load_autocommit(&state) { Ok(doc) => yield Ok((doc_id, doc)), Err(e) => yield Err(e), }
       }
     }
   }
@@ -672,12 +624,85 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_core::{BTree, block_on};
+  use db_core::{BTree, BTreeExecutor, BTreeTransaction, block_on};
   use db_in_memory::InMemoryBTree;
 
   use automerge::transaction::Transactable;
 
-  use super::super::AutomergeBTree;
+  use super::super::{AutomergeBTree, AutomergeBTreeEncoded};
+
+  struct TxParityObservation {
+    pending_get_bytes: Vec<u8>,
+    pending_range_ids: Vec<Uuid>,
+    committed_get_bytes: Vec<u8>,
+    removed_bytes: Vec<u8>,
+    range_after_pending_remove_ids: Vec<Uuid>,
+  }
+
+  fn doc_with_value(value: &str) -> AutoCommit {
+    let mut doc = AutoCommit::new();
+    doc.put(&automerge::ROOT, "v", value).expect("put");
+    doc
+  }
+
+  async fn collect_ids_from_range<S>(stream: S) -> Result<Vec<Uuid>, BTreeError>
+  where
+    S: futures::Stream<Item = Result<(Uuid, AutoCommit), BTreeError>>,
+  {
+    let mut ids = Vec::new();
+    futures::pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (id, _doc) = item?;
+      ids.push(id);
+    }
+    Ok(ids)
+  }
+
+  async fn run_transaction_observation<S>(
+    store: &S,
+    doc_a: Uuid,
+    doc_b: Uuid,
+    doc_a_value: &AutoCommit,
+    doc_b_value: &AutoCommit,
+  ) -> Result<TxParityObservation, BTreeError>
+  where
+    S: BTree<Uuid, AutoCommit>,
+  {
+    let mut tx = store.transaction().await?;
+    tx.insert(doc_a, doc_a_value.clone()).await?;
+    tx.insert(doc_b, doc_b_value.clone()).await?;
+
+    let pending_get_bytes = tx.get(&doc_a).await?.expect("missing pending doc").save();
+
+    let pending_range_ids =
+      collect_ids_from_range(tx.range(Uuid::nil()..=Uuid::from_u128(u128::MAX))).await?;
+    tx.commit().await?;
+
+    let committed_get_bytes = store
+      .get(&doc_a)
+      .await?
+      .expect("missing committed doc")
+      .save();
+
+    let mut tx2 = store.transaction().await?;
+    let removed_bytes = tx2
+      .remove(&doc_a)
+      .await?
+      .expect("missing removed doc")
+      .save();
+
+    let range_after_pending_remove_ids =
+      collect_ids_from_range(tx2.range(Uuid::nil()..=Uuid::from_u128(u128::MAX))).await?;
+    tx2.rollback().await?;
+
+    Ok(TxParityObservation {
+      pending_get_bytes,
+      pending_range_ids,
+      committed_get_bytes,
+      removed_bytes,
+      range_after_pending_remove_ids,
+    })
+  }
 
   #[test]
   fn transaction_get_reflects_pending_changes() {
@@ -718,6 +743,40 @@ mod tests {
       let got = store.get(&doc_id).await.expect("get after commit");
       let mut got_doc = got.expect("missing");
       assert_eq!(got_doc.save(), expected.save());
+    });
+  }
+
+  #[test]
+  fn encoded_transaction_matches_plain_transaction_semantics() {
+    block_on(async {
+      let plain_underlying = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
+      let plain_store = AutomergeBTree::new(plain_underlying);
+
+      let encoded_underlying = InMemoryBTree::<Vec<u8>, Vec<u8>>::new();
+      let encoded_store = AutomergeBTreeEncoded::new(encoded_underlying);
+
+      let doc_a = Uuid::from_u128(1);
+      let doc_b = Uuid::from_u128(2);
+      let doc_a_value = doc_with_value("a");
+      let doc_b_value = doc_with_value("b");
+
+      let plain =
+        run_transaction_observation(&plain_store, doc_a, doc_b, &doc_a_value, &doc_b_value)
+          .await
+          .expect("plain transaction flow");
+      let encoded =
+        run_transaction_observation(&encoded_store, doc_a, doc_b, &doc_a_value, &doc_b_value)
+          .await
+          .expect("encoded transaction flow");
+
+      assert_eq!(plain.pending_get_bytes, encoded.pending_get_bytes);
+      assert_eq!(plain.pending_range_ids, encoded.pending_range_ids);
+      assert_eq!(plain.committed_get_bytes, encoded.committed_get_bytes);
+      assert_eq!(plain.removed_bytes, encoded.removed_bytes);
+      assert_eq!(
+        plain.range_after_pending_remove_ids,
+        encoded.range_after_pending_remove_ids
+      );
     });
   }
 }
