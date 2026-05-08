@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use futures::future::FutureExt;
 
 use crate::predicate::{JoinedRowContext, eval_predicate};
-use crate::store_adapter::{EngineStore, EngineStoreTransaction};
+use crate::store_adapter::{EngineStore, collect_table_rows, lookup_index_rows};
 use crate::{
   EngineError, EngineRow, EngineValue, IndexSchema, TableSchema, query::EngineQuery,
   query::EngineResult, query::JoinKind, query::JoinOn, query::QualifiedColumn,
@@ -192,7 +192,7 @@ where
   ) -> Result<HashMap<String, Vec<EngineRow>>, EngineError> {
     let mut table_rows_map: HashMap<String, Vec<EngineRow>> = HashMap::new();
     for table in tables {
-      let rows_with_pk = EngineWriteTxn::<S>::collect_table_rows(tx, table, None).await?;
+      let rows_with_pk = collect_table_rows(tx, table, None).await?;
       let rows = rows_with_pk
         .into_iter()
         .map(|(_pk, row)| row)
@@ -293,7 +293,7 @@ where
     if let Some(predicate) = &predicate
       && let Some(index) = self.catalog.find_index_for_predicate(table_name, predicate)
     {
-      let rows = tx.lookup_index_rows(table_name, &index, predicate).await?;
+      let rows = lookup_index_rows(tx, table_name, &index, predicate).await?;
 
       if !rows.is_empty() {
         return Ok(EngineResult::new(
@@ -305,7 +305,7 @@ where
       }
     }
 
-    let rows = EngineWriteTxn::<S>::collect_table_rows(tx, table_name, predicate).await?;
+    let rows = collect_table_rows(tx, table_name, predicate).await?;
     Ok(EngineResult::new(
       rows
         .into_iter()

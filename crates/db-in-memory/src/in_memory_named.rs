@@ -7,6 +7,10 @@ use db_core::{
 };
 use futures::Stream;
 
+use crate::patch_map::{
+  commit_patch_into_map, get_from_patch_then_map, merge_patch_range, remove_from_patch_then_map,
+};
+
 #[cfg(not(feature = "std"))]
 use alloc::{
   collections::BTreeMap,
@@ -134,7 +138,7 @@ where
   async fn commit(self) -> BTreeResult<()> {
     let mut guard = self.inner.write().await;
     let tree = guard.entry(self.name).or_default();
-    self.patch.commit_into(tree);
+    commit_patch_into_map(self.patch, tree);
     Ok(())
   }
 
@@ -153,17 +157,10 @@ where
     K: Ord,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = self.patch.get_value(key.borrow()) {
-      return Ok(Some(value));
-    }
-
     let guard = self.inner.read().await;
-    Ok(
-      guard
-        .get(&self.name)
-        .and_then(|m| m.get(key.borrow()))
-        .cloned(),
-    )
+    let empty = BTreeMap::new();
+    let tree = guard.get(&self.name).unwrap_or(&empty);
+    Ok(get_from_patch_then_map(&self.patch, tree, key.borrow()))
   }
 
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
@@ -179,26 +176,14 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = self.patch.remove(key.borrow().clone()) {
-      return Ok(Some(value));
-    }
-
     let guard = self.inner.read().await;
-    let value = guard
-      .get(&self.name)
-      .and_then(|m| m.get(key.borrow()))
-      .cloned();
-    let existing_key = guard
-      .get(&self.name)
-      .and_then(|m| m.get_key_value(key.borrow()))
-      .map(|(k, _)| k.clone());
-    drop(guard);
-
-    if let Some(key) = existing_key {
-      self.patch.delete(key);
-    }
-
-    Ok(value)
+    let empty = BTreeMap::new();
+    let tree = guard.get(&self.name).unwrap_or(&empty);
+    Ok(remove_from_patch_then_map(
+      &mut self.patch,
+      tree,
+      key.borrow(),
+    ))
   }
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
@@ -214,7 +199,7 @@ where
       let guard = inner.read().await;
       let empty = BTreeMap::new();
       let tree = guard.get(&name).unwrap_or(&empty);
-      let merged = patch.merge_range(tree, range);
+      let merged = merge_patch_range(&patch, tree, range);
       for (key, value) in merged {
         yield Ok((key, value));
       }
@@ -280,17 +265,10 @@ where
     }
 
     let guard = self.inner.read().await;
-    let value = guard.get(tree).and_then(|m| m.get(key)).cloned();
-    let existing_key = guard
-      .get(tree)
-      .and_then(|m| m.get_key_value(key))
-      .map(|(k, _)| k.clone());
-    drop(guard);
-    if let Some(k) = existing_key {
-      let patch = self.patches.entry(tree_owned).or_default();
-      patch.delete(k);
-    }
-    Ok(value)
+    let empty = BTreeMap::new();
+    let sub_map = guard.get(tree).unwrap_or(&empty);
+    let patch = self.patches.entry(tree_owned).or_default();
+    Ok(remove_from_patch_then_map(patch, sub_map, key))
   }
 
   fn range<'a, R>(
@@ -310,7 +288,7 @@ where
       let guard = inner.read().await;
       let empty = BTreeMap::new();
       let sub_map = guard.get(&tree).unwrap_or(&empty);
-      let merged = patch.merge_range(sub_map, range);
+      let merged = merge_patch_range(&patch, sub_map, range);
       for (k, v) in merged {
         yield Ok((k, v));
       }
@@ -321,7 +299,7 @@ where
     let mut guard = self.inner.write().await;
     for (name, patch) in self.patches {
       let sub = guard.entry(name).or_default();
-      patch.commit_into(sub);
+      commit_patch_into_map(patch, sub);
     }
     Ok(())
   }

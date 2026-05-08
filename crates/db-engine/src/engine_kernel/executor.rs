@@ -1,5 +1,7 @@
 use super::catalog::EngineCatalog;
-use crate::store_adapter::{EngineStore, EngineStoreTransaction};
+use crate::store_adapter::{
+  EngineStore, EngineStoreTransaction, collect_table_rows, delete_row, find_conflicting_index_entry,
+};
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, query::QualifiedPredicate,
 };
@@ -15,8 +17,7 @@ where
 {
   for index in indexes.iter().filter(|index| index.unique) {
     let index_key = index.key_for(row)?;
-    if tx
-      .find_conflicting_index_entry(index, &index_key, row_pk)
+    if find_conflicting_index_entry(tx, index, &index_key, row_pk)
       .await?
       .is_some()
     {
@@ -101,10 +102,10 @@ where
     self.catalog.table(table_name)?;
     let indexes = self.catalog.indexes_for_table(table_name);
     let tx = self.transaction().await?;
-    let rows = Self::collect_table_rows(tx, table_name, predicate).await?;
+    let rows = collect_table_rows(tx, table_name, predicate).await?;
 
     for (primary_key, row) in rows {
-      Self::delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
+      delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
     }
 
     Ok(())
@@ -123,7 +124,7 @@ where
 
     let indexes = self.catalog.indexes_for_table(table_name);
     let tx = self.transaction().await?;
-    let rows = Self::collect_table_rows(tx, table_name, predicate).await?;
+    let rows = collect_table_rows(tx, table_name, predicate).await?;
 
     for (old_pk, row) in rows {
       let updated_row = Self::apply_assignments(&row, &assignments)?;
@@ -134,7 +135,7 @@ where
         return Err(EngineError::DuplicatePrimaryKey(new_pk));
       }
 
-      Self::delete_row(tx, table_name, &old_pk, &row, &indexes).await?;
+      delete_row(tx, table_name, &old_pk, &row, &indexes).await?;
       ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
 
       tx.insert_table_row(table_name, new_pk.clone(), updated_row.clone())
@@ -144,16 +145,6 @@ where
     }
 
     Ok(())
-  }
-
-  async fn delete_row(
-    tx: &mut S::Transaction,
-    table_name: &str,
-    primary_key: &EngineKey,
-    row: &EngineRow,
-    indexes: &[IndexSchema],
-  ) -> Result<(), EngineError> {
-    tx.delete_row(table_name, primary_key, row, indexes).await
   }
 
   fn apply_assignments(
@@ -170,14 +161,6 @@ where
     }
 
     Ok(updated)
-  }
-
-  pub(crate) async fn collect_table_rows(
-    tx: &mut S::Transaction,
-    table_name: &str,
-    predicate: Option<QualifiedPredicate>,
-  ) -> Result<Vec<(EngineKey, EngineRow)>, EngineError> {
-    tx.collect_table_rows(table_name, predicate).await
   }
 
   pub(crate) async fn commit(mut self) -> Result<(), EngineError> {

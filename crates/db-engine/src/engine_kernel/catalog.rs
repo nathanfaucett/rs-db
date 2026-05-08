@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::store_adapter::{EngineStore, EngineStoreTransaction};
+use crate::store_adapter::{
+  EngineStore, EngineStoreTransaction, remove_index_entries, remove_table_rows,
+};
 use crate::{EngineError, EngineRow, IndexSchema, TableSchema};
 
 #[derive(Debug, Clone, Default)]
@@ -161,11 +163,11 @@ impl EngineCatalog {
     let mut tx = store.engine_transaction().await?;
 
     for index in &indexes {
-      tx.remove_index_entries(index).await?;
+      remove_index_entries(&mut tx, index).await?;
       tx.remove_index_schema(&index.name).await?;
     }
 
-    tx.remove_table_rows(table_name).await?;
+    remove_table_rows(&mut tx, table_name).await?;
     tx.remove_table_schema(table_name).await?;
     tx.commit().await?;
 
@@ -193,7 +195,7 @@ impl EngineCatalog {
 
     let index = self.indexes.get(index_name).cloned().unwrap();
     let mut tx = store.engine_transaction().await?;
-    tx.remove_index_entries(&index).await?;
+    remove_index_entries(&mut tx, &index).await?;
     tx.remove_index_schema(index_name).await?;
     tx.commit().await?;
 

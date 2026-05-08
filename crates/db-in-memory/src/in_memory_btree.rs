@@ -4,6 +4,10 @@ use core::{borrow::Borrow, ops::RangeBounds};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, StoragePort, TransactionPatch};
 use futures::Stream;
 
+use crate::patch_map::{
+  commit_patch_into_map, get_from_patch_then_map, merge_patch_range, remove_from_patch_then_map,
+};
+
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, sync::Arc};
 #[cfg(feature = "std")]
@@ -100,7 +104,7 @@ where
 {
   async fn commit(self) -> Result<(), BTreeError> {
     let mut guard = self.inner.write().await;
-    self.patch.commit_into(&mut guard);
+    commit_patch_into_map(self.patch, &mut guard);
     Ok(())
   }
 
@@ -119,13 +123,8 @@ where
     K: Ord,
     Q: Borrow<K> + Send + 'a,
   {
-    let inner = self.inner.clone();
-    let patch = self.patch.clone();
-    if let Some(value) = patch.get_value(key.borrow()) {
-      return Ok(Some(value));
-    }
-    let guard = inner.read().await;
-    Ok(guard.get(key.borrow()).cloned())
+    let guard = self.inner.read().await;
+    Ok(get_from_patch_then_map(&self.patch, &guard, key.borrow()))
   }
 
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
@@ -141,16 +140,12 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = self.patch.remove(key.borrow().clone()) {
-      return Ok(Some(value));
-    }
-
     let guard = self.inner.read().await;
-    let value = guard.get(key.borrow()).cloned();
-    if let Some((owned_key, _)) = guard.get_key_value(key.borrow()) {
-      self.patch.delete(owned_key.clone());
-    }
-    Ok(value)
+    Ok(remove_from_patch_then_map(
+      &mut self.patch,
+      &guard,
+      key.borrow(),
+    ))
   }
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
@@ -162,7 +157,7 @@ where
     let patch = self.patch.clone();
     stream! {
       let guard = inner.read().await;
-      let merged = patch.merge_range(&*guard, range);
+      let merged = merge_patch_range(&patch, &guard, range);
 
       for (key, value) in merged {
         yield Ok((key, value));

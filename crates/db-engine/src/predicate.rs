@@ -202,8 +202,12 @@ pub fn eval_having_predicate(h: &HavingPredicate, ctx: &GroupRowContext<'_>) -> 
 
 impl QualifiedPredicate {
   pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
+    self.matches_row_with_ctx(table, row, &EvalContext::empty())
+  }
+
+  pub fn matches_row_with_ctx(&self, table: &str, row: &EngineRow, eval_ctx: &EvalContext) -> bool {
     let ctx = SingleRowContext { table, row };
-    eval_predicate(self, &ctx, &EvalContext::empty())
+    eval_predicate(self, &ctx, eval_ctx)
   }
 
   pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {

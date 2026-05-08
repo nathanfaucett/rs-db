@@ -67,20 +67,10 @@ impl Scan {
   }
 
   fn matches_row(&self, row: &EngineRow) -> bool {
-    if let Some(pred) = &self.predicate {
-      self.eval_predicate(pred, row)
-    } else {
-      true
-    }
-  }
-
-  fn eval_predicate(&self, pred: &QualifiedPredicate, row: &EngineRow) -> bool {
-    use crate::predicate::{SingleRowContext, eval_predicate as do_eval};
-    let ctx = SingleRowContext {
-      table: &self.table,
-      row,
-    };
-    do_eval(pred, &ctx, &self.eval_ctx)
+    self
+      .predicate
+      .as_ref()
+      .is_none_or(|pred| pred.matches_row_with_ctx(&self.table, row, &self.eval_ctx))
   }
 }
 

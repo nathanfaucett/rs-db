@@ -11,8 +11,13 @@ use db_types::persistence::{
 };
 use futures::{Stream, StreamExt, pin_mut};
 
+mod helpers;
 mod transaction;
 
+pub(crate) use helpers::{
+  collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_rows,
+  remove_index_entries, remove_table_rows,
+};
 pub use transaction::EngineStoreTransaction;
 
 fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
@@ -356,8 +361,7 @@ mod tests {
         }),
         crate::query::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
       );
-      let rows = tx2
-        .lookup_index_rows("users", &index_schema, &predicate)
+      let rows = lookup_index_rows(&mut tx2, "users", &index_schema, &predicate)
         .await
         .expect("lookup");
 
