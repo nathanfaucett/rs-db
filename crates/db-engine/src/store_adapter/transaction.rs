@@ -3,6 +3,51 @@ use futures::{Stream, StreamExt, pin_mut};
 
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
 
+async fn try_collect<T, S>(stream: S) -> Result<Vec<T>, EngineError>
+where
+  S: Stream<Item = Result<T, EngineError>>,
+{
+  let mut values = Vec::new();
+  pin_mut!(stream);
+  while let Some(item) = stream.next().await {
+    values.push(item?);
+  }
+  Ok(values)
+}
+
+async fn collect_matching_table_rows<S>(
+  stream: S,
+  table_name: &str,
+  predicate: Option<&crate::QualifiedPredicate>,
+) -> Result<Vec<(EngineKey, EngineRow)>, EngineError>
+where
+  S: Stream<Item = Result<(EngineKey, EngineRow), EngineError>>,
+{
+  let rows = try_collect(stream).await?;
+  Ok(
+    rows
+      .into_iter()
+      .filter(|(_, row)| predicate.is_none_or(|p| p.matches_row(table_name, row)))
+      .collect(),
+  )
+}
+
+async fn collect_matching_index_row_pks<S>(
+  stream: S,
+  wanted_index_key: &EngineKey,
+) -> Result<Vec<EngineKey>, EngineError>
+where
+  S: Stream<Item = Result<(EngineKey, EngineKey), EngineError>>,
+{
+  let entries = try_collect(stream).await?;
+  Ok(
+    entries
+      .into_iter()
+      .filter_map(|(entry_key, row_pk)| (entry_key == *wanted_index_key).then_some(row_pk))
+      .collect(),
+  )
+}
+
 /// An engine-level storage transaction. All methods operate on typed engine
 /// values; no storage-level key encoding appears in this interface.
 ///
@@ -95,19 +140,12 @@ pub trait EngineStoreTransaction: Send + 'static {
     predicate: Option<crate::QualifiedPredicate>,
   ) -> impl Future<Output = Result<Vec<(EngineKey, EngineRow)>, EngineError>> + 'a {
     async move {
-      let mut rows = Vec::new();
-      let stream = self.range_table_rows(table_name);
-      pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        let (pk, row) = item?;
-        if predicate
-          .as_ref()
-          .is_none_or(|p| p.matches_row(table_name, &row))
-        {
-          rows.push((pk, row));
-        }
-      }
-      Ok(rows)
+      collect_matching_table_rows(
+        self.range_table_rows(table_name),
+        table_name,
+        predicate.as_ref(),
+      )
+      .await
     }
   }
 
@@ -135,16 +173,12 @@ pub trait EngineStoreTransaction: Send + 'static {
     table_name: &'a str,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let keys = {
-        let stream = self.range_table_rows(table_name);
-        pin_mut!(stream);
-        let mut keys = Vec::new();
-        while let Some(item) = stream.next().await {
-          let (pk, _) = item?;
-          keys.push(pk);
-        }
-        keys
-      };
+      let keys = try_collect(
+        self
+          .range_table_rows(table_name)
+          .map(|item| item.map(|(pk, _)| pk)),
+      )
+      .await?;
       for pk in keys {
         self.remove_table_row(table_name, &pk).await?;
       }
@@ -157,16 +191,7 @@ pub trait EngineStoreTransaction: Send + 'static {
     index: &'a IndexSchema,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let keys = {
-        let stream = self.range_index_entries(index);
-        pin_mut!(stream);
-        let mut keys = Vec::new();
-        while let Some(item) = stream.next().await {
-          let (idx_key, row_pk) = item?;
-          keys.push((idx_key, row_pk));
-        }
-        keys
-      };
+      let keys = try_collect(self.range_index_entries(index)).await?;
       for (idx_key, row_pk) in keys {
         self.delete_index_entry(index, &idx_key, &row_pk).await?;
       }
@@ -204,18 +229,8 @@ pub trait EngineStoreTransaction: Send + 'static {
         .index_key_for(index)
         .ok_or_else(|| EngineError::SchemaMismatch("predicate does not match index key".into()))?;
 
-      let row_pks = {
-        let stream = self.range_index_entries(index);
-        pin_mut!(stream);
-        let mut pks = Vec::new();
-        while let Some(item) = stream.next().await {
-          let (entry_key, row_pk) = item?;
-          if entry_key == index_key {
-            pks.push(row_pk);
-          }
-        }
-        pks
-      };
+      let row_pks =
+        collect_matching_index_row_pks(self.range_index_entries(index), &index_key).await?;
 
       let mut rows = Vec::new();
       for pk in row_pks {

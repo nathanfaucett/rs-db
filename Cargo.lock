@@ -271,6 +271,7 @@ dependencies = [
  "futures",
  "redb",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

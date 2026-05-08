@@ -1,188 +1,31 @@
-use std::{borrow::Borrow, fmt::Debug, ops::RangeBounds};
+use std::{borrow::Borrow, ops::RangeBounds};
 
 use async_stream::stream;
 use automerge::AutoCommit;
-use db_core::BufferSink;
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
-#[cfg(test)]
-fn uuid_prefix_range(doc_id: Uuid) -> (Vec<u8>, Vec<u8>) {
-  encode_doc_key_range(doc_id, &DocumentChangeKeyCodec)
-}
-
-pub(super) fn encode_doc_key_range<KC>(doc_id: Uuid, codec: &KC) -> (Vec<u8>, Vec<u8>)
-where
-  KC: db_core::FastKeyCodec<DocumentChangeKey>,
-{
-  let start = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Incremental,
-    change_hash: [0u8; 32],
-  };
-  let end = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash: [255u8; 32],
-  };
-
-  let mut s1 = db_core::KeyScratch::with_capacity(49);
-  let mut s2 = db_core::KeyScratch::with_capacity(49);
-  <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(codec, &start, &mut s1);
-  <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(codec, &end, &mut s2);
-  (s1.buf, s2.buf)
-}
-
-pub(super) fn encode_doc_key_range_value_codec<KC>(doc_id: Uuid) -> (Vec<u8>, Vec<u8>)
-where
-  KC: db_core::ValueCodec<DocumentChangeKey>,
-{
-  let start = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Incremental,
-    change_hash: [0u8; 32],
-  };
-  let end = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash: [255u8; 32],
-  };
-
-  (
-    <KC as db_core::ValueCodec<DocumentChangeKey>>::encode(&start)
-      .as_ref()
-      .to_vec(),
-    <KC as db_core::ValueCodec<DocumentChangeKey>>::encode(&end)
-      .as_ref()
-      .to_vec(),
-  )
-}
-
-/// Document change key: (doc_id, doc_type, change_hash)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DocumentChangeKey {
-  pub doc_id: Uuid,
-  /// Snapshot vs incremental flag.
-  pub doc_type: DocumentType,
-  pub change_hash: [u8; 32],
-}
-
-pub type AutomergeEntry = Vec<u8>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DocumentType {
-  Incremental,
-  Snapshot,
-}
-
-impl DocumentType {
-  pub fn is_snapshot(self) -> bool {
-    matches!(self, DocumentType::Snapshot)
-  }
-}
-
-impl core::cmp::Ord for DocumentChangeKey {
-  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-    use core::cmp::Ordering;
-    match self.doc_id.cmp(&other.doc_id) {
-      Ordering::Equal => {
-        let a = match self.doc_type {
-          DocumentType::Incremental => 0u8,
-          DocumentType::Snapshot => 1u8,
-        };
-        let b = match other.doc_type {
-          DocumentType::Incremental => 0u8,
-          DocumentType::Snapshot => 1u8,
-        };
-        match a.cmp(&b) {
-          Ordering::Equal => self.change_hash.cmp(&other.change_hash),
-          ord => ord,
-        }
-      }
-      ord => ord,
-    }
-  }
-}
-
-impl core::cmp::PartialOrd for DocumentChangeKey {
-  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-    Some(self.cmp(other))
-  }
-}
-
+mod codec;
 mod compaction;
 mod hash;
+mod key;
 mod reconstruction;
+mod scan;
 mod transaction;
 
 use crate::automerge_btree::hash::{hash_hashes, hash_heads};
 
+#[cfg(test)]
+use self::codec::uuid_prefix_range;
+use self::codec::{DocumentChangeKeyCodec, VecBytesCodec, encode_doc_key_range};
 use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
-use self::reconstruction::reconstruct;
+pub use self::key::{AutomergeEntry, DocumentChangeKey, DocumentType};
+use self::key::{all_document_bounds, document_entry_bounds};
+use self::scan::{
+  ReconstructionAccumulator, flush_reconstructed_doc, load_document, uuid_in_range,
+};
 use self::transaction::AutomergeTransaction;
-
-struct ReconstructionAccumulator {
-  latest_snapshot: Option<Vec<u8>>,
-  deltas_after_snapshot: Vec<Vec<u8>>,
-}
-
-impl ReconstructionAccumulator {
-  fn new() -> Self {
-    Self {
-      latest_snapshot: None,
-      deltas_after_snapshot: Vec::new(),
-    }
-  }
-
-  fn apply(&mut self, doc_type: DocumentType, entry: Vec<u8>) {
-    if doc_type.is_snapshot() {
-      self.latest_snapshot = Some(entry);
-      self.deltas_after_snapshot.clear();
-    } else {
-      self.deltas_after_snapshot.push(entry);
-    }
-  }
-
-  fn finish(self) -> Vec<u8> {
-    let state = self.latest_snapshot.unwrap_or_default();
-    reconstruct(&state, &self.deltas_after_snapshot)
-  }
-
-  fn is_empty(&self) -> bool {
-    self.latest_snapshot.is_none() && self.deltas_after_snapshot.is_empty()
-  }
-}
-
-fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
-  AutoCommit::load(bytes).map_err(BTreeError::other)
-}
-
-fn uuid_in_range<R>(range: &R, doc_id: &Uuid) -> bool
-where
-  R: RangeBounds<Uuid>,
-{
-  let start_ok = match range.start_bound() {
-    std::ops::Bound::Included(lower) => doc_id >= lower,
-    std::ops::Bound::Excluded(lower) => doc_id > lower,
-    std::ops::Bound::Unbounded => true,
-  };
-  let end_ok = match range.end_bound() {
-    std::ops::Bound::Included(upper) => doc_id <= upper,
-    std::ops::Bound::Excluded(upper) => doc_id < upper,
-    std::ops::Bound::Unbounded => true,
-  };
-  start_ok && end_ok
-}
-
-fn flush_reconstructed_doc(
-  current_doc: &mut Option<Uuid>,
-  accumulator: &mut ReconstructionAccumulator,
-) -> Option<Result<(Uuid, AutoCommit), BTreeError>> {
-  let doc_id = current_doc.take()?;
-  let state = core::mem::replace(accumulator, ReconstructionAccumulator::new()).finish();
-  Some(load_document(&state).map(|doc| (doc_id, doc)))
-}
 
 /// Backend-agnostic Automerge wrapper. Parameterized over any `BTree` backend.
 pub struct AutomergeBTree<B> {
@@ -222,17 +65,7 @@ where
   /// Reconstruct the latest document state for `doc_id`.
   /// If the compaction policy triggers, perform inline compaction (atomic snapshot + cleanup).
   async fn get_document(&self, doc_id: Uuid) -> Option<Vec<u8>> {
-    // scan across all type variants for this doc_id
-    let start = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Incremental,
-      change_hash: [0u8; 32],
-    };
-    let end = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Snapshot,
-      change_hash: [255u8; 32],
-    };
+    let (start, end) = document_entry_bounds(doc_id);
 
     let stream = self.inner.range(start.clone()..=end.clone());
     futures::pin_mut!(stream);
@@ -347,16 +180,7 @@ where
     let prev = self.get_document(doc_id).await;
 
     // Prefer atomic removal via transaction on the underlying tree.
-    let start = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Incremental,
-      change_hash: [0u8; 32],
-    };
-    let end = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Snapshot,
-      change_hash: [255u8; 32],
-    };
+    let (start, end) = document_entry_bounds(doc_id);
 
     match self.inner.transaction().await {
       Ok(mut tx) => {
@@ -408,16 +232,7 @@ where
     R: RangeBounds<Uuid> + Send + 'a,
   {
     stream! {
-      let start_doc = DocumentChangeKey {
-        doc_id: Uuid::from_u128(0),
-        doc_type: DocumentType::Incremental,
-        change_hash: [0u8; 32],
-      };
-      let end_doc = DocumentChangeKey {
-        doc_id: Uuid::from_u128(u128::MAX),
-        doc_type: DocumentType::Snapshot,
-        change_hash: [255u8; 32],
-      };
+      let (start_doc, end_doc) = all_document_bounds();
 
       let inner_stream = self.inner.range(start_doc.clone()..=end_doc.clone());
       futures::pin_mut!(inner_stream);
@@ -518,99 +333,6 @@ where
   }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DocumentChangeKeyCodec;
-
-impl db_core::ValueCodec<DocumentChangeKey> for DocumentChangeKeyCodec {
-  type Bytes<'a>
-    = Vec<u8>
-  where
-    Self: 'a,
-    DocumentChangeKey: 'a;
-
-  fn encode<'a>(value: &'a DocumentChangeKey) -> Self::Bytes<'a> {
-    let mut out = Vec::with_capacity(49);
-    out.extend_from_slice(value.doc_id.as_bytes());
-    out.push(match value.doc_type {
-      DocumentType::Incremental => 0u8,
-      DocumentType::Snapshot => 1u8,
-    });
-    out.extend_from_slice(&value.change_hash);
-    out
-  }
-
-  fn decode(data: &[u8]) -> DocumentChangeKey {
-    if data.len() < 49 {
-      panic!("invalid DocumentChangeKey encoding");
-    }
-    let id = Uuid::from_slice(&data[0..16]).expect("uuid decode");
-    let doc_type = match data[16] {
-      0 => DocumentType::Incremental,
-      1 => DocumentType::Snapshot,
-      _ => panic!("invalid doc_type"),
-    };
-    let mut change_hash = [0u8; 32];
-    change_hash.copy_from_slice(&data[17..49]);
-    DocumentChangeKey {
-      doc_id: id,
-      doc_type,
-      change_hash,
-    }
-  }
-
-  fn decode_checked(data: &[u8]) -> Result<DocumentChangeKey, db_core::DecodeError> {
-    if data.len() < 49 {
-      return Err(db_core::DecodeError::Truncated);
-    }
-    Ok(Self::decode(data))
-  }
-}
-
-impl db_core::KeyCodec<DocumentChangeKey> for DocumentChangeKeyCodec {
-  fn compare(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
-    left.cmp(right)
-  }
-}
-
-impl db_core::FastKeyCodec<DocumentChangeKey> for DocumentChangeKeyCodec {
-  fn encode_into(&self, value: &DocumentChangeKey, scratch: &mut db_core::KeyScratch) {
-    scratch.push_bytes(value.doc_id.as_bytes());
-    let dt = match value.doc_type {
-      DocumentType::Incremental => 0u8,
-      DocumentType::Snapshot => 1u8,
-    };
-    scratch.push_bytes(&[dt]);
-    scratch.push_bytes(&value.change_hash);
-  }
-
-  fn compare_encoded(&self, left: &[u8], right: &[u8]) -> core::cmp::Ordering {
-    <Self as db_core::KeyCodec<DocumentChangeKey>>::compare(left, right)
-  }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct VecBytesCodec;
-
-impl db_core::ValueCodec<AutomergeEntry> for VecBytesCodec {
-  type Bytes<'a>
-    = Vec<u8>
-  where
-    Self: 'a,
-    AutomergeEntry: 'a;
-
-  fn encode<'a>(value: &'a AutomergeEntry) -> Self::Bytes<'a> {
-    value.clone()
-  }
-
-  fn decode(data: &[u8]) -> AutomergeEntry {
-    data.to_vec()
-  }
-
-  fn decode_checked(data: &[u8]) -> Result<AutomergeEntry, db_core::DecodeError> {
-    Ok(data.to_vec())
-  }
-}
-
 impl<B, KC, VC> AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
@@ -627,8 +349,9 @@ where
   }
 
   fn full_scan_bounds(&self) -> (Vec<u8>, Vec<u8>) {
-    let start = Uuid::from_u128(0);
-    let end = Uuid::from_u128(u128::MAX);
+    let (start_bound, end_bound) = all_document_bounds();
+    let start = start_bound.doc_id;
+    let end = end_bound.doc_id;
     let (start_enc, _) = encode_doc_key_range(start, &self.key_codec);
     let (_, end_enc) = encode_doc_key_range(end, &self.key_codec);
     (start_enc, end_enc)

@@ -11,10 +11,11 @@ use automerge::AutoCommit;
 use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
-use super::{
-  AutomergeEntry, DocumentChangeKey, DocumentType, encode_doc_key_range,
-  encode_doc_key_range_value_codec, hash::hash_heads, reconstruct,
-};
+use super::codec::encode_doc_key_range_value_codec;
+use super::hash::hash_heads;
+use super::key::{all_document_bounds, document_entry_bounds};
+use super::reconstruction::reconstruct;
+use super::{AutomergeEntry, DocumentChangeKey, DocumentType, encode_doc_key_range};
 
 fn key_in_range<K: Ord, R: RangeBounds<K>>(range: &R, key: &K) -> bool {
   match range.start_bound() {
@@ -118,16 +119,7 @@ where
   }
 
   async fn reconstruct_inner_doc(&self, doc_id: Uuid) -> Result<Option<Vec<u8>>, BTreeError> {
-    let start = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Incremental,
-      change_hash: [0u8; 32],
-    };
-    let end = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Snapshot,
-      change_hash: [255u8; 32],
-    };
+    let (start, end) = document_entry_bounds(doc_id);
     let mut latest_snapshot: Option<Vec<u8>> = None;
     let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
 
@@ -210,16 +202,7 @@ where
         inner_tx.insert(key, bytes).await?;
       } else {
         // staged delete: remove all internal entries for this doc_id
-        let start = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Incremental,
-          change_hash: [0u8; 32],
-        };
-        let end = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash: [255u8; 32],
-        };
+        let (start, end) = document_entry_bounds(doc_id);
 
         let keys_to_remove: alloc::vec::Vec<DocumentChangeKey> = {
           let mut collected: alloc::vec::Vec<DocumentChangeKey> = alloc::vec::Vec::new();
@@ -305,16 +288,7 @@ where
   {
     stream! {
       // Map to internal document key range
-      let start_doc = DocumentChangeKey {
-        doc_id: Uuid::from_u128(0),
-        doc_type: DocumentType::Incremental,
-        change_hash: [0u8; 32],
-      };
-      let end_doc = DocumentChangeKey {
-        doc_id: Uuid::from_u128(u128::MAX),
-        doc_type: DocumentType::Snapshot,
-        change_hash: [255u8; 32],
-      };
+      let (start_doc, end_doc) = all_document_bounds();
 
       // Collect per-doc reconstructed state from inner_tx
       let mut merged: std::collections::BTreeMap<Uuid, Vec<u8>> = std::collections::BTreeMap::new();
@@ -623,11 +597,13 @@ where
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use db_core::{BTree, BTreeExecutor, BTreeTransaction, block_on};
-  use db_in_memory::InMemoryBTree;
-
+  use super::{AutomergeEntry, DocumentChangeKey};
+  use automerge::AutoCommit;
   use automerge::transaction::Transactable;
+  use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, block_on};
+  use db_in_memory::InMemoryBTree;
+  use futures::StreamExt;
+  use uuid::Uuid;
 
   use super::super::{AutomergeBTree, AutomergeBTreeEncoded};
 

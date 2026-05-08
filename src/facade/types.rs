@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 #[cfg(feature = "automerge")]
-use db_automerge::{
-  AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentChangeKeyCodec, VecBytesCodec,
-};
+use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentType};
+#[cfg(feature = "automerge")]
+use db_core::BufferSink;
 use db_engine::{EngineDatabase, EngineKey, EngineRow, EngineValue};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -49,7 +49,7 @@ pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, EngineRow>;
 pub type RedbEngineStore = REDBNamedBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 pub type RedbAutomergeStore = AutomergeEngineStore<
-  REDBBTree<DocumentChangeKey, Vec<u8>, DocumentChangeKeyCodec, VecBytesCodec>,
+  REDBBTree<DocumentChangeKey, Vec<u8>, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec>,
 >;
 #[cfg(feature = "automerge")]
 pub type InMemoryAutomergeStore =
@@ -75,4 +75,103 @@ pub enum Transaction<'db> {
   AutomergeRedb(db_engine::EngineTransaction<'db, RedbAutomergeStore>),
   #[cfg(feature = "redb")]
   Redb(db_engine::EngineTransaction<'db, RedbEngineStore>),
+}
+
+#[cfg(feature = "automerge")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FacadeDocumentChangeKeyCodec;
+
+#[cfg(feature = "automerge")]
+impl db_core::ValueCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
+  type Bytes<'a>
+    = Vec<u8>
+  where
+    Self: 'a,
+    DocumentChangeKey: 'a;
+
+  fn encode<'a>(value: &'a DocumentChangeKey) -> Self::Bytes<'a> {
+    let mut out = Vec::with_capacity(49);
+    out.extend_from_slice(value.doc_id.as_bytes());
+    out.push(match value.doc_type {
+      DocumentType::Incremental => 0u8,
+      DocumentType::Snapshot => 1u8,
+    });
+    out.extend_from_slice(&value.change_hash);
+    out
+  }
+
+  fn decode(data: &[u8]) -> DocumentChangeKey {
+    if data.len() < 49 {
+      panic!("invalid DocumentChangeKey encoding");
+    }
+    let id = uuid::Uuid::from_slice(&data[0..16]).expect("uuid decode");
+    let doc_type = match data[16] {
+      0 => DocumentType::Incremental,
+      1 => DocumentType::Snapshot,
+      _ => panic!("invalid doc_type"),
+    };
+    let mut change_hash = [0u8; 32];
+    change_hash.copy_from_slice(&data[17..49]);
+    DocumentChangeKey {
+      doc_id: id,
+      doc_type,
+      change_hash,
+    }
+  }
+
+  fn decode_checked(data: &[u8]) -> Result<DocumentChangeKey, db_core::DecodeError> {
+    if data.len() < 49 {
+      return Err(db_core::DecodeError::Truncated);
+    }
+    Ok(Self::decode(data))
+  }
+}
+
+#[cfg(feature = "automerge")]
+impl db_core::KeyCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
+  fn compare(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
+    left.cmp(right)
+  }
+}
+
+#[cfg(feature = "automerge")]
+impl db_core::FastKeyCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
+  fn encode_into(&self, value: &DocumentChangeKey, scratch: &mut db_core::KeyScratch) {
+    scratch.push_bytes(value.doc_id.as_bytes());
+    let dt = match value.doc_type {
+      DocumentType::Incremental => 0u8,
+      DocumentType::Snapshot => 1u8,
+    };
+    scratch.push_bytes(&[dt]);
+    scratch.push_bytes(&value.change_hash);
+  }
+
+  fn compare_encoded(&self, left: &[u8], right: &[u8]) -> core::cmp::Ordering {
+    <Self as db_core::KeyCodec<DocumentChangeKey>>::compare(left, right)
+  }
+}
+
+#[cfg(feature = "automerge")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FacadeVecBytesCodec;
+
+#[cfg(feature = "automerge")]
+impl db_core::ValueCodec<AutomergeEntry> for FacadeVecBytesCodec {
+  type Bytes<'a>
+    = Vec<u8>
+  where
+    Self: 'a,
+    AutomergeEntry: 'a;
+
+  fn encode<'a>(value: &'a AutomergeEntry) -> Self::Bytes<'a> {
+    value.clone()
+  }
+
+  fn decode(data: &[u8]) -> AutomergeEntry {
+    data.to_vec()
+  }
+
+  fn decode_checked(data: &[u8]) -> Result<AutomergeEntry, db_core::DecodeError> {
+    Ok(data.to_vec())
+  }
 }

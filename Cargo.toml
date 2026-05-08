@@ -47,6 +47,7 @@ db-types = { path = "crates/db-types", default-features = false, features = [
 ] }
 redb = { version = "4.0", default-features = false, features = [
 ], optional = true }
+uuid = { version = "1.18", default-features = false }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }

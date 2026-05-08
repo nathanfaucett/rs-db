@@ -2,9 +2,7 @@
 extern crate alloc;
 
 #[cfg(feature = "automerge")]
-use db_automerge::{
-  AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentChangeKeyCodec, VecBytesCodec,
-};
+use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -19,7 +17,9 @@ use std::path::Path;
 use db_sql_to_engine::SchemaResolver;
 
 use super::dispatch;
-use super::types::{Database, DatabaseError, Row, Transaction};
+use super::types::{
+  Database, DatabaseError, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec, Row, Transaction,
+};
 
 impl SchemaResolver for Database {
   fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema> {
@@ -52,8 +52,8 @@ impl Database {
     let backend = REDBBTree::<
       DocumentChangeKey,
       AutomergeEntry,
-      DocumentChangeKeyCodec,
-      VecBytesCodec,
+      FacadeDocumentChangeKeyCodec,
+      FacadeVecBytesCodec,
     >::open_with_codecs(path, table_name)
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let store = AutomergeEngineStore::new_with_backend(backend);

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-  EngineRow, EngineValue,
+  EngineKey, EngineRow, EngineValue, IndexSchema,
   query::{HavingPredicate, QualifiedColumn, QualifiedOperand, QualifiedPredicate, RefOrAgg},
 };
 
@@ -197,6 +197,56 @@ pub fn eval_having_predicate(h: &HavingPredicate, ctx: &GroupRowContext<'_>) -> 
     HavingPredicate::And(l, r) => eval_having_predicate(l, ctx) && eval_having_predicate(r, ctx),
     HavingPredicate::Or(l, r) => eval_having_predicate(l, ctx) || eval_having_predicate(r, ctx),
     HavingPredicate::Not(p) => !eval_having_predicate(p, ctx),
+  }
+}
+
+impl QualifiedPredicate {
+  pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
+    let ctx = SingleRowContext { table, row };
+    eval_predicate(self, &ctx, &EvalContext::empty())
+  }
+
+  pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {
+    let mut values = vec![None; index.column_indices.len()];
+    self.fill_index_key_values(index, &mut values)?;
+    if values.iter().all(Option::is_some) {
+      let values = values.into_iter().map(Option::unwrap).collect();
+      Some(EngineKey::from_values(values))
+    } else {
+      None
+    }
+  }
+
+  fn fill_index_key_values(
+    &self,
+    index: &IndexSchema,
+    values: &mut [Option<EngineValue>],
+  ) -> Option<()> {
+    match self {
+      QualifiedPredicate::Equals(QualifiedOperand::Column(qc), QualifiedOperand::Value(value))
+      | QualifiedPredicate::Equals(QualifiedOperand::Value(value), QualifiedOperand::Column(qc)) => {
+        if let Some((slot, _)) = index
+          .column_indices
+          .iter()
+          .enumerate()
+          .find(|&(_, &col)| col == qc.column_index)
+        {
+          if let Some(existing) = &values[slot]
+            && existing != value
+          {
+            return None;
+          }
+          values[slot] = Some(value.clone());
+        }
+        Some(())
+      }
+      QualifiedPredicate::And(left, right) => {
+        left.fill_index_key_values(index, values)?;
+        right.fill_index_key_values(index, values)?;
+        Some(())
+      }
+      _ => None,
+    }
   }
 }
 
