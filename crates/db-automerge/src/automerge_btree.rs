@@ -23,7 +23,8 @@ use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
 pub use self::key::{AutomergeEntry, DocumentChangeKey, DocumentType};
 use self::key::{all_document_bounds, document_entry_bounds};
 use self::scan::{
-  ReconstructionAccumulator, flush_reconstructed_doc, load_document, uuid_in_range,
+  ReconstructionAccumulator, collect_range_keys, flush_reconstructed_doc, load_document,
+  scan_document_entries, uuid_in_range,
 };
 use self::transaction::AutomergeTransaction;
 
@@ -67,37 +68,18 @@ where
   async fn get_document(&self, doc_id: Uuid) -> Option<Vec<u8>> {
     let (start, end) = document_entry_bounds(doc_id);
 
-    let stream = self.inner.range(start.clone()..=end.clone());
-    futures::pin_mut!(stream);
+    let scan = scan_document_entries(self.inner.range(start.clone()..=end.clone())).await;
 
-    let mut accumulator = ReconstructionAccumulator::new();
-    let mut delta_count: usize = 0;
-    let mut delta_bytes: usize = 0;
-    let mut has_entries = false;
-
-    while let Some(item) = stream.next().await {
-      let (k, entry) = match item {
-        Ok(pair) => pair,
-        Err(_) => continue,
-      };
-      has_entries = true;
-      if k.doc_type.is_snapshot() {
-        delta_count = 0;
-        delta_bytes = 0;
-      } else {
-        delta_count += 1;
-        delta_bytes += entry.len();
-      }
-      accumulator.apply(k.doc_type, entry);
-    }
-
-    if !has_entries {
+    if !scan.has_entries {
       return None;
     }
 
-    let state = accumulator.finish();
+    let state = scan.accumulator.finish();
 
-    if self.policy.should_compact(delta_count, delta_bytes) {
+    if self
+      .policy
+      .should_compact(scan.delta_count, scan.delta_bytes)
+    {
       match self.inner.transaction().await {
         Ok(tx) => {
           if let Err(err) =
@@ -184,16 +166,7 @@ where
 
     match self.inner.transaction().await {
       Ok(mut tx) => {
-        let keys_to_remove: alloc::vec::Vec<DocumentChangeKey> = {
-          let mut collected: alloc::vec::Vec<DocumentChangeKey> = alloc::vec::Vec::new();
-          let stream = tx.range(start.clone()..=end.clone());
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (k, _v) = item?;
-            collected.push(k);
-          }
-          collected
-        };
+        let keys_to_remove = collect_range_keys(tx.range(start.clone()..=end.clone())).await?;
         for k in keys_to_remove {
           tx.remove(&k).await?;
         }
@@ -201,16 +174,8 @@ where
       }
       Err(_) => {
         // Fallback: non-atomic removal by iterating the main tree.
-        let keys_to_remove: alloc::vec::Vec<DocumentChangeKey> = {
-          let mut collected: alloc::vec::Vec<DocumentChangeKey> = alloc::vec::Vec::new();
-          let stream = self.inner.range(start.clone()..=end.clone());
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (k, _v) = item?;
-            collected.push(k);
-          }
-          collected
-        };
+        let keys_to_remove =
+          collect_range_keys(self.inner.range(start.clone()..=end.clone())).await?;
         for k in keys_to_remove {
           let _ = self.inner.remove(&k).await;
         }
@@ -339,7 +304,7 @@ where
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  fn decode_entry_value(data: &[u8]) -> Vec<u8> {
+  fn decode_entry_bytes(data: &[u8]) -> Vec<u8> {
     <VC as db_core::ValueCodec<AutomergeEntry>>::decode_checked(data)
       .unwrap_or_else(|_| data.to_vec())
   }
@@ -357,32 +322,49 @@ where
     (start_enc, end_enc)
   }
 
-  async fn scan_doc_entries(
+  fn decode_scanned_entry(k_enc: &[u8], entry_enc: &[u8]) -> Option<(DocumentChangeKey, Vec<u8>)> {
+    let key = <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(k_enc).ok()?;
+    Some((key, Self::decode_entry_bytes(entry_enc)))
+  }
+
+  async fn contains_identical_entry(
+    &self,
+    start_enc: Vec<u8>,
+    end_enc: Vec<u8>,
+    bytes: &[u8],
+  ) -> Result<bool, BTreeError> {
+    let stream = self.inner.range(start_enc..=end_enc);
+    futures::pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (_k_enc, v_enc) = item?;
+      if Self::decode_entry_bytes(&v_enc) == bytes {
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  }
+
+  async fn collect_doc_keys(&self, doc_id: Uuid) -> Result<Vec<Vec<u8>>, BTreeError> {
+    let (start_enc, end_enc) = self.doc_scan_bounds(doc_id);
+    collect_range_keys(self.inner.range(start_enc..=end_enc)).await
+  }
+
+  async fn scan_document_state(
     &self,
     doc_id: Uuid,
   ) -> Result<(ReconstructionAccumulator, bool), BTreeError> {
     let (start_enc, end_enc) = self.doc_scan_bounds(doc_id);
-    let stream = self.inner.range(start_enc..=end_enc);
-    futures::pin_mut!(stream);
+    let scanned = scan_document_entries(self.inner.range(start_enc..=end_enc).filter_map(
+      |item| async move {
+        match item {
+          Ok((k_enc, entry_enc)) => Self::decode_scanned_entry(&k_enc, &entry_enc).map(Ok),
+          Err(_) => None,
+        }
+      },
+    ))
+    .await;
 
-    let mut accumulator = ReconstructionAccumulator::new();
-    let mut has_entries = false;
-
-    while let Some(item) = stream.next().await {
-      let (k_enc, entry_enc) = match item {
-        Ok(pair) => pair,
-        Err(_) => continue,
-      };
-      has_entries = true;
-      let k = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
-        Ok(kd) => kd,
-        Err(_) => continue,
-      };
-      let value = Self::decode_entry_value(&entry_enc);
-      accumulator.apply(k.doc_type, value);
-    }
-
-    Ok((accumulator, has_entries))
+    Ok((scanned.accumulator, scanned.has_entries))
   }
 }
 
@@ -399,7 +381,7 @@ where
     Q: Borrow<Uuid> + Send + 'a,
   {
     let doc_id = *key.borrow();
-    let (accumulator, _) = self.scan_doc_entries(doc_id).await?;
+    let (accumulator, _) = self.scan_document_state(doc_id).await?;
 
     if accumulator.is_empty() {
       return Ok(None);
@@ -419,20 +401,9 @@ where
 
     let (start_enc, end_enc) = self.doc_scan_bounds(key);
 
-    let found_identical = {
-      let mut found = false;
-      let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
-      futures::pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        let (_k_enc, v_enc) = item?;
-        let existing = Self::decode_entry_value(&v_enc);
-        if existing == bytes {
-          found = true;
-          break;
-        }
-      }
-      found
-    };
+    let found_identical = self
+      .contains_identical_entry(start_enc.clone(), end_enc.clone(), &bytes)
+      .await?;
     if found_identical {
       return Ok(());
     }
@@ -460,26 +431,14 @@ where
     Q: Borrow<Uuid> + Send + 'a,
   {
     let doc_id = *key.borrow();
-    let (accumulator, has_entries) = self.scan_doc_entries(doc_id).await?;
+    let (accumulator, has_entries) = self.scan_document_state(doc_id).await?;
     let prev = if !has_entries {
       None
     } else {
       Some(accumulator.finish())
     };
 
-    // non-atomic removal: collect keys and remove
-    let (start_enc, end_enc) = self.full_scan_bounds();
-
-    let keys_to_remove: alloc::vec::Vec<Vec<u8>> = {
-      let mut collected: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
-      let stream = self.inner.range(start_enc.clone()..=end_enc.clone());
-      futures::pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        let (k_enc, _v_enc) = item?;
-        collected.push(k_enc);
-      }
-      collected
-    };
+    let keys_to_remove = self.collect_doc_keys(doc_id).await?;
     for k in keys_to_remove {
       let _ = self.inner.remove(&k).await;
     }
@@ -527,7 +486,7 @@ where
           current_doc = Some(k.doc_id);
         }
 
-        let value = Self::decode_entry_value(&v_enc);
+        let value = Self::decode_entry_bytes(&v_enc);
         accumulator.apply(k.doc_type, value);
       }
 
@@ -768,5 +727,39 @@ mod tests {
       cnt
     });
     assert_eq!(full_count, 1);
+  }
+
+  #[test]
+  fn encoded_remove_only_deletes_target_document() {
+    block_on(async {
+      let underlying = InMemoryBTree::<Vec<u8>, Vec<u8>>::new();
+      let mut store = AutomergeBTreeEncoded::new(underlying);
+
+      let doc_a = Uuid::from_u128(1);
+      let doc_b = Uuid::from_u128(2);
+
+      let mut first = AutoCommit::new();
+      first.put(&automerge::ROOT, "v", "a").expect("put a");
+      let mut second = AutoCommit::new();
+      second.put(&automerge::ROOT, "v", "b").expect("put b");
+
+      store.insert(doc_a, first.clone()).await.expect("insert a");
+      store.insert(doc_b, second.clone()).await.expect("insert b");
+
+      let mut removed = store
+        .remove(&doc_a)
+        .await
+        .expect("remove a")
+        .expect("removed doc");
+      assert_eq!(removed.save(), first.save());
+
+      assert!(store.get(&doc_a).await.expect("get removed").is_none());
+      let mut remaining = store
+        .get(&doc_b)
+        .await
+        .expect("get remaining")
+        .expect("remaining doc");
+      assert_eq!(remaining.save(), second.save());
+    });
   }
 }

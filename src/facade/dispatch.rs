@@ -11,31 +11,71 @@ use db_sql_to_engine::{
 
 use super::types::{Database, DatabaseError, Row, Transaction};
 
+macro_rules! with_database {
+  ($database:expr, |$engine:ident| $body:expr) => {
+    match $database {
+      Database::InMemory($engine) => $body,
+      #[cfg(feature = "automerge")]
+      Database::AutomergeInMemory($engine) => $body,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb($engine) => $body,
+      #[cfg(feature = "redb")]
+      Database::Redb($engine) => $body,
+    }
+  };
+}
+
+macro_rules! with_database_mut {
+  ($database:expr, |$engine:ident| $body:expr) => {
+    match $database {
+      Database::InMemory($engine) => $body,
+      #[cfg(feature = "automerge")]
+      Database::AutomergeInMemory($engine) => $body,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Database::AutomergeRedb($engine) => $body,
+      #[cfg(feature = "redb")]
+      Database::Redb($engine) => $body,
+    }
+  };
+}
+
+macro_rules! with_transaction_mut {
+  ($transaction:expr, |$inner:ident| $body:expr) => {
+    match $transaction {
+      Transaction::InMemory($inner) => $body,
+      #[cfg(feature = "automerge")]
+      Transaction::AutomergeInMemory($inner) => $body,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Transaction::AutomergeRedb($inner) => $body,
+      #[cfg(feature = "redb")]
+      Transaction::Redb($inner) => $body,
+    }
+  };
+}
+
+macro_rules! with_transaction_owned {
+  ($transaction:expr, |$inner:ident| $body:expr) => {
+    match $transaction {
+      Transaction::InMemory($inner) => $body,
+      #[cfg(feature = "automerge")]
+      Transaction::AutomergeInMemory($inner) => $body,
+      #[cfg(all(feature = "automerge", feature = "redb"))]
+      Transaction::AutomergeRedb($inner) => $body,
+      #[cfg(feature = "redb")]
+      Transaction::Redb($inner) => $body,
+    }
+  };
+}
+
 pub(crate) fn describe_table(database: &Database, name: &str) -> Option<TableSchema> {
-  match database {
-    Database::InMemory(engine) => engine.describe_table(name),
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.describe_table(name),
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.describe_table(name),
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.describe_table(name),
-  }
+  with_database!(database, |engine| engine.describe_table(name))
 }
 
 pub(crate) async fn register_table(
   database: &mut Database,
   schema: TableSchema,
 ) -> Result<(), DatabaseError> {
-  match database {
-    Database::InMemory(engine) => engine.register_table(schema).await?,
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.register_table(schema).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.register_table(schema).await?,
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.register_table(schema).await?,
-  }
+  with_database_mut!(database, |engine| engine.register_table(schema).await?);
   Ok(())
 }
 
@@ -43,28 +83,12 @@ pub(crate) async fn execute_query(
   database: &Database,
   query: EngineQuery,
 ) -> Result<EngineResult, DatabaseError> {
-  let result = match database {
-    Database::InMemory(engine) => engine.execute(query).await?,
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.execute(query).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.execute(query).await?,
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.execute(query).await?,
-  };
+  let result = with_database!(database, |engine| engine.execute(query).await?);
   Ok(result)
 }
 
 async fn drop_table(database: &mut Database, name: &str) -> Result<(), DatabaseError> {
-  match database {
-    Database::InMemory(engine) => engine.drop_table(name).await?,
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.drop_table(name).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.drop_table(name).await?,
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.drop_table(name).await?,
-  }
+  with_database_mut!(database, |engine| engine.drop_table(name).await?);
   Ok(())
 }
 
@@ -72,28 +96,12 @@ async fn register_index(
   database: &mut Database,
   schema: db_engine::IndexSchema,
 ) -> Result<(), DatabaseError> {
-  match database {
-    Database::InMemory(engine) => engine.register_index(schema).await?,
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.register_index(schema).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.register_index(schema).await?,
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.register_index(schema).await?,
-  }
+  with_database_mut!(database, |engine| engine.register_index(schema).await?);
   Ok(())
 }
 
 async fn drop_index(database: &mut Database, name: &str) -> Result<(), DatabaseError> {
-  match database {
-    Database::InMemory(engine) => engine.drop_index(name).await?,
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => engine.drop_index(name).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => engine.drop_index(name).await?,
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => engine.drop_index(name).await?,
-  }
+  with_database_mut!(database, |engine| engine.drop_index(name).await?);
   Ok(())
 }
 
@@ -140,15 +148,30 @@ pub(crate) async fn transaction_insert_row(
   table: &str,
   row: Row,
 ) -> Result<(), DatabaseError> {
-  match transaction {
-    Transaction::InMemory(inner) => inner.insert_row(table, row).await?,
-    #[cfg(feature = "automerge")]
-    Transaction::AutomergeInMemory(inner) => inner.insert_row(table, row).await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Transaction::AutomergeRedb(inner) => inner.insert_row(table, row).await?,
-    #[cfg(feature = "redb")]
-    Transaction::Redb(inner) => inner.insert_row(table, row).await?,
-  }
+  with_transaction_mut!(transaction, |inner| inner.insert_row(table, row).await?);
+  Ok(())
+}
+
+async fn transaction_update_rows(
+  transaction: &mut Transaction<'_>,
+  table: &str,
+  assignments: Vec<(usize, db_engine::EngineValue)>,
+  predicate: Option<db_engine::QualifiedPredicate>,
+) -> Result<(), DatabaseError> {
+  with_transaction_mut!(transaction, |inner| {
+    inner.update_rows(table, assignments, predicate).await?
+  });
+  Ok(())
+}
+
+async fn transaction_delete_rows(
+  transaction: &mut Transaction<'_>,
+  table: &str,
+  predicate: Option<db_engine::QualifiedPredicate>,
+) -> Result<(), DatabaseError> {
+  with_transaction_mut!(transaction, |inner| {
+    inner.delete_rows(table, predicate).await?
+  });
   Ok(())
 }
 
@@ -168,48 +191,14 @@ pub(crate) async fn transaction_execute_sql(
       table,
       assignments,
       predicate,
-    } => match transaction {
-      Transaction::InMemory(inner) => {
-        inner.update_rows(&table, assignments, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(feature = "automerge")]
-      Transaction::AutomergeInMemory(inner) => {
-        inner.update_rows(&table, assignments, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Transaction::AutomergeRedb(inner) => {
-        inner.update_rows(&table, assignments, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(feature = "redb")]
-      Transaction::Redb(inner) => {
-        inner.update_rows(&table, assignments, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-    },
-    EngineQuery::Delete { table, predicate } => match transaction {
-      Transaction::InMemory(inner) => {
-        inner.delete_rows(&table, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(feature = "automerge")]
-      Transaction::AutomergeInMemory(inner) => {
-        inner.delete_rows(&table, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Transaction::AutomergeRedb(inner) => {
-        inner.delete_rows(&table, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      #[cfg(feature = "redb")]
-      Transaction::Redb(inner) => {
-        inner.delete_rows(&table, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-    },
+    } => {
+      transaction_update_rows(transaction, &table, assignments, predicate).await?;
+      Ok(EngineResult::new(Vec::new()))
+    }
+    EngineQuery::Delete { table, predicate } => {
+      transaction_delete_rows(transaction, &table, predicate).await?;
+      Ok(EngineResult::new(Vec::new()))
+    }
     EngineQuery::Select { .. } => Err(DatabaseError::Other(
       "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
     )),
@@ -217,29 +206,13 @@ pub(crate) async fn transaction_execute_sql(
 }
 
 pub(crate) async fn transaction_commit(transaction: Transaction<'_>) -> Result<(), DatabaseError> {
-  match transaction {
-    Transaction::InMemory(inner) => inner.commit().await?,
-    #[cfg(feature = "automerge")]
-    Transaction::AutomergeInMemory(inner) => inner.commit().await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Transaction::AutomergeRedb(inner) => inner.commit().await?,
-    #[cfg(feature = "redb")]
-    Transaction::Redb(inner) => inner.commit().await?,
-  }
+  with_transaction_owned!(transaction, |inner| inner.commit().await?);
   Ok(())
 }
 
 pub(crate) async fn transaction_rollback(
   transaction: Transaction<'_>,
 ) -> Result<(), DatabaseError> {
-  match transaction {
-    Transaction::InMemory(inner) => inner.rollback().await?,
-    #[cfg(feature = "automerge")]
-    Transaction::AutomergeInMemory(inner) => inner.rollback().await?,
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Transaction::AutomergeRedb(inner) => inner.rollback().await?,
-    #[cfg(feature = "redb")]
-    Transaction::Redb(inner) => inner.rollback().await?,
-  }
+  with_transaction_owned!(transaction, |inner| inner.rollback().await?);
   Ok(())
 }

@@ -16,6 +16,9 @@ use super::operators::nested_loop_join::{
   apply_full_join, apply_inner_join, apply_left_join, apply_right_join,
 };
 
+type JoinedRowState = HashMap<String, Option<EngineRow>>;
+type JoinedRowStates = Vec<JoinedRowState>;
+
 fn collect_subqueries(pred: &QualifiedPredicate, acc: &mut Vec<crate::EngineQuery>) {
   match pred {
     QualifiedPredicate::InSubquery { subquery, .. } => acc.push((**subquery).clone()),
@@ -28,6 +31,151 @@ fn collect_subqueries(pred: &QualifiedPredicate, acc: &mut Vec<crate::EngineQuer
   }
 }
 
+fn collect_joined_tables(base_table: &str, options: &SelectOptions) -> HashSet<String> {
+  let mut tables: HashSet<String> = HashSet::new();
+  tables.insert(base_table.to_string());
+  for join in &options.joins {
+    tables.insert(join.left_table.clone());
+    tables.insert(join.right_table.clone());
+  }
+  tables
+}
+
+fn build_join_template(tables: &HashSet<String>) -> JoinedRowState {
+  let mut template: JoinedRowState = HashMap::new();
+  for table in tables {
+    template.insert(table.clone(), None);
+  }
+  template
+}
+
+fn seed_joined_row_states(
+  base_table: &str,
+  table_rows_map: &HashMap<String, Vec<EngineRow>>,
+  template: &JoinedRowState,
+) -> JoinedRowStates {
+  let mut partial_results: JoinedRowStates = Vec::new();
+  if let Some(base_rows) = table_rows_map.get(base_table) {
+    if !base_rows.is_empty() {
+      for row in base_rows {
+        let mut m = template.clone();
+        m.insert(base_table.to_string(), Some(row.clone()));
+        partial_results.push(m);
+      }
+    } else {
+      partial_results.push(template.clone());
+    }
+  } else {
+    partial_results.push(template.clone());
+  }
+  partial_results
+}
+
+fn apply_joins(
+  options: &SelectOptions,
+  table_rows_map: &HashMap<String, Vec<EngineRow>>,
+  template: &JoinedRowState,
+  mut partial_results: JoinedRowStates,
+) -> JoinedRowStates {
+  for join in &options.joins {
+    let right_table = &join.right_table;
+
+    let (left_qc, right_qc) = match &join.on {
+      JoinOn::ColumnEq { left, right } => (left, right),
+    };
+
+    let right_rows = table_rows_map.get(right_table).cloned().unwrap_or_default();
+
+    partial_results = match join.kind {
+      JoinKind::Inner => apply_inner_join(
+        &partial_results,
+        &right_rows,
+        right_table,
+        left_qc,
+        right_qc,
+      ),
+      JoinKind::Left => apply_left_join(
+        &partial_results,
+        &right_rows,
+        right_table,
+        left_qc,
+        right_qc,
+      ),
+      JoinKind::Right => apply_right_join(
+        &partial_results,
+        &right_rows,
+        right_table,
+        left_qc,
+        right_qc,
+        template,
+      ),
+      JoinKind::Full => apply_full_join(
+        &partial_results,
+        &right_rows,
+        right_table,
+        left_qc,
+        right_qc,
+        template,
+      ),
+    };
+  }
+
+  partial_results
+}
+
+fn build_sorted_projection_rows(
+  partial_results: &[JoinedRowState],
+  projection: &[QualifiedColumn],
+  options: &SelectOptions,
+) -> Result<Vec<(Vec<EngineValue>, EngineRow)>, EngineError> {
+  let mut keyed: Vec<(Vec<EngineValue>, EngineRow)> = Vec::new();
+
+  for partial in partial_results {
+    let mut out_row: EngineRow = Vec::with_capacity(projection.len());
+    for proj in projection {
+      match partial.get(&proj.table) {
+        Some(Some(row)) => out_row.push(
+          row
+            .get(proj.column_index)
+            .cloned()
+            .unwrap_or(EngineValue::Null),
+        ),
+        Some(None) => out_row.push(EngineValue::Null),
+        None => {
+          return Err(EngineError::SchemaMismatch(format!(
+            "projection references unknown table {}",
+            proj.table
+          )));
+        }
+      }
+    }
+
+    let mut keys: Vec<EngineValue> = Vec::with_capacity(options.order_by.len());
+    for ord in &options.order_by {
+      let qc = &ord.expr;
+      match partial.get(&qc.table) {
+        Some(Some(row)) => keys.push(
+          row
+            .get(qc.column_index)
+            .cloned()
+            .unwrap_or(EngineValue::Null),
+        ),
+        Some(None) => keys.push(EngineValue::Null),
+        None => {
+          return Err(EngineError::SchemaMismatch(format!(
+            "ORDER BY references unknown table {}",
+            qc.table
+          )));
+        }
+      }
+    }
+
+    keyed.push((keys, out_row));
+  }
+
+  Ok(keyed)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EngineKernel<S> {
   store: S,
@@ -38,6 +186,54 @@ impl<S> EngineKernel<S>
 where
   S: EngineStore,
 {
+  async fn collect_table_rows_map(
+    tx: &mut S::Transaction,
+    tables: &HashSet<String>,
+  ) -> Result<HashMap<String, Vec<EngineRow>>, EngineError> {
+    let mut table_rows_map: HashMap<String, Vec<EngineRow>> = HashMap::new();
+    for table in tables {
+      let rows_with_pk = EngineWriteTxn::<S>::collect_table_rows(tx, table, None).await?;
+      let rows = rows_with_pk
+        .into_iter()
+        .map(|(_pk, row)| row)
+        .collect::<Vec<_>>();
+      table_rows_map.insert(table.clone(), rows);
+    }
+    Ok(table_rows_map)
+  }
+
+  async fn filter_joined_rows(
+    &self,
+    partial_results: &mut JoinedRowStates,
+    predicate: &QualifiedPredicate,
+  ) -> Result<(), EngineError> {
+    let mut subquery_keys: Vec<crate::EngineQuery> = Vec::new();
+    collect_subqueries(predicate, &mut subquery_keys);
+
+    let mut subquery_cache: HashMap<String, HashSet<EngineValue>> = HashMap::new();
+    for query in subquery_keys {
+      let key = format!("{:?}", query);
+      if subquery_cache.contains_key(&key) {
+        continue;
+      }
+      let res = self.run(query.clone()).await?;
+      let mut set: HashSet<EngineValue> = HashSet::new();
+      for row in res.rows {
+        if let Some(v) = row.first() {
+          set.insert(v.clone());
+        }
+      }
+      subquery_cache.insert(key, set);
+    }
+
+    let eval_ctx = crate::predicate::EvalContext::with_cache(subquery_cache);
+    partial_results.retain(|partial| {
+      let ctx = JoinedRowContext { partial };
+      eval_predicate(predicate, &ctx, &eval_ctx)
+    });
+    Ok(())
+  }
+
   pub(crate) fn new(store: S) -> Self {
     Self {
       store,
@@ -125,176 +321,24 @@ where
     predicate: Option<QualifiedPredicate>,
     options: &SelectOptions,
   ) -> Result<EngineResult, EngineError> {
-    // Acquire a transaction and collect rows for all referenced tables
     let mut writer = self.writer();
     let tx = writer.transaction().await?;
 
-    // Build set of tables referenced
-    let mut tables: HashSet<String> = HashSet::new();
-    tables.insert(base_table.to_string());
-    for j in &options.joins {
-      tables.insert(j.left_table.clone());
-      tables.insert(j.right_table.clone());
-    }
-
-    // Collect rows per table
-    let mut table_rows_map: HashMap<String, Vec<EngineRow>> = HashMap::new();
-    for table in &tables {
-      let rows_with_pk = EngineWriteTxn::<S>::collect_table_rows(tx, table, None).await?;
-      let rows = rows_with_pk
-        .into_iter()
-        .map(|(_pk, row)| row)
-        .collect::<Vec<_>>();
-      table_rows_map.insert(table.clone(), rows);
-    }
-
-    // Template partial with all tables present (None)
-    let mut template: HashMap<String, Option<EngineRow>> = HashMap::new();
-    for table in &tables {
-      template.insert(table.clone(), None);
-    }
-
-    // Initialize partial results from base_table rows (or single null entry when base_table empty)
-    let mut partial_results: Vec<HashMap<String, Option<EngineRow>>> = Vec::new();
-    if let Some(base_rows) = table_rows_map.get(base_table) {
-      if !base_rows.is_empty() {
-        for row in base_rows {
-          let mut m = template.clone();
-          m.insert(base_table.to_string(), Some(row.clone()));
-          partial_results.push(m);
-        }
-      } else {
-        partial_results.push(template.clone());
-      }
-    } else {
-      partial_results.push(template.clone());
-    }
-
-    // Apply joins in provided order using a left-deep nested loop strategy
-    for join in &options.joins {
-      let _left_table = &join.left_table;
-      let right_table = &join.right_table;
-
-      let (left_qc, right_qc) = match &join.on {
-        JoinOn::ColumnEq { left, right } => (left, right),
-      };
-
-      let right_rows = table_rows_map.get(right_table).cloned().unwrap_or_default();
-
-      partial_results = match join.kind {
-        JoinKind::Inner => apply_inner_join(
-          &partial_results,
-          &right_rows,
-          right_table,
-          left_qc,
-          right_qc,
-        ),
-        JoinKind::Left => apply_left_join(
-          &partial_results,
-          &right_rows,
-          right_table,
-          left_qc,
-          right_qc,
-        ),
-        JoinKind::Right => apply_right_join(
-          &partial_results,
-          &right_rows,
-          right_table,
-          left_qc,
-          right_qc,
-          &template,
-        ),
-        JoinKind::Full => apply_full_join(
-          &partial_results,
-          &right_rows,
-          right_table,
-          left_qc,
-          right_qc,
-          &template,
-        ),
-      };
-    }
+    let tables = collect_joined_tables(base_table, options);
+    let table_rows_map = Self::collect_table_rows_map(tx, &tables).await?;
+    let template = build_join_template(&tables);
+    let mut partial_results = seed_joined_row_states(base_table, &table_rows_map, &template);
+    partial_results = apply_joins(options, &table_rows_map, &template, partial_results);
 
     // If no grouping/aggregation requested, build output rows and apply ORDER/LIMIT
     let needs_grouping = !options.group_by.is_empty() || !options.aggregates.is_empty();
 
-    // If a qualified predicate (WHERE) was provided, evaluate it against joined partials now
     if let Some(qpred) = &predicate {
-      // gather subqueries to pre-execute
-      let mut subquery_keys: Vec<crate::EngineQuery> = Vec::new();
-      collect_subqueries(qpred, &mut subquery_keys);
-
-      // execute unique subqueries and cache results keyed by their Debug string
-      let mut subquery_cache: HashMap<String, HashSet<EngineValue>> = HashMap::new();
-      for q in subquery_keys {
-        let key = format!("{:?}", q);
-        if subquery_cache.contains_key(&key) {
-          continue;
-        }
-        let res = self.run(q.clone()).await?;
-        let mut set: HashSet<EngineValue> = HashSet::new();
-        for row in res.rows {
-          if let Some(v) = row.first() {
-            set.insert(v.clone());
-          }
-        }
-        subquery_cache.insert(key, set);
-      }
-
-      let eval_ctx = crate::predicate::EvalContext::with_cache(subquery_cache);
-      partial_results.retain(|p| {
-        let ctx = JoinedRowContext { partial: p };
-        eval_predicate(qpred, &ctx, &eval_ctx)
-      });
+      self.filter_joined_rows(&mut partial_results, qpred).await?;
     }
 
     if !needs_grouping {
-      let mut keyed: Vec<(Vec<EngineValue>, EngineRow)> = Vec::new();
-
-      for partial in &partial_results {
-        // Build projection
-        let mut out_row: EngineRow = Vec::with_capacity(projection.len());
-        for proj in projection {
-          match partial.get(&proj.table) {
-            Some(Some(row)) => out_row.push(
-              row
-                .get(proj.column_index)
-                .cloned()
-                .unwrap_or(EngineValue::Null),
-            ),
-            Some(None) => out_row.push(EngineValue::Null),
-            None => {
-              return Err(EngineError::SchemaMismatch(format!(
-                "projection references unknown table {}",
-                proj.table
-              )));
-            }
-          }
-        }
-
-        // Compute order keys
-        let mut keys: Vec<EngineValue> = Vec::with_capacity(options.order_by.len());
-        for ord in &options.order_by {
-          let qc = &ord.expr;
-          match partial.get(&qc.table) {
-            Some(Some(row)) => keys.push(
-              row
-                .get(qc.column_index)
-                .cloned()
-                .unwrap_or(EngineValue::Null),
-            ),
-            Some(None) => keys.push(EngineValue::Null),
-            None => {
-              return Err(EngineError::SchemaMismatch(format!(
-                "ORDER BY references unknown table {}",
-                qc.table
-              )));
-            }
-          }
-        }
-
-        keyed.push((keys, out_row));
-      }
+      let keyed = build_sorted_projection_rows(&partial_results, projection, options)?;
 
       let out_rows = super::operators::Sorter::new(
         options.order_by.clone(),

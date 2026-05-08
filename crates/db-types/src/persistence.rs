@@ -15,9 +15,17 @@ use crate::codec::{
   decode_index_schema, decode_table_schema, encode_index_schema_into_sink,
   encode_table_schema_into_sink,
 };
-use crate::engine_types::{EngineKey, EngineValue};
+use crate::engine_types::{EngineKey, EngineRow, EngineValue};
 use crate::schema::{IndexSchema, TableSchema};
 use crate::store::{StoreKey, StoreValue};
+
+fn decode_schema_rows<I, T, F>(rows: I, decode: F) -> Result<Vec<T>, db_core::DecodeError>
+where
+  I: IntoIterator<Item = EngineRow>,
+  F: Fn(&[EngineValue]) -> Result<T, db_core::DecodeError>,
+{
+  rows.into_iter().map(|row| decode(&row)).collect()
+}
 
 /// Prefix used for row trees: `"t:{table_name}"`.
 pub fn row_tree(table_name: &str) -> String {
@@ -37,6 +45,14 @@ pub fn index_tree(index_name: &str) -> String {
 pub const TABLE_SCHEMA_TREE: &str = "sys:table_schemas";
 /// Well-known tree holding all index schemas.
 pub const INDEX_SCHEMA_TREE: &str = "sys:index_schemas";
+
+pub fn table_schema_entry_key(table_name: impl Into<String>) -> EngineKey {
+  EngineKey::Scalar(EngineValue::Text(table_name.into()))
+}
+
+pub fn index_schema_entry_key(index_name: impl Into<String>) -> EngineKey {
+  EngineKey::Scalar(EngineValue::Text(index_name.into()))
+}
 
 /// Load catalog entries (table schemas and index schemas) from a storage
 /// transaction. Returns storage-level `BTreeError` so callers may map to
@@ -166,6 +182,13 @@ pub fn decode_table_schema_row(row: &[EngineValue]) -> Result<TableSchema, db_co
   }
 }
 
+pub fn decode_table_schema_rows<I>(rows: I) -> Result<Vec<TableSchema>, db_core::DecodeError>
+where
+  I: IntoIterator<Item = EngineRow>,
+{
+  decode_schema_rows(rows, decode_table_schema_row)
+}
+
 pub fn encode_index_schema(schema: &IndexSchema) -> Vec<EngineValue> {
   let mut buf = Vec::new();
   encode_index_schema_into_sink(&mut buf, schema);
@@ -177,6 +200,13 @@ pub fn decode_index_schema_row(row: &[EngineValue]) -> Result<IndexSchema, db_co
     Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode_index_schema),
     _ => Err(db_core::DecodeError::Malformed),
   }
+}
+
+pub fn decode_index_schema_rows<I>(rows: I) -> Result<Vec<IndexSchema>, db_core::DecodeError>
+where
+  I: IntoIterator<Item = EngineRow>,
+{
+  decode_schema_rows(rows, decode_index_schema_row)
 }
 
 pub fn make_index_entry_key(
@@ -197,4 +227,56 @@ pub fn split_index_entry_key(composite: &EngineKey, n_index_cols: usize) -> (Eng
   let index_key = EngineKey::from_values(values[..n].to_vec());
   let row_pk = EngineKey::from_values(values[n..].to_vec());
   (index_key, row_pk)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine_types::EngineType;
+  use crate::schema::ColumnSchema;
+
+  #[test]
+  fn schema_entry_keys_use_text_scalars() {
+    assert_eq!(
+      table_schema_entry_key("users"),
+      EngineKey::Scalar(EngineValue::Text("users".into()))
+    );
+    assert_eq!(
+      index_schema_entry_key("users_name_idx"),
+      EngineKey::Scalar(EngineValue::Text("users_name_idx".into()))
+    );
+  }
+
+  #[test]
+  fn decode_schema_rows_round_trip() {
+    let table = TableSchema {
+      name: "users".into(),
+      columns: vec![
+        ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        },
+        ColumnSchema {
+          name: "name".into(),
+          data_type: EngineType::Text,
+        },
+      ],
+      primary_key: vec![0],
+    };
+    let index = IndexSchema {
+      name: "users_name_idx".into(),
+      table_name: "users".into(),
+      column_indices: vec![1],
+      unique: true,
+    };
+
+    assert_eq!(
+      decode_table_schema_rows(vec![encode_table_schema(&table)]).expect("decode tables"),
+      vec![table]
+    );
+    assert_eq!(
+      decode_index_schema_rows(vec![encode_index_schema(&index)]).expect("decode indexes"),
+      vec![index]
+    );
+  }
 }

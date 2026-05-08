@@ -4,11 +4,10 @@ use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
 use async_stream::stream;
 use core::future::Future;
 use db_core::{NamedTreeProvider, NamedTreeTransaction};
-use db_types::EngineValue;
 use db_types::persistence::{
-  INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_row, decode_table_schema_row,
-  encode_index_schema, encode_table_schema, index_tree, make_index_entry_key, row_tree,
-  split_index_entry_key,
+  INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
+  encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree,
+  make_index_entry_key, row_tree, split_index_entry_key, table_schema_entry_key,
 };
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -18,6 +17,21 @@ pub use transaction::EngineStoreTransaction;
 
 fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
   EngineError::SchemaMismatch(error.to_string())
+}
+
+async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
+where
+  T: NamedTreeTransaction<EngineKey, EngineRow>,
+{
+  let stream = tx.range(tree_name, ..);
+  pin_mut!(stream);
+
+  let mut rows = Vec::new();
+  while let Some(item) = stream.next().await {
+    let (_key, row) = item.map_err(EngineError::from)?;
+    rows.push(row);
+  }
+  Ok(rows)
 }
 
 pub trait EngineStore: Clone + Send + Sync + 'static {
@@ -111,7 +125,7 @@ where
     schema: TableSchema,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let key = EngineKey::Scalar(EngineValue::Text(schema.name.clone()));
+      let key = table_schema_entry_key(schema.name.clone());
       let value = encode_table_schema(&schema);
       self
         .inner
@@ -126,7 +140,7 @@ where
     table_name: &'a str,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let key = EngineKey::Scalar(EngineValue::Text(table_name.into()));
+      let key = table_schema_entry_key(table_name);
       self
         .inner
         .remove(TABLE_SCHEMA_TREE, &key)
@@ -141,7 +155,7 @@ where
     schema: IndexSchema,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let key = EngineKey::Scalar(EngineValue::Text(schema.name.clone()));
+      let key = index_schema_entry_key(schema.name.clone());
       let value = encode_index_schema(&schema);
       self
         .inner
@@ -156,7 +170,7 @@ where
     index_name: &'a str,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let key = EngineKey::Scalar(EngineValue::Text(index_name.into()));
+      let key = index_schema_entry_key(index_name);
       self
         .inner
         .remove(INDEX_SCHEMA_TREE, &key)
@@ -170,24 +184,10 @@ where
     &'a mut self,
   ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a {
     async move {
-      let mut tables = Vec::new();
-      {
-        let stream = self.inner.range(TABLE_SCHEMA_TREE, ..);
-        pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-          let (_key, row) = item.map_err(EngineError::from)?;
-          tables.push(decode_table_schema_row(&row).map_err(schema_decode_error)?);
-        }
-      }
-      let mut indexes = Vec::new();
-      {
-        let stream = self.inner.range(INDEX_SCHEMA_TREE, ..);
-        pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-          let (_key, row) = item.map_err(EngineError::from)?;
-          indexes.push(decode_index_schema_row(&row).map_err(schema_decode_error)?);
-        }
-      }
+      let table_rows = collect_tree_rows(&self.inner, TABLE_SCHEMA_TREE).await?;
+      let index_rows = collect_tree_rows(&self.inner, INDEX_SCHEMA_TREE).await?;
+      let tables = decode_table_schema_rows(table_rows).map_err(schema_decode_error)?;
+      let indexes = decode_index_schema_rows(index_rows).map_err(schema_decode_error)?;
       Ok((tables, indexes))
     }
   }
