@@ -164,7 +164,173 @@ where
 #[cfg(all(test, feature = "automerge"))]
 mod tests {
   use super::*;
-  use futures::executor::block_on;
+  use db_automerge::AutoCommit;
+  use db_core::{BTree, BTreeExecutor, BTreeTransaction};
+  use db_engine::EngineValue;
+  use futures::{StreamExt, executor::block_on};
+
+  use std::collections::BTreeMap;
+  #[cfg(feature = "redb")]
+  use std::fs;
+  use std::path::PathBuf;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  use uuid::Uuid;
+
+  fn temp_redb_path(label: &str) -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system time after unix epoch")
+      .as_nanos();
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    path.push(format!(
+      "aicacia_automerge_sync_{}_{}_{}.db",
+      label, nanos, id
+    ));
+    path
+  }
+
+  async fn collect_documents<S, B, F>(
+    database: &Database<S>,
+    get_store: &F,
+  ) -> BTreeMap<Uuid, AutoCommit>
+  where
+    S: FacadeStore,
+    B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+    F: Fn(&Database<S>) -> &AutomergeEngineStore<B>,
+  {
+    let store = get_store(database);
+    let guard = store.automerge.read().await;
+    let stream = guard.range(Uuid::from_u128(0)..=Uuid::from_u128(u128::MAX));
+    futures::pin_mut!(stream);
+
+    let mut docs = BTreeMap::new();
+    while let Some(item) = stream.next().await {
+      let (doc_id, doc) = match item {
+        Ok(pair) => pair,
+        Err(_) if docs.is_empty() => return docs,
+        Err(err) => panic!("collect documents: {err}"),
+      };
+      docs.insert(doc_id, doc);
+    }
+
+    docs
+  }
+
+  async fn apply_documents<S, B, F>(
+    database: &Database<S>,
+    docs: &BTreeMap<Uuid, AutoCommit>,
+    get_store: &F,
+  ) where
+    S: FacadeStore,
+    B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+    F: Fn(&Database<S>) -> &AutomergeEngineStore<B>,
+  {
+    let store = get_store(database);
+    let guard = store.automerge.read().await;
+    let mut tx = guard.transaction().await.expect("start automerge tx");
+
+    for (doc_id, doc) in docs {
+      tx.insert(*doc_id, doc.clone()).await.expect("insert doc");
+    }
+
+    tx.commit().await.expect("commit automerge tx");
+  }
+
+  async fn sync_databases<S, B, F>(left: &mut Database<S>, right: &mut Database<S>, get_store: &F)
+  where
+    S: FacadeStore,
+    B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+    F: Fn(&Database<S>) -> &AutomergeEngineStore<B>,
+  {
+    let left_docs = collect_documents(left, get_store).await;
+    let right_docs = collect_documents(right, get_store).await;
+
+    apply_documents(right, &left_docs, get_store).await;
+    apply_documents(left, &right_docs, get_store).await;
+
+    left
+      .engine
+      .reload_schema()
+      .await
+      .expect("reload left schema");
+    right
+      .engine
+      .reload_schema()
+      .await
+      .expect("reload right schema");
+  }
+
+  async fn assert_users<S>(database: &mut Database<S>)
+  where
+    S: FacadeStore,
+  {
+    let alice = database
+      .execute_sql("SELECT name FROM users WHERE id = 1;")
+      .await
+      .expect("select alice");
+    assert_eq!(alice.rows, vec![vec![EngineValue::Text("Alice".into())]]);
+
+    let bob = database
+      .execute_sql("SELECT name FROM users WHERE id = 2;")
+      .await
+      .expect("select bob");
+    assert_eq!(bob.rows, vec![vec![EngineValue::Text("Bob".into())]]);
+
+    let all = database
+      .execute_sql("SELECT id, name FROM users;")
+      .await
+      .expect("select users");
+    let mut rows = all.rows;
+    rows.sort_by(|left, right| format!("{:?}", left).cmp(&format!("{:?}", right)));
+    assert_eq!(
+      rows,
+      vec![
+        vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      ]
+    );
+  }
+
+  async fn offline_sync_scenario<S, B, F>(
+    mut left: Database<S>,
+    mut right: Database<S>,
+    get_store: &F,
+  ) where
+    S: FacadeStore,
+    B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+    F: Fn(&Database<S>) -> &AutomergeEngineStore<B>,
+  {
+    left
+      .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+      .await
+      .expect("create users on left");
+
+    sync_databases(&mut left, &mut right, get_store).await;
+
+    right
+      .execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob');")
+      .await
+      .expect("insert bob on right");
+    left
+      .execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+      .await
+      .expect("insert alice on left");
+
+    sync_databases(&mut left, &mut right, get_store).await;
+
+    assert_users(&mut left).await;
+    assert_users(&mut right).await;
+
+    sync_databases(&mut left, &mut right, get_store).await;
+
+    assert_users(&mut left).await;
+    assert_users(&mut right).await;
+  }
 
   #[test]
   fn automerge_two_create_tables() {
@@ -213,21 +379,28 @@ mod tests {
     });
   }
 
+  #[test]
+  fn automerge_in_memory_offline_sync_converges() {
+    block_on(async {
+      let left = Database::open_automerge_in_memory()
+        .await
+        .expect("open left in-memory db");
+      let right = Database::open_automerge_in_memory()
+        .await
+        .expect("open right in-memory db");
+
+      offline_sync_scenario(left, right, &|db| db.engine.store()).await;
+    });
+  }
+
   #[cfg(feature = "redb")]
   #[test]
   fn automerge_redb_join_returns_two_rows() {
     block_on(async {
-      let mut path = std::env::temp_dir();
-      path.push(format!(
-        "aicacia_automerge_redb_test_{}.db",
-        std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .expect("time went backwards")
-          .as_nanos()
-      ));
-      let _ = std::fs::remove_file(&path);
+      let path = temp_redb_path("join");
+      let _ = fs::remove_file(&path);
 
-      let mut db = Database::open_automerge_with_redb(path, "automerge_store")
+      let mut db = Database::open_automerge_with_redb(&path, "automerge_store")
         .await
         .expect("open automerge redb");
 
@@ -255,6 +428,29 @@ mod tests {
       let sql = "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;";
       let res = db.execute_sql(sql).await.expect("execute select");
       assert_eq!(res.rows.len(), 2);
+
+      let _ = fs::remove_file(path);
+    });
+  }
+
+  #[cfg(feature = "redb")]
+  #[test]
+  fn automerge_redb_offline_sync_converges() {
+    block_on(async {
+      let left_path = temp_redb_path("left");
+      let right_path = temp_redb_path("right");
+
+      let left = Database::open_automerge_with_redb(&left_path, "automerge_store")
+        .await
+        .expect("open left redb db");
+      let right = Database::open_automerge_with_redb(&right_path, "automerge_store")
+        .await
+        .expect("open right redb db");
+
+      offline_sync_scenario(left, right, &|db| db.engine.store()).await;
+
+      let _ = fs::remove_file(left_path);
+      let _ = fs::remove_file(right_path);
     });
   }
 }

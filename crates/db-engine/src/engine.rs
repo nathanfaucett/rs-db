@@ -28,6 +28,16 @@ where
     })
   }
 
+  #[doc(hidden)]
+  pub fn store(&self) -> &S {
+    self.kernel.store()
+  }
+
+  #[doc(hidden)]
+  pub async fn reload_schema(&mut self) -> Result<(), EngineError> {
+    self.kernel.load_schema().await
+  }
+
   pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), EngineError> {
     self.kernel.register_table(schema).await
   }

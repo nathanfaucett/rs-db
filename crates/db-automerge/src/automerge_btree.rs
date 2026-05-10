@@ -16,9 +16,10 @@ mod transaction;
 
 use crate::automerge_btree::hash::{hash_hashes, hash_heads};
 
+use self::codec::encode_doc_key_range;
 #[cfg(test)]
 use self::codec::uuid_prefix_range;
-use self::codec::{DocumentChangeKeyCodec, VecBytesCodec, encode_doc_key_range};
+pub use self::codec::{DocumentChangeKeyCodec, VecBytesCodec};
 use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
 pub use self::key::{AutomergeEntry, DocumentChangeKey, DocumentType};
 use self::key::{all_document_bounds, document_entry_bounds};

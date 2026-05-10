@@ -4,4 +4,5 @@ extern crate alloc;
 mod automerge_btree;
 pub use automerge_btree::*;
 mod store_adapter;
+pub use automerge::AutoCommit;
 pub use store_adapter::*;

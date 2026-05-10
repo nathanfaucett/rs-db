@@ -39,6 +39,10 @@ where
     self.catalog.load_from_store(&self.store).await
   }
 
+  pub(crate) fn store(&self) -> &S {
+    &self.store
+  }
+
   pub(crate) fn table(&self, table_name: &str) -> Result<&TableSchema, EngineError> {
     self.catalog.table(table_name)
   }
