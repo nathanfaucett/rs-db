@@ -3,6 +3,7 @@ use std::{borrow::Borrow, sync::Arc};
 use async_lock::RwLock;
 use async_stream::stream;
 use automerge::AutoCommit;
+use automerge::transaction::Transactable;
 use db_core::encode_with_version;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
@@ -18,8 +19,8 @@ mod snapshot;
 
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 use snapshot::{
-  StoreSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry, snapshot_bytes,
-  snapshot_doc,
+  StoreSnapshotAdapter, encode_entries, encode_snapshot_base64, find_entry, key_in_range,
+  parse_entries, set_entry, snapshot_bytes, snapshot_doc,
 };
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
@@ -111,6 +112,58 @@ fn set_in_snapshot(
   set_entry::<StoreSnapshotAdapter>(buf, key, value)
 }
 
+fn remove_from_snapshot(
+  buf: Option<&[u8]>,
+  key: &StoreKey,
+) -> Result<(Option<StoreValue>, Option<Vec<u8>>), BTreeError> {
+  let mut entries = if let Some(bytes) = buf {
+    parse_entries::<StoreSnapshotAdapter>(bytes)?
+  } else {
+    Vec::new()
+  };
+
+  let mut removed = None;
+  entries.retain(|(existing, value)| {
+    if existing == key {
+      removed = Some(value.clone());
+      false
+    } else {
+      true
+    }
+  });
+
+  if removed.is_none() {
+    return Ok((None, buf.map(|bytes| bytes.to_vec())));
+  }
+
+  if entries.is_empty() {
+    Ok((removed, None))
+  } else {
+    Ok((
+      removed,
+      Some(encode_entries::<StoreSnapshotAdapter>(&entries)),
+    ))
+  }
+}
+
+fn doc_with_snapshot(
+  existing: Option<AutoCommit>,
+  snapshot: &[u8],
+) -> Result<AutoCommit, BTreeError> {
+  if let Some(mut doc) = existing {
+    doc
+      .put(
+        &automerge::ROOT,
+        "snapshot",
+        encode_snapshot_base64(snapshot),
+      )
+      .map_err(BTreeError::other)?;
+    Ok(doc)
+  } else {
+    snapshot_doc(snapshot)
+  }
+}
+
 pub struct AutomergeEngineStoreTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
@@ -155,8 +208,14 @@ where
     let inner = &mut self.inner;
     async move {
       let doc_id = doc_id_for_key(&key);
-      let new_buf = set_in_snapshot(None, &key, &value)?;
-      inner.insert(doc_id, snapshot_doc(&new_buf)?).await
+      let existing = inner.get(&doc_id).await?;
+      let existing_buf = match &existing {
+        Some(doc) => snapshot_bytes(doc)?,
+        None => None,
+      };
+      let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
+      let next_doc = doc_with_snapshot(existing, &new_buf)?;
+      inner.insert(doc_id, next_doc).await
     }
   }
 
@@ -178,12 +237,15 @@ where
       }
       let doc = existing.expect("checked is_some");
       let buf_opt = snapshot_bytes(&doc)?;
-      let prev = if let Some(ref b) = buf_opt {
-        find_in_snapshot(b, &key)?
-      } else {
-        None
-      };
-      let _ = inner.remove(&doc_id).await?;
+      let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
+      if prev.is_none() {
+        return Ok(None);
+      }
+
+      // Keep an empty snapshot document as a tombstone so deletes replicate via sync.
+      let next = updated.unwrap_or_default();
+      let next_doc = doc_with_snapshot(Some(doc), &next)?;
+      inner.insert(doc_id, next_doc).await?;
       Ok(prev)
     }
   }
@@ -275,8 +337,14 @@ where
       let doc_id = doc_id_for_key(&key);
       let guard = automerge.read().await;
       let mut tx = guard.transaction().await?;
-      let new_buf = set_in_snapshot(None, &key, &value)?;
-      tx.insert(doc_id, snapshot_doc(&new_buf)?).await?;
+      let existing = tx.get(&doc_id).await?;
+      let existing_buf = match &existing {
+        Some(doc) => snapshot_bytes(doc)?,
+        None => None,
+      };
+      let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
+      let next_doc = doc_with_snapshot(existing, &new_buf)?;
+      tx.insert(doc_id, next_doc).await?;
       tx.commit().await
     }
   }
@@ -301,12 +369,15 @@ where
       }
       let doc = existing.expect("checked is_some");
       let buf_opt = snapshot_bytes(&doc)?;
-      let prev = if let Some(ref b) = buf_opt {
-        find_in_snapshot(b, &key)?
-      } else {
-        None
-      };
-      let _ = tx.remove(&doc_id).await?;
+      let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
+      if prev.is_none() {
+        tx.commit().await?;
+        return Ok(None);
+      }
+
+      let next = updated.unwrap_or_default();
+      let next_doc = doc_with_snapshot(Some(doc), &next)?;
+      tx.insert(doc_id, next_doc).await?;
       tx.commit().await?;
       Ok(prev)
     }

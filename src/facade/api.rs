@@ -36,9 +36,11 @@ use db_sql_to_engine::{
 use super::types::RedbAutomergeStore;
 #[cfg(feature = "redb")]
 use super::types::RedbEngineStore;
-use super::types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
 #[cfg(feature = "automerge")]
-use super::types::{FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec, InMemoryAutomergeStore};
+use super::types::{AutomergeSyncMetrics, InMemoryAutomergeStore};
+use super::types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use super::types::{FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec};
 
 impl<S> SchemaResolver for Database<S>
 where
@@ -97,6 +99,11 @@ where
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
 
   for (doc_id, doc) in docs {
+    let _ = tx
+      .remove(doc_id)
+      .await
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+
     tx.insert(*doc_id, doc.clone())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
@@ -120,10 +127,38 @@ where
   let left_docs = collect_documents(left).await?;
   let right_docs = collect_documents(right).await?;
 
-  apply_documents(right, &left_docs).await?;
-  apply_documents(left, &right_docs).await?;
+  let mut merged_docs = left_docs;
+  for (doc_id, mut right_doc) in right_docs {
+    if let Some(left_doc) = merged_docs.get_mut(&doc_id) {
+      left_doc
+        .merge(&mut right_doc)
+        .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    } else {
+      merged_docs.insert(doc_id, right_doc);
+    }
+  }
+
+  apply_documents(left, &merged_docs).await?;
+  apply_documents(right, &merged_docs).await?;
 
   Ok(())
+}
+
+#[cfg(feature = "automerge")]
+fn automerge_metrics(docs: &BTreeMap<Uuid, AutoCommit>) -> AutomergeSyncMetrics {
+  let document_count = docs.len();
+  let total_document_bytes = docs
+    .values()
+    .map(|doc| {
+      let mut copy = doc.clone();
+      copy.save().len()
+    })
+    .sum();
+
+  AutomergeSyncMetrics {
+    document_count,
+    total_document_bytes,
+  }
 }
 
 #[cfg(feature = "automerge")]
@@ -142,6 +177,11 @@ impl Database<InMemoryAutomergeStore> {
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
+  }
+
+  pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
+    let docs = collect_documents(self.engine.store()).await?;
+    Ok(automerge_metrics(&docs))
   }
 }
 
@@ -169,6 +209,11 @@ impl Database<RedbAutomergeStore> {
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
+  }
+
+  pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
+    let docs = collect_documents(self.engine.store()).await?;
+    Ok(automerge_metrics(&docs))
   }
 }
 

@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        feature: [no-default, std]
+        feature: [no-default, std, automerge, automerge-redb]
       fail-fast: false
     steps:
       - name: Checkout
@@ -75,6 +75,10 @@ jobs:
         run: |
           if [ "${{ matrix.feature }}" = "no-default" ]; then
             cargo build --workspace --no-default-features --all-targets
+          elif [ "${{ matrix.feature }}" = "automerge" ]; then
+            cargo build --workspace --no-default-features --features automerge --all-targets
+          elif [ "${{ matrix.feature }}" = "automerge-redb" ]; then
+            cargo build --workspace --no-default-features --features "automerge redb" --all-targets
           else
             cargo build --workspace --features std --all-targets
           fi
@@ -83,6 +87,10 @@ jobs:
         run: |
           if [ "${{ matrix.feature }}" = "no-default" ]; then
             cargo test --workspace --no-default-features --all-targets
+          elif [ "${{ matrix.feature }}" = "automerge" ]; then
+            cargo test --workspace --no-default-features --features automerge --all-targets
+          elif [ "${{ matrix.feature }}" = "automerge-redb" ]; then
+            cargo test --workspace --no-default-features --features "automerge redb" --all-targets
           else
             cargo test --workspace --features std --all-targets
           fi

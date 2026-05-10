@@ -56,6 +56,13 @@ pub type RedbAutomergeStore = AutomergeEngineStore<
 pub type InMemoryAutomergeStore =
   AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
 
+#[cfg(feature = "automerge")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AutomergeSyncMetrics {
+  pub document_count: usize,
+  pub total_document_bytes: usize,
+}
+
 pub trait FacadeStore:
   Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
 {
