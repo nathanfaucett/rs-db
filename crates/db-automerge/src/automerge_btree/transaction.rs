@@ -1,8 +1,4 @@
-use std::{
-  borrow::Borrow,
-  collections::BTreeMap,
-  ops::{Bound, RangeBounds},
-};
+use std::{borrow::Borrow, collections::BTreeMap, ops::RangeBounds};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
@@ -15,39 +11,8 @@ use super::codec::encode_doc_key_range_value_codec;
 use super::hash::hash_heads;
 use super::key::{all_document_bounds, document_entry_bounds};
 use super::reconstruction::reconstruct;
+use super::scan::uuid_in_range;
 use super::{AutomergeEntry, DocumentChangeKey, DocumentType, encode_doc_key_range};
-
-fn key_in_range<K: Ord, R: RangeBounds<K>>(range: &R, key: &K) -> bool {
-  match range.start_bound() {
-    Bound::Included(lower) => {
-      if key < lower {
-        return false;
-      }
-    }
-    Bound::Excluded(lower) => {
-      if key <= lower {
-        return false;
-      }
-    }
-    Bound::Unbounded => {}
-  }
-
-  match range.end_bound() {
-    Bound::Included(upper) => {
-      if key > upper {
-        return false;
-      }
-    }
-    Bound::Excluded(upper) => {
-      if key >= upper {
-        return false;
-      }
-    }
-    Bound::Unbounded => {}
-  }
-
-  true
-}
 
 fn reconstruct_state(
   latest_snapshot: Option<Vec<u8>>,
@@ -78,7 +43,7 @@ fn apply_pending_overrides<R>(
   R: RangeBounds<Uuid>,
 {
   for (doc_id, op) in pending {
-    if !key_in_range(range, doc_id) {
+    if !uuid_in_range(range, doc_id) {
       continue;
     }
 
@@ -334,7 +299,7 @@ where
       apply_pending_overrides(&range, &self.pending, &mut merged);
 
       for (doc_id, state) in merged.into_iter() {
-        if !key_in_range(&range, &doc_id) {
+        if !uuid_in_range(&range, &doc_id) {
           continue;
         }
         match load_autocommit(&state) {
@@ -586,7 +551,7 @@ where
       apply_pending_overrides(&range, &self.pending, &mut merged);
 
       for (doc_id, state) in merged.into_iter() {
-        if !key_in_range(&range, &doc_id) {
+        if !uuid_in_range(&range, &doc_id) {
           continue;
         }
         match load_autocommit(&state) { Ok(doc) => yield Ok((doc_id, doc)), Err(e) => yield Err(e), }

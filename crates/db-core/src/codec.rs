@@ -147,16 +147,20 @@ pub fn encode_version_into_sink<S: BufferSink>(sink: &mut S) {
   sink.push_bytes(&[CURRENT_CODEC_VERSION]);
 }
 
+fn encode_be_bytes_into_sink<S: BufferSink, const N: usize>(sink: &mut S, bytes: [u8; N]) {
+  sink.push_bytes(&bytes);
+}
+
 pub fn encode_u32_into_sink<S: BufferSink>(sink: &mut S, value: u32) {
-  sink.push_bytes(&value.to_be_bytes());
+  encode_be_bytes_into_sink(sink, value.to_be_bytes());
 }
 
 pub fn encode_u64_into_sink<S: BufferSink>(sink: &mut S, value: u64) {
-  sink.push_bytes(&value.to_be_bytes());
+  encode_be_bytes_into_sink(sink, value.to_be_bytes());
 }
 
 pub fn encode_i64_into_sink<S: BufferSink>(sink: &mut S, value: i64) {
-  sink.push_bytes(&value.to_be_bytes());
+  encode_be_bytes_into_sink(sink, value.to_be_bytes());
 }
 
 pub fn encode_len_into_sink<S: BufferSink>(sink: &mut S, len: usize) {
@@ -212,22 +216,22 @@ impl<'a> Cursor<'a> {
     Ok(s[0])
   }
 
+  fn read_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
+    let mut bytes = [0_u8; N];
+    bytes.copy_from_slice(self.read_exact(N)?);
+    Ok(bytes)
+  }
+
   pub fn read_u32(&mut self) -> Result<u32, DecodeError> {
-    let mut bytes = [0_u8; 4];
-    bytes.copy_from_slice(self.read_exact(4)?);
-    Ok(u32::from_be_bytes(bytes))
+    Ok(u32::from_be_bytes(self.read_array()?))
   }
 
   pub fn read_u64(&mut self) -> Result<u64, DecodeError> {
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(self.read_exact(8)?);
-    Ok(u64::from_be_bytes(bytes))
+    Ok(u64::from_be_bytes(self.read_array()?))
   }
 
   pub fn read_i64(&mut self) -> Result<i64, DecodeError> {
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(self.read_exact(8)?);
-    Ok(i64::from_be_bytes(bytes))
+    Ok(i64::from_be_bytes(self.read_array()?))
   }
 
   pub fn read_exact(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {

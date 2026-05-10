@@ -67,25 +67,19 @@ pub enum StoreValue {
   IndexSchema(crate::schema::IndexSchema),
 }
 
+macro_rules! store_value_accessor {
+  ($name:ident, $variant:ident, $value:ty) => {
+    pub fn $name(&self) -> Option<&$value> {
+      match self {
+        StoreValue::$variant(value) => Some(value),
+        _ => None,
+      }
+    }
+  };
+}
+
 impl StoreValue {
-  pub fn as_row(&self) -> Option<&EngineRow> {
-    match self {
-      StoreValue::Row(row) => Some(row),
-      _ => None,
-    }
-  }
-
-  pub fn as_table_schema(&self) -> Option<&crate::schema::TableSchema> {
-    match self {
-      StoreValue::TableSchema(schema) => Some(schema),
-      _ => None,
-    }
-  }
-
-  pub fn as_index_schema(&self) -> Option<&crate::schema::IndexSchema> {
-    match self {
-      StoreValue::IndexSchema(schema) => Some(schema),
-      _ => None,
-    }
-  }
+  store_value_accessor!(as_row, Row, EngineRow);
+  store_value_accessor!(as_table_schema, TableSchema, crate::schema::TableSchema);
+  store_value_accessor!(as_index_schema, IndexSchema, crate::schema::IndexSchema);
 }

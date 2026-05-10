@@ -27,18 +27,40 @@ where
   rows.into_iter().map(|row| decode(&row)).collect()
 }
 
+fn encode_schema<T>(schema: &T, encode: impl FnOnce(&mut Vec<u8>, &T)) -> Vec<EngineValue> {
+  let mut buf = Vec::new();
+  encode(&mut buf, schema);
+  Vec::from([EngineValue::Blob(buf)])
+}
+
+fn decode_schema_row<T>(
+  row: &[EngineValue],
+  decode: impl FnOnce(&mut db_core::Cursor<'_>) -> Result<T, db_core::DecodeError>,
+) -> Result<T, db_core::DecodeError> {
+  match row.first() {
+    Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode),
+    _ => Err(db_core::DecodeError::Malformed),
+  }
+}
+
+fn prefixed_tree(prefix: &str, name: &str) -> String {
+  let mut tree = String::from(prefix);
+  tree.push_str(name);
+  tree
+}
+
+fn schema_entry_key(name: impl Into<String>) -> EngineKey {
+  EngineKey::Scalar(EngineValue::Text(name.into()))
+}
+
 /// Prefix used for row trees: `"t:{table_name}"`.
 pub fn row_tree(table_name: &str) -> String {
-  let mut name = String::from("t:");
-  name.push_str(table_name);
-  name
+  prefixed_tree("t:", table_name)
 }
 
 /// Prefix used for index trees: `"i:{index_name}"`.
 pub fn index_tree(index_name: &str) -> String {
-  let mut name = String::from("i:");
-  name.push_str(index_name);
-  name
+  prefixed_tree("i:", index_name)
 }
 
 /// Well-known tree holding all table schemas.
@@ -47,11 +69,11 @@ pub const TABLE_SCHEMA_TREE: &str = "sys:table_schemas";
 pub const INDEX_SCHEMA_TREE: &str = "sys:index_schemas";
 
 pub fn table_schema_entry_key(table_name: impl Into<String>) -> EngineKey {
-  EngineKey::Scalar(EngineValue::Text(table_name.into()))
+  schema_entry_key(table_name)
 }
 
 pub fn index_schema_entry_key(index_name: impl Into<String>) -> EngineKey {
-  EngineKey::Scalar(EngineValue::Text(index_name.into()))
+  schema_entry_key(index_name)
 }
 
 /// Load catalog entries (table schemas and index schemas) from a storage
@@ -93,12 +115,8 @@ pub fn range_table_schema_entries_impl<'a, T>(
 where
   T: BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
 {
-  let start = StoreKey::table_schema(String::new());
-  tx.range(start..).take_while(move |res| {
-    futures::future::ready(match res {
-      Ok((key, _)) => matches!(key, StoreKey::TableSchema { .. }),
-      Err(_) => false,
-    })
+  range_schema_entries_impl(tx, StoreKey::table_schema(String::new()), |key| {
+    matches!(key, StoreKey::TableSchema { .. })
   })
 }
 
@@ -108,10 +126,23 @@ pub fn range_index_schema_entries_impl<'a, T>(
 where
   T: BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
 {
-  let start = StoreKey::index_schema(String::new());
+  range_schema_entries_impl(tx, StoreKey::index_schema(String::new()), |key| {
+    matches!(key, StoreKey::IndexSchema { .. })
+  })
+}
+
+fn range_schema_entries_impl<'a, T, F>(
+  tx: &'a T,
+  start: StoreKey,
+  matches_schema: F,
+) -> impl futures::Stream<Item = Result<(StoreKey, StoreValue), db_core::BTreeError>> + 'a
+where
+  T: BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
+  F: Fn(&StoreKey) -> bool + Copy + 'a,
+{
   tx.range(start..).take_while(move |res| {
     futures::future::ready(match res {
-      Ok((key, _)) => matches!(key, StoreKey::IndexSchema { .. }),
+      Ok((key, _)) => matches_schema(key),
       Err(_) => false,
     })
   })
@@ -170,16 +201,11 @@ where
 }
 
 pub fn encode_table_schema(schema: &TableSchema) -> Vec<EngineValue> {
-  let mut buf = Vec::new();
-  encode_table_schema_into_sink(&mut buf, schema);
-  Vec::from([EngineValue::Blob(buf)])
+  encode_schema(schema, encode_table_schema_into_sink)
 }
 
 pub fn decode_table_schema_row(row: &[EngineValue]) -> Result<TableSchema, db_core::DecodeError> {
-  match row.first() {
-    Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode_table_schema),
-    _ => Err(db_core::DecodeError::Malformed),
-  }
+  decode_schema_row(row, decode_table_schema)
 }
 
 pub fn decode_table_schema_rows<I>(rows: I) -> Result<Vec<TableSchema>, db_core::DecodeError>
@@ -190,16 +216,11 @@ where
 }
 
 pub fn encode_index_schema(schema: &IndexSchema) -> Vec<EngineValue> {
-  let mut buf = Vec::new();
-  encode_index_schema_into_sink(&mut buf, schema);
-  Vec::from([EngineValue::Blob(buf)])
+  encode_schema(schema, encode_index_schema_into_sink)
 }
 
 pub fn decode_index_schema_row(row: &[EngineValue]) -> Result<IndexSchema, db_core::DecodeError> {
-  match row.first() {
-    Some(EngineValue::Blob(bytes)) => db_core::decode_from_slice(bytes, decode_index_schema),
-    _ => Err(db_core::DecodeError::Malformed),
-  }
+  decode_schema_row(row, decode_index_schema)
 }
 
 pub fn decode_index_schema_rows<I>(rows: I) -> Result<Vec<IndexSchema>, db_core::DecodeError>

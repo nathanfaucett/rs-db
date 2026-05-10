@@ -281,6 +281,19 @@ mod tests {
     m
   }
 
+  fn col(index: usize) -> QualifiedColumn {
+    QualifiedColumn {
+      table: "t".into(),
+      column_index: index,
+    }
+  }
+
+  fn aggregate_rows(aggregates: Vec<Aggregate>, input: Vec<PartialRow>) -> Vec<EngineRow> {
+    Aggregator::new(vec![], aggregates, None, vec![], None, None, input)
+      .execute()
+      .unwrap()
+  }
+
   #[test]
   fn count_star_all_rows() {
     let input = vec![
@@ -288,65 +301,30 @@ mod tests {
       make_partial("t", vec![EngineValue::Integer(2)]),
       make_partial("t", vec![EngineValue::Integer(3)]),
     ];
-    let agg = Aggregator::new(
-      vec![],
-      vec![Aggregate::Count(None)],
-      None,
-      vec![],
-      None,
-      None,
-      input,
-    );
-    let rows = agg.execute().unwrap();
+    let rows = aggregate_rows(vec![Aggregate::Count(None)], input);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], EngineValue::Integer(3));
   }
 
   #[test]
   fn sum_column() {
-    let col = QualifiedColumn {
-      table: "t".into(),
-      column_index: 0,
-    };
     let input = vec![
       make_partial("t", vec![EngineValue::Integer(10)]),
       make_partial("t", vec![EngineValue::Integer(20)]),
       make_partial("t", vec![EngineValue::Integer(30)]),
     ];
-    let agg = Aggregator::new(
-      vec![],
-      vec![Aggregate::Sum(col)],
-      None,
-      vec![],
-      None,
-      None,
-      input,
-    );
-    let rows = agg.execute().unwrap();
+    let rows = aggregate_rows(vec![Aggregate::Sum(col(0))], input);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], EngineValue::Float(60.0));
   }
 
   #[test]
   fn avg_column() {
-    let col = QualifiedColumn {
-      table: "t".into(),
-      column_index: 0,
-    };
     let input = vec![
       make_partial("t", vec![EngineValue::Integer(10)]),
       make_partial("t", vec![EngineValue::Integer(20)]),
     ];
-    let agg = Aggregator::new(
-      vec![],
-      vec![Aggregate::Avg(col)],
-      None,
-      vec![],
-      None,
-      None,
-      input,
-    );
-    let rows = agg.execute().unwrap();
+    let rows = aggregate_rows(vec![Aggregate::Avg(col(0))], input);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], EngineValue::Float(15.0));
   }

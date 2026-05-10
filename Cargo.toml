@@ -60,7 +60,7 @@ members = [
     "crates/db-redb",
     "crates/db-automerge",
     "crates/db-sql-to-engine",
-    "crates/db-wasm"
+    "crates/db-wasm",
 ]
 resolver = "2"
 

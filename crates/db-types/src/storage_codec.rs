@@ -13,26 +13,27 @@ use crate::{
   },
 };
 
-fn encode_key_versioned(value: &EngineKey) -> Vec<u8> {
+fn encode_versioned<T>(value: &T, encode: impl FnOnce(&mut Vec<u8>, &T)) -> Vec<u8> {
   let mut out = Vec::new();
   encode_version_into_sink(&mut out);
-  encode_engine_key_into_sink(&mut out, value);
+  encode(&mut out, value);
   out
+}
+
+fn encode_key_versioned(value: &EngineKey) -> Vec<u8> {
+  encode_versioned(value, encode_engine_key_into_sink)
 }
 
 fn decode_key_versioned(data: &[u8]) -> Result<EngineKey, db_core::DecodeError> {
   decode_with_version(data, decode_engine_key)
 }
 
-fn encode_row_versioned(value: &EngineRow) -> Vec<u8> {
-  let mut out = Vec::new();
-  encode_version_into_sink(&mut out);
-  encode_engine_row_into_sink(&mut out, value);
-  out
-}
-
 fn decode_row_versioned(data: &[u8]) -> Result<EngineRow, db_core::DecodeError> {
   decode_with_version(data, decode_engine_row)
+}
+
+fn encode_row_versioned(value: &EngineRow) -> Vec<u8> {
+  encode_versioned(value, encode_engine_row_into_sink)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,25 +42,37 @@ pub struct EngineKeyCodec;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EngineRowCodec;
 
-impl ValueCodec<EngineKey> for EngineKeyCodec {
-  type Bytes<'a>
-    = Vec<u8>
-  where
-    Self: 'a,
-    EngineKey: 'a;
+macro_rules! impl_engine_value_codec {
+  ($codec:ty, $value:ty, $encode:ident, $decode:ident, $expect:literal) => {
+    impl ValueCodec<$value> for $codec {
+      type Bytes<'a>
+        = Vec<u8>
+      where
+        Self: 'a,
+        $value: 'a;
 
-  fn encode<'a>(value: &'a EngineKey) -> Self::Bytes<'a> {
-    encode_key_versioned(value)
-  }
+      fn encode<'a>(value: &'a $value) -> Self::Bytes<'a> {
+        $encode(value)
+      }
 
-  fn decode(data: &[u8]) -> EngineKey {
-    decode_key_versioned(data).expect("decode engine key failed")
-  }
+      fn decode(data: &[u8]) -> $value {
+        $decode(data).expect($expect)
+      }
 
-  fn decode_checked(data: &[u8]) -> Result<EngineKey, db_core::DecodeError> {
-    decode_key_versioned(data)
-  }
+      fn decode_checked(data: &[u8]) -> Result<$value, db_core::DecodeError> {
+        $decode(data)
+      }
+    }
+  };
 }
+
+impl_engine_value_codec!(
+  EngineKeyCodec,
+  EngineKey,
+  encode_key_versioned,
+  decode_key_versioned,
+  "decode engine key failed"
+);
 
 impl KeyCodec<EngineKey> for EngineKeyCodec {
   fn compare(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
@@ -69,25 +82,13 @@ impl KeyCodec<EngineKey> for EngineKeyCodec {
   }
 }
 
-impl ValueCodec<EngineRow> for EngineRowCodec {
-  type Bytes<'a>
-    = Vec<u8>
-  where
-    Self: 'a,
-    EngineRow: 'a;
-
-  fn encode<'a>(value: &'a EngineRow) -> Self::Bytes<'a> {
-    encode_row_versioned(value)
-  }
-
-  fn decode(data: &[u8]) -> EngineRow {
-    decode_row_versioned(data).expect("decode engine row failed")
-  }
-
-  fn decode_checked(data: &[u8]) -> Result<EngineRow, db_core::DecodeError> {
-    decode_row_versioned(data)
-  }
-}
+impl_engine_value_codec!(
+  EngineRowCodec,
+  EngineRow,
+  encode_row_versioned,
+  decode_row_versioned,
+  "decode engine row failed"
+);
 
 #[cfg(test)]
 mod tests {

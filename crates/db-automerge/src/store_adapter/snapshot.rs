@@ -26,16 +26,31 @@ type SnapshotRemoveOutcome<A> = (Option<<A as SnapshotAdapter>::Value>, Option<V
 
 pub(crate) struct StoreSnapshotAdapter;
 
+fn decode_snapshot_value<T>(
+  cursor: &mut Cursor<'_>,
+  decode: impl FnOnce(&mut Cursor<'_>) -> Result<T, DecodeError>,
+) -> Result<T, BTreeError> {
+  decode(cursor).map_err(BTreeError::other)
+}
+
+fn encode_versioned_snapshot_value<T>(
+  buffer: &mut Vec<u8>,
+  value: &T,
+  encode: impl FnOnce(&mut Vec<u8>, &T),
+) {
+  encode_with_version(buffer, |sink| encode(sink, value));
+}
+
 impl SnapshotAdapter for StoreSnapshotAdapter {
   type Key = StoreKey;
   type Value = StoreValue;
 
   fn decode_key(cursor: &mut Cursor<'_>) -> Result<Self::Key, BTreeError> {
-    decode_store_key(cursor).map_err(BTreeError::other)
+    decode_snapshot_value(cursor, decode_store_key)
   }
 
   fn decode_value(cursor: &mut Cursor<'_>) -> Result<Self::Value, BTreeError> {
-    decode_store_value(cursor).map_err(BTreeError::other)
+    decode_snapshot_value(cursor, decode_store_value)
   }
 
   fn encode_key(buffer: &mut Vec<u8>, key: &Self::Key) {
@@ -54,19 +69,19 @@ impl SnapshotAdapter for EngineSnapshotAdapter {
   type Value = EngineRow;
 
   fn decode_key(cursor: &mut Cursor<'_>) -> Result<Self::Key, BTreeError> {
-    decode_engine_key(cursor).map_err(BTreeError::other)
+    decode_snapshot_value(cursor, decode_engine_key)
   }
 
   fn decode_value(cursor: &mut Cursor<'_>) -> Result<Self::Value, BTreeError> {
-    decode_engine_row(cursor).map_err(BTreeError::other)
+    decode_snapshot_value(cursor, decode_engine_row)
   }
 
   fn encode_key(buffer: &mut Vec<u8>, key: &Self::Key) {
-    encode_with_version(buffer, |sink| encode_engine_key_into_sink(sink, key));
+    encode_versioned_snapshot_value(buffer, key, encode_engine_key_into_sink);
   }
 
   fn encode_value(buffer: &mut Vec<u8>, value: &Self::Value) {
-    encode_with_version(buffer, |sink| encode_engine_row_into_sink(sink, value));
+    encode_versioned_snapshot_value(buffer, value, encode_engine_row_into_sink);
   }
 }
 

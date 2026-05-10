@@ -34,6 +34,10 @@ pub(crate) async fn execute_query(
   Ok(result)
 }
 
+fn empty_result() -> EngineResult {
+  EngineResult::new(Vec::new())
+}
+
 async fn drop_table(
   database: &mut Database<impl FacadeStore>,
   name: &str,
@@ -66,19 +70,19 @@ pub(crate) async fn execute_sql(
     Ok(CanonicalStatement::Query(query)) => execute_query(database, query).await,
     Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
       register_table(database, schema).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
       drop_table(database, &name).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
       register_index(database, schema).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
       drop_index(database, &name).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     Err(e) => Err(DatabaseError::Other(format!("{e}"))),
   }
@@ -134,7 +138,7 @@ pub(crate) async fn transaction_execute_sql(
   match query {
     EngineQuery::Insert { table, row } => {
       transaction_insert_row(transaction, &table, row).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     EngineQuery::Update {
       table,
@@ -142,11 +146,11 @@ pub(crate) async fn transaction_execute_sql(
       predicate,
     } => {
       transaction_update_rows(transaction, &table, assignments, predicate).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     EngineQuery::Delete { table, predicate } => {
       transaction_delete_rows(transaction, &table, predicate).await?;
-      Ok(EngineResult::new(Vec::new()))
+      Ok(empty_result())
     }
     EngineQuery::Select { .. } => Err(DatabaseError::Other(
       "SELECT inside transaction not supported; use Database::execute_sql instead".into(),

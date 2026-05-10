@@ -25,17 +25,18 @@ pub(crate) struct EncodedKey<K, C>(PhantomData<(K, C)>);
 #[derive(Clone, Copy)]
 pub(crate) struct EncodedValue<V, C>(PhantomData<(V, C)>);
 
-impl<K, C> Debug for EncodedKey<K, C> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.write_str("EncodedKey")
-  }
+macro_rules! impl_encoded_debug {
+  ($encoded:ident<$value:ident>, $name:literal) => {
+    impl<$value, C> Debug for $encoded<$value, C> {
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str($name)
+      }
+    }
+  };
 }
 
-impl<V, C> Debug for EncodedValue<V, C> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.write_str("EncodedValue")
-  }
-}
+impl_encoded_debug!(EncodedKey<K>, "EncodedKey");
+impl_encoded_debug!(EncodedValue<V>, "EncodedValue");
 
 impl<T> ValueCodec<T> for RedbKeyCodec
 where
@@ -110,42 +111,49 @@ where
   }
 }
 
-impl<K, C> Value for EncodedKey<K, C>
-where
-  K: Debug + 'static,
-  C: KeyCodec<K>,
-{
-  type SelfType<'a>
-    = K
-  where
-    Self: 'a;
-  type AsBytes<'a>
-    = C::Bytes<'a>
-  where
-    Self: 'a;
+macro_rules! impl_encoded_value {
+  ($encoded:ident<$value:ident>, $codec:ident) => {
+    impl<$value, C> Value for $encoded<$value, C>
+    where
+      $value: Debug + 'static,
+      C: $codec<$value>,
+    {
+      type SelfType<'a>
+        = $value
+      where
+        Self: 'a;
+      type AsBytes<'a>
+        = C::Bytes<'a>
+      where
+        Self: 'a;
 
-  fn fixed_width() -> Option<usize> {
-    C::fixed_width()
-  }
+      fn fixed_width() -> Option<usize> {
+        C::fixed_width()
+      }
 
-  fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-  where
-    Self: 'a,
-  {
-    C::decode_checked(data).unwrap_or_else(|e| panic!("decode failed: {}", e))
-  }
+      fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+      where
+        Self: 'a,
+      {
+        C::decode_checked(data).unwrap_or_else(|e| panic!("decode failed: {}", e))
+      }
 
-  fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-  where
-    Self: 'b,
-  {
-    C::encode(value)
-  }
+      fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+      where
+        Self: 'b,
+      {
+        C::encode(value)
+      }
 
-  fn type_name() -> TypeName {
-    TypeName::new(core::any::type_name::<Self>())
-  }
+      fn type_name() -> TypeName {
+        TypeName::new(core::any::type_name::<Self>())
+      }
+    }
+  };
 }
+
+impl_encoded_value!(EncodedKey<K>, KeyCodec);
+impl_encoded_value!(EncodedValue<V>, ValueCodec);
 
 impl<K, C> Key for EncodedKey<K, C>
 where
@@ -154,43 +162,6 @@ where
 {
   fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
     C::compare(data1, data2)
-  }
-}
-
-impl<V, C> Value for EncodedValue<V, C>
-where
-  V: Debug + 'static,
-  C: ValueCodec<V>,
-{
-  type SelfType<'a>
-    = V
-  where
-    Self: 'a;
-  type AsBytes<'a>
-    = C::Bytes<'a>
-  where
-    Self: 'a;
-
-  fn fixed_width() -> Option<usize> {
-    C::fixed_width()
-  }
-
-  fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-  where
-    Self: 'a,
-  {
-    C::decode_checked(data).unwrap_or_else(|e| panic!("decode failed: {}", e))
-  }
-
-  fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-  where
-    Self: 'b,
-  {
-    C::encode(value)
-  }
-
-  fn type_name() -> TypeName {
-    TypeName::new(core::any::type_name::<Self>())
   }
 }
 

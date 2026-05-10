@@ -1,13 +1,15 @@
 use futures::executor::block_on;
 
 use db_engine::{
-  Aggregate, ColumnSchema, EngineDatabase, EngineKey, EngineQuery, EngineType, EngineValue,
-  HavingPredicate, OrderBy, QualifiedColumn, QualifiedOperand, QualifiedPredicate, RefOrAgg,
-  SelectOptions, SortDirection, TableSchema,
+  Aggregate, ColumnSchema, EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineType,
+  EngineValue, HavingPredicate, OrderBy, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
+  RefOrAgg, SelectOptions, SortDirection, TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
 
-fn make_db_with_items() -> EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<EngineValue>>> {
+type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<EngineValue>>>;
+
+fn make_db_with_items() -> TestDb {
   let store: InMemoryNamedBTree<EngineKey, Vec<EngineValue>> = InMemoryNamedBTree::new();
   let mut db = EngineDatabase::new(store);
   block_on(async {
@@ -61,6 +63,35 @@ fn qcol(table: &str, col: usize) -> QualifiedColumn {
   }
 }
 
+async fn select_items(
+  db: &TestDb,
+  projection: Vec<QualifiedColumn>,
+  predicate: Option<QualifiedPredicate>,
+  options: SelectOptions,
+) -> EngineResult {
+  db.execute(EngineQuery::Select {
+    table: "items".into(),
+    projection,
+    predicate,
+    options: Box::new(options),
+  })
+  .await
+  .expect("select")
+}
+
+macro_rules! select_items_test {
+  ($name:ident, $projection:expr, $options:expr, |$res:ident| $assertions:block) => {
+    #[test]
+    fn $name() {
+      let db = make_db_with_items();
+      block_on(async {
+        let $res = select_items(&db, $projection, None, $options).await;
+        $assertions
+      });
+    }
+  };
+}
+
 #[test]
 fn engine_works_with_mock_btree() {
   block_on(async {
@@ -111,196 +142,124 @@ fn engine_works_with_mock_btree() {
   });
 }
 
-#[test]
-fn order_by_asc_with_limit_and_offset() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![qcol("items", 0), qcol("items", 2)],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          order_by: vec![OrderBy {
-            expr: qcol("items", 2),
-            direction: SortDirection::Asc,
-          }],
-          limit: Some(2),
-          offset: Some(1),
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  order_by_asc_with_limit_and_offset,
+  vec![qcol("items", 0), qcol("items", 2)],
+  SelectOptions {
+    order_by: vec![OrderBy {
+      expr: qcol("items", 2),
+      direction: SortDirection::Asc,
+    }],
+    limit: Some(2),
+    offset: Some(1),
+    ..Default::default()
+  },
+  |res| {
     // Scores sorted asc: 70, 80, 80, 90, 90 — skip 1 (score=70 → Carol id=3), take 2
     // After offset=1 we get the two score=80 rows (id=1 Alice, id=5 Eve) in some order
     assert_eq!(res.rows.len(), 2);
     for row in &res.rows {
       assert_eq!(row[1], EngineValue::Integer(80));
     }
-  });
-}
+  }
+);
 
-#[test]
-fn order_by_desc() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![qcol("items", 2)],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          order_by: vec![OrderBy {
-            expr: qcol("items", 2),
-            direction: SortDirection::Desc,
-          }],
-          limit: Some(1),
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  order_by_desc,
+  vec![qcol("items", 2)],
+  SelectOptions {
+    order_by: vec![OrderBy {
+      expr: qcol("items", 2),
+      direction: SortDirection::Desc,
+    }],
+    limit: Some(1),
+    ..Default::default()
+  },
+  |res| {
     assert_eq!(res.rows.len(), 1);
     assert_eq!(res.rows[0][0], EngineValue::Integer(90));
-  });
-}
+  }
+);
 
-#[test]
-fn distinct_removes_duplicates() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![qcol("items", 2)],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          distinct: true,
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  distinct_removes_duplicates,
+  vec![qcol("items", 2)],
+  SelectOptions {
+    distinct: true,
+    ..Default::default()
+  },
+  |res| {
     // scores: 70, 80, 90 — three distinct values
     assert_eq!(res.rows.len(), 3);
-  });
-}
+  }
+);
 
-#[test]
-fn count_star_returns_row_count() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          aggregates: vec![Aggregate::Count(None)],
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  count_star_returns_row_count,
+  vec![],
+  SelectOptions {
+    aggregates: vec![Aggregate::Count(None)],
+    ..Default::default()
+  },
+  |res| {
     assert_eq!(res.rows.len(), 1);
     assert_eq!(res.rows[0][0], EngineValue::Integer(5));
-  });
-}
+  }
+);
 
-#[test]
-fn sum_column_aggregation() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          aggregates: vec![Aggregate::Sum(qcol("items", 2))],
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  sum_column_aggregation,
+  vec![],
+  SelectOptions {
+    aggregates: vec![Aggregate::Sum(qcol("items", 2))],
+    ..Default::default()
+  },
+  |res| {
     // 80 + 90 + 70 + 90 + 80 = 410
     assert_eq!(res.rows.len(), 1);
     assert_eq!(res.rows[0][0], EngineValue::Float(410.0));
-  });
-}
+  }
+);
 
-#[test]
-fn avg_column_aggregation() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          aggregates: vec![Aggregate::Avg(qcol("items", 2))],
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  avg_column_aggregation,
+  vec![],
+  SelectOptions {
+    aggregates: vec![Aggregate::Avg(qcol("items", 2))],
+    ..Default::default()
+  },
+  |res| {
     assert_eq!(res.rows.len(), 1);
     assert_eq!(res.rows[0][0], EngineValue::Float(82.0));
-  });
-}
+  }
+);
 
-#[test]
-fn min_max_aggregation() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          aggregates: vec![
-            Aggregate::Min(qcol("items", 2)),
-            Aggregate::Max(qcol("items", 2)),
-          ],
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  min_max_aggregation,
+  vec![],
+  SelectOptions {
+    aggregates: vec![
+      Aggregate::Min(qcol("items", 2)),
+      Aggregate::Max(qcol("items", 2)),
+    ],
+    ..Default::default()
+  },
+  |res| {
     assert_eq!(res.rows.len(), 1);
     assert_eq!(res.rows[0][0], EngineValue::Integer(70));
     assert_eq!(res.rows[0][1], EngineValue::Integer(90));
-  });
-}
+  }
+);
 
-#[test]
-fn group_by_score_count() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          group_by: vec![qcol("items", 2)],
-          aggregates: vec![Aggregate::Count(None)],
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  group_by_score_count,
+  vec![],
+  SelectOptions {
+    group_by: vec![qcol("items", 2)],
+    aggregates: vec![Aggregate::Count(None)],
+    ..Default::default()
+  },
+  |res| {
     // Groups: 70→1, 80→2, 90→2
     assert_eq!(res.rows.len(), 3);
     let mut rows = res.rows.clone();
@@ -320,38 +279,29 @@ fn group_by_score_count() {
       rows[2],
       vec![EngineValue::Integer(90), EngineValue::Integer(2)]
     );
-  });
-}
+  }
+);
 
-#[test]
-fn group_by_having_filters_groups() {
-  let db = make_db_with_items();
-  block_on(async {
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![],
-        predicate: None,
-        options: Box::new(SelectOptions {
-          group_by: vec![qcol("items", 2)],
-          aggregates: vec![Aggregate::Count(None)],
-          having: Some(HavingPredicate::GreaterThan(
-            RefOrAgg::AggregateIndex(0),
-            EngineValue::Integer(1),
-          )),
-          ..Default::default()
-        }),
-      })
-      .await
-      .expect("select");
-
+select_items_test!(
+  group_by_having_filters_groups,
+  vec![],
+  SelectOptions {
+    group_by: vec![qcol("items", 2)],
+    aggregates: vec![Aggregate::Count(None)],
+    having: Some(HavingPredicate::GreaterThan(
+      RefOrAgg::AggregateIndex(0),
+      EngineValue::Integer(1),
+    )),
+    ..Default::default()
+  },
+  |res| {
     // Only groups with count > 1: score=80 (2) and score=90 (2)
     assert_eq!(res.rows.len(), 2);
     for row in &res.rows {
       assert!(matches!(row[1], EngineValue::Integer(2)));
     }
-  });
-}
+  }
+);
 
 #[test]
 fn in_subquery_filters_rows() {
@@ -368,19 +318,17 @@ fn in_subquery_filters_rows() {
       )),
     );
 
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![qcol("items", 0)],
-        predicate: Some(QualifiedPredicate::InSubquery {
-          expr: qcol("items", 2),
-          subquery: Box::new(subquery),
-          negated: false,
-        }),
-        options: Box::new(SelectOptions::default()),
-      })
-      .await
-      .expect("select");
+    let res = select_items(
+      &db,
+      vec![qcol("items", 0)],
+      Some(QualifiedPredicate::InSubquery {
+        expr: qcol("items", 2),
+        subquery: Box::new(subquery),
+        negated: false,
+      }),
+      SelectOptions::default(),
+    )
+    .await;
 
     let mut ids: Vec<i64> = res
       .rows
@@ -410,19 +358,17 @@ fn not_in_subquery_excludes_rows() {
       )),
     );
 
-    let res = db
-      .execute(EngineQuery::Select {
-        table: "items".into(),
-        projection: vec![qcol("items", 0)],
-        predicate: Some(QualifiedPredicate::InSubquery {
-          expr: qcol("items", 2),
-          subquery: Box::new(subquery),
-          negated: true,
-        }),
-        options: Box::new(SelectOptions::default()),
-      })
-      .await
-      .expect("select");
+    let res = select_items(
+      &db,
+      vec![qcol("items", 0)],
+      Some(QualifiedPredicate::InSubquery {
+        expr: qcol("items", 2),
+        subquery: Box::new(subquery),
+        negated: true,
+      }),
+      SelectOptions::default(),
+    )
+    .await;
 
     let mut ids: Vec<i64> = res
       .rows

@@ -164,33 +164,24 @@ impl fmt::Display for EngineValue {
   }
 }
 
-impl From<i64> for EngineValue {
-  fn from(value: i64) -> Self {
-    EngineValue::Integer(value)
-  }
+macro_rules! impl_engine_value_from {
+  ($source:ty, $variant:ident) => {
+    impl From<$source> for EngineValue {
+      fn from(value: $source) -> Self {
+        EngineValue::$variant(value)
+      }
+    }
+  };
 }
 
-impl From<f64> for EngineValue {
-  fn from(value: f64) -> Self {
-    EngineValue::Float(value)
-  }
-}
-
-impl From<String> for EngineValue {
-  fn from(value: String) -> Self {
-    EngineValue::Text(value)
-  }
-}
+impl_engine_value_from!(i64, Integer);
+impl_engine_value_from!(f64, Float);
+impl_engine_value_from!(String, Text);
+impl_engine_value_from!(Vec<u8>, Blob);
 
 impl From<&str> for EngineValue {
   fn from(value: &str) -> Self {
     EngineValue::Text(value.to_string())
-  }
-}
-
-impl From<Vec<u8>> for EngineValue {
-  fn from(value: Vec<u8>) -> Self {
-    EngineValue::Blob(value)
   }
 }
 
