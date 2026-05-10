@@ -1,5 +1,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+#[cfg(feature = "wasm")]
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::ToString};
 #[cfg(feature = "std")]
 use std::string::String;
 
@@ -23,10 +26,10 @@ pub enum SchemaError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
-  feature = "ts",
+  feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
-#[cfg_attr(feature = "ts", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct ColumnSchema {
   pub name: String,
   pub data_type: EngineType,
@@ -47,10 +50,10 @@ impl ColumnSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
-  feature = "ts",
+  feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
-#[cfg_attr(feature = "ts", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct TableSchema {
   pub name: String,
   pub columns: Vec<ColumnSchema>,
@@ -105,10 +108,10 @@ impl TableSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
-  feature = "ts",
+  feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
-#[cfg_attr(feature = "ts", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct IndexSchema {
   pub name: String,
   pub table_name: String,

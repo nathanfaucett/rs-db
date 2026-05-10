@@ -414,14 +414,6 @@ where
   }
 }
 
-impl<B> db_core::StoragePort<StoreKey, StoreValue> for AutomergeEngineStore<B>
-where
-  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-  StoreKey: Clone + Ord + Send + Sync + 'static,
-  StoreValue: Clone + Send + Sync + 'static,
-{
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;

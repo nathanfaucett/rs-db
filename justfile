@@ -4,40 +4,43 @@ set shell := ["bash", "-cu"]
 default: help
 
 help:
-	@printf "Available recipes:\n"
-	@printf "  build          Build all workspace crates\n"
-	@printf "  build-release  Build all workspace crates in release mode\n"
-	@printf "  check          Check all workspace crates\n"
-	@printf "  test           Run workspace tests\n"
-	@printf "  clippy         Run clippy for all targets and workspace crates\n"
-	@printf "  clippy-fix     Run clippy with --fix for all targets and workspace crates\n"
-	@printf "  fmt            Format all workspace crates\n"
-	@printf "  clean          Remove build artifacts\n"
-	@printf "  doc            Build workspace documentation\n"
+    @printf "Available recipes:\n"
+    @printf "  build          Build all workspace crates\n"
+    @printf "  build-release  Build all workspace crates in release mode\n"
+    @printf "  check          Check all workspace crates\n"
+    @printf "  test           Run workspace tests\n"
+    @printf "  clippy         Run clippy for all targets and workspace crates\n"
+    @printf "  clippy-fix     Run clippy with --fix for all targets and workspace crates\n"
+    @printf "  fmt            Format all workspace crates\n"
+    @printf "  clean          Remove build artifacts\n"
+    @printf "  doc            Build workspace documentation\n"
 
 build:
-	cargo build --workspace
+    cargo build --workspace
 
 build-release:
-	cargo build --workspace --release
+    cargo build --workspace --release
 
 check:
-	cargo check --workspace
+    cargo check --workspace
 
 test:
-	cargo test --workspace
+    cargo test --workspace
 
 clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 clippy-fix:
-	cargo clippy --workspace --all-targets --fix --allow-dirty -- -D warnings
+    cargo clippy --workspace --all-targets --fix --allow-dirty -- -D warnings
 
 fmt:
-	cargo fmt --all
+    cargo fmt --all
 
 clean:
-	cargo clean
+    cargo clean
+
+wasm:
+    cd ./crates/db-wasm && wasm-pack build --target web
 
 doc:
-	cargo doc --workspace --no-deps
+    cargo doc --workspace --no-deps

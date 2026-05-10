@@ -1,7 +1,7 @@
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
-use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, StoragePort, TransactionPatch};
+use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, TransactionPatch};
 use futures::Stream;
 
 use crate::patch_map::{
@@ -180,17 +180,6 @@ where
       patch: TransactionPatch::default(),
     })
   }
-}
-
-// Begin adapter rewrite: explicitly implement the storage port trait so the
-// engine can depend on `db_core::StoragePort` instead of the older BTree
-// trait. For now this is a thin marker impl that signals the adapter
-// satisfies the port contract.
-impl<K, V> StoragePort<K, V> for InMemoryBTree<K, V>
-where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
-{
 }
 
 #[cfg(test)]

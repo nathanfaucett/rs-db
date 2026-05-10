@@ -1,0 +1,27 @@
+[package]
+name = "db-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "DB WASM"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+name = "db_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+wasm-bindgen = { version = "0.2" }
+console_error_panic_hook = {version = "0.1" }
+tsify = { version = "0.5" }
+# workspace dependencies
+db-core = { path = "../db-core", default-features = false, features = ["wasm"] }
+db-engine = { path = "../db-engine", default-features = false, features = ["wasm"] }
+db-in-memory = { path = "../db-in-memory", default-features = false, features = [] }
+db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = ["wasm"] }
+db-types = { path = "../db-types", default-features = false, features = ["wasm"] }

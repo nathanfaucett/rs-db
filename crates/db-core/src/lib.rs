@@ -6,7 +6,6 @@ mod blocking;
 mod btree;
 mod codec;
 mod named_tree;
-mod port;
 mod range_merge;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
@@ -29,7 +28,5 @@ pub use transaction_patch::{TransactionEntry, TransactionPatch};
 
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::MockBTree;
-
-pub use port::{IntoStoragePort, StoragePort};
 
 pub use named_tree::{NamedTreeProvider, NamedTreeTransaction};

@@ -6,6 +6,12 @@ description = "Engine layer of the database"
 
 [lib]
 path = "src/lib.rs"
+name = "db_engine"
+
+[features]
+default = ["std"]
+std = ["futures/std", "db-core/std", "db-in-memory/std"]
+wasm = ["tsify", "serde", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false }
@@ -33,8 +39,3 @@ db-in-memory = { path = "../db-in-memory", default-features = false, features = 
 db-redb = { path = "../db-redb", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 proptest = { version = "1.0", default-features = false, features = ["std"] }
-
-[features]
-default = ["std"]
-std = ["futures/std", "db-core/std", "db-in-memory/std"]
-ts = ["tsify", "serde", "serde-wasm-bindgen", "wasm-bindgen"]

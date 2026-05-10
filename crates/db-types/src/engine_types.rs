@@ -4,6 +4,9 @@ use core::hash::{Hash, Hasher};
 
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
+#[cfg(feature = "wasm")]
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, format};
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 
@@ -14,9 +17,10 @@ use std::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(
-  feature = "ts",
+  feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum EngineType {
   Integer,
   Float,
@@ -25,6 +29,11 @@ pub enum EngineType {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum EngineValue {
   Integer(i64),
   Float(f64),
@@ -192,6 +201,11 @@ impl From<&[u8]> for EngineValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum EngineKey {
   Scalar(EngineValue),
   Tuple(Vec<EngineValue>),

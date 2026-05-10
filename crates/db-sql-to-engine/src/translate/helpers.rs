@@ -1,3 +1,9 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+  format,
+  string::{String, ToString},
+};
+
 use hashbrown::HashMap;
 use sqlparser::ast::{Expr as SqlExpr, Value as SqlValue};
 

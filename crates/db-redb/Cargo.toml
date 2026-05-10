@@ -5,6 +5,7 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+name = "db_redb"
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false, features = ["std"] }

@@ -1,3 +1,10 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+  boxed::Box,
+  string::{String, ToString},
+  vec::Vec,
+};
+
 use hashbrown::HashMap;
 use sqlparser::ast::{
   Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator,

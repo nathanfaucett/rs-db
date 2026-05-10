@@ -5,7 +5,7 @@ use std::{
 use async_stream::stream;
 use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, FastKeyCodec, KeyCodec, KeyScratch,
-  StoragePort, ValueCodec,
+  ValueCodec,
 };
 use futures::Stream;
 use redb::{
@@ -387,14 +387,6 @@ where
 // Begin adapter rewrite: explicit StoragePort impl so this adapter is the
 // declared port implementation for the engine. The impl is empty since the
 // required methods are provided by the existing `BTree` implementation.
-impl<K, V, KC, VC> StoragePort<K, V> for REDBBTree<K, V, KC, VC>
-where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
-{
-}
 
 impl<K, V, KC, VC> BTreeExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where

@@ -1,5 +1,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+#[cfg(feature = "wasm")]
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, format, string::ToString};
 #[cfg(feature = "std")]
 use std::string::String;
 
@@ -9,9 +12,10 @@ use crate::{EngineKey, EngineRow};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
-  feature = "ts",
+  feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum StoreKey {
   TableRow {
     table_name: String,

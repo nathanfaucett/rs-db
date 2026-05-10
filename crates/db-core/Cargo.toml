@@ -12,7 +12,7 @@ path = "src/lib.rs"
 default = ["std"]
 std = ["futures/std", "serde/std"]
 test-helpers = ["async-lock", "async-stream"]
-ts = ["tsify"]
+wasm = ["tsify", "serde/derive", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = [] }
@@ -21,7 +21,14 @@ async-lock = { version = "3.4", default-features = false, features = [
 ], optional = true }
 async-stream = { version = "0.3", default-features = false, features = [
 ], optional = true }
-tsify = { version = "0.3", default-features = false, features = [
+
+# Optional TS generation + serde for tsify
+tsify = { version = "0.5", default-features = false, features = [
+  "js",
+], optional = true }
+serde-wasm-bindgen = { version = "0.6", default-features = false, optional = true }
+wasm-bindgen = { version = "0.2", default-features = false, features = [
+  "std",
 ], optional = true }
 
 thiserror = { version = "1.0", default-features = false }

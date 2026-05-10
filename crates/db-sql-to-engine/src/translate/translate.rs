@@ -1,3 +1,12 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+  boxed::Box,
+  format,
+  string::{String, ToString},
+  vec,
+  vec::Vec,
+};
+
 pub use db_engine::SchemaResolver;
 use hashbrown::HashMap;
 use sqlparser::ast::{

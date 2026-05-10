@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, format, string::String, vec::Vec};
+
 use hashbrown::HashMap;
 use sqlparser::ast::{BinaryOperator, Expr as SqlExpr, UnaryOperator};
 

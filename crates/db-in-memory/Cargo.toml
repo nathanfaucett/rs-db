@@ -5,6 +5,11 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+name = "db_in_memory"
+
+[features]
+default = []
+std = ["futures/std", "async-lock/std", "db-core/std"]
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false, features = [] }
@@ -14,7 +19,3 @@ async-lock = { version = "3.4", default-features = false, features = [] }
 
 [dev-dependencies]
 db-core = { path = "../db-core", default-features = false, features = ["std"] }
-
-[features]
-default = []
-std = ["futures/std", "async-lock/std", "db-core/std"]

@@ -1,7 +1,5 @@
-// Canonical IR scaffold for the SQL translator.
-// Currently this is a thin wrapper around the existing `EngineQuery` to
-// make incremental refactors easier. Future work should replace this with
-// a backend-agnostic canonical IR.
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 
 #[derive(Clone, Debug)]
 pub struct CanonicalQuery {
