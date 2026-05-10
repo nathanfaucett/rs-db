@@ -12,6 +12,35 @@ fn get_partial_column_value(
   }
 }
 
+fn right_column_value(row: &EngineRow, qc: &QualifiedColumn) -> Option<EngineValue> {
+  row.get(qc.column_index).cloned()
+}
+
+fn values_match(left: Option<&EngineValue>, right: Option<EngineValue>) -> bool {
+  matches!((left, right), (Some(left), Some(right)) if *left == right)
+}
+
+fn push_joined(
+  results: &mut Vec<HashMap<String, Option<EngineRow>>>,
+  partial: &HashMap<String, Option<EngineRow>>,
+  right_table: &str,
+  right_row: &EngineRow,
+) {
+  let mut joined = partial.clone();
+  joined.insert(right_table.to_string(), Some(right_row.clone()));
+  results.push(joined);
+}
+
+fn push_unmatched(
+  results: &mut Vec<HashMap<String, Option<EngineRow>>>,
+  partial: &HashMap<String, Option<EngineRow>>,
+  right_table: &str,
+) {
+  let mut joined = partial.clone();
+  joined.insert(right_table.to_string(), None);
+  results.push(joined);
+}
+
 pub fn apply_inner_join(
   partial_results: &[HashMap<String, Option<EngineRow>>],
   right_rows: &[EngineRow],
@@ -22,18 +51,10 @@ pub fn apply_inner_join(
   let mut new_results = Vec::new();
   for partial in partial_results {
     let left_val = get_partial_column_value(partial, left_qc);
-    if left_val.is_none() {
-      continue;
-    }
 
     for rr in right_rows {
-      let right_val = rr.get(right_qc.column_index).cloned();
-      if let (Some(lv), Some(rv)) = (left_val.clone(), right_val)
-        && lv == rv
-      {
-        let mut np = partial.clone();
-        np.insert(right_table.to_string(), Some(rr.clone()));
-        new_results.push(np);
+      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+        push_joined(&mut new_results, partial, right_table, rr);
       }
     }
   }
@@ -51,24 +72,15 @@ pub fn apply_left_join(
   for partial in partial_results {
     let mut matched = false;
     let left_val = get_partial_column_value(partial, left_qc);
-    if let Some(lv) = left_val.clone() {
-      for rr in right_rows {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          matched = true;
-        }
+    for rr in right_rows {
+      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+        push_joined(&mut new_results, partial, right_table, rr);
+        matched = true;
       }
     }
 
     if !matched {
-      let mut np = partial.clone();
-      np.insert(right_table.to_string(), None);
-      new_results.push(np);
+      push_unmatched(&mut new_results, partial, right_table);
     }
   }
   new_results
@@ -88,16 +100,9 @@ pub fn apply_right_join(
     let mut any = false;
     for partial in partial_results {
       let left_val = get_partial_column_value(partial, left_qc);
-      if let Some(lv) = left_val.clone() {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          any = true;
-        }
+      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+        push_joined(&mut new_results, partial, right_table, rr);
+        any = true;
       }
     }
 
@@ -125,25 +130,16 @@ pub fn apply_full_join(
   for partial in partial_results {
     let mut any = false;
     let left_val = get_partial_column_value(partial, left_qc);
-    if let Some(lv) = left_val.clone() {
-      for (ri, rr) in right_rows.iter().enumerate() {
-        let right_val = rr.get(right_qc.column_index).cloned();
-        if let Some(rv) = right_val
-          && lv == rv
-        {
-          let mut np = partial.clone();
-          np.insert(right_table.to_string(), Some(rr.clone()));
-          new_results.push(np);
-          matched[ri] = true;
-          any = true;
-        }
+    for (ri, rr) in right_rows.iter().enumerate() {
+      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+        push_joined(&mut new_results, partial, right_table, rr);
+        matched[ri] = true;
+        any = true;
       }
     }
 
     if !any {
-      let mut np = partial.clone();
-      np.insert(right_table.to_string(), None);
-      new_results.push(np);
+      push_unmatched(&mut new_results, partial, right_table);
     }
   }
 

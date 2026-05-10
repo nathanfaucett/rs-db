@@ -2,8 +2,6 @@ use std::borrow::Borrow;
 
 use async_stream::stream;
 use automerge::AutoCommit;
-use automerge::ReadDoc;
-use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -18,29 +16,12 @@ use db_types::{EngineKey, EngineRow};
 
 use super::AutomergeEngineStore;
 use super::snapshot::{
-  EngineSnapshotAdapter, decode_snapshot_base64, encode_snapshot_base64, find_entry, parse_entries,
-  set_entry,
+  EngineSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry, snapshot_bytes,
+  snapshot_doc,
 };
 
 fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, EngineRow)>, BTreeError> {
   parse_entries::<EngineSnapshotAdapter>(buf)
-}
-
-fn named_snapshot_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
-  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-    Ok(Some(decode_snapshot_base64(value)?))
-  } else {
-    Ok(None)
-  }
-}
-
-fn named_snapshot_doc(snapshot: &[u8]) -> Result<AutoCommit, BTreeError> {
-  let snapshot_str = encode_snapshot_base64(snapshot);
-  let mut doc = AutoCommit::new();
-  doc
-    .put(&automerge::ROOT, "snapshot", snapshot_str)
-    .map_err(BTreeError::other)?;
-  Ok(doc)
 }
 
 fn find_in_named_snapshot(buf: &[u8], needle: &EngineKey) -> Result<Option<EngineRow>, BTreeError> {
@@ -92,23 +73,6 @@ fn tree_uuid_range(tree: &str) -> (Uuid, Uuid) {
   (Uuid::from_bytes(start_bytes), Uuid::from_bytes(end_bytes))
 }
 
-fn in_engine_key_range<R>(key: &EngineKey, range: &R) -> bool
-where
-  R: core::ops::RangeBounds<EngineKey>,
-{
-  let start = match range.start_bound() {
-    std::ops::Bound::Included(lower) => key >= lower,
-    std::ops::Bound::Excluded(lower) => key > lower,
-    std::ops::Bound::Unbounded => true,
-  };
-  let end = match range.end_bound() {
-    std::ops::Bound::Included(upper) => key <= upper,
-    std::ops::Bound::Excluded(upper) => key < upper,
-    std::ops::Bound::Unbounded => true,
-  };
-  start && end
-}
-
 #[derive(Clone)]
 pub struct AutomergeNamedTree<B>
 where
@@ -149,7 +113,7 @@ where
     let Some(doc) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let Some(bytes) = named_snapshot_bytes(&doc)? else {
+    let Some(bytes) = snapshot_bytes(&doc)? else {
       return Ok(None);
     };
     find_in_named_snapshot(&bytes, key)
@@ -166,10 +130,7 @@ where
   {
     let doc_id = row_doc_id(tree, &key);
     let snapshot = set_in_named_snapshot(None, key, value)?;
-    self
-      .inner
-      .insert(doc_id, named_snapshot_doc(&snapshot)?)
-      .await
+    self.inner.insert(doc_id, snapshot_doc(&snapshot)?).await
   }
 
   async fn remove<'a>(
@@ -184,7 +145,7 @@ where
     let Some(existing) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let bytes = named_snapshot_bytes(&existing)?;
+    let bytes = snapshot_bytes(&existing)?;
     let removed = if let Some(ref b) = bytes {
       find_in_named_snapshot(b, key)?
     } else {
@@ -214,7 +175,7 @@ where
       let mut entries: alloc::vec::Vec<(EngineKey, EngineRow)> = alloc::vec::Vec::new();
       while let Some(item) = doc_stream.next().await {
         let (_uuid, doc) = item?;
-        let bytes = match named_snapshot_bytes(&doc) {
+        let bytes = match snapshot_bytes(&doc) {
           Ok(Some(b)) => b,
           Ok(None) => continue,
           Err(e) => { yield Err(e); return; }
@@ -226,7 +187,7 @@ where
       }
       entries.sort_by(|(a, _), (b, _)| a.cmp(b));
       for (key, row) in entries {
-        if in_engine_key_range(&key, &range) {
+        if key_in_range(&key, &range) {
           yield Ok((key, row));
         }
       }
@@ -325,7 +286,7 @@ where
     let Some(doc) = self.inner.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let Some(bytes) = named_snapshot_bytes(&doc)? else {
+    let Some(bytes) = snapshot_bytes(&doc)? else {
       return Ok(None);
     };
     find_in_named_snapshot(&bytes, key.borrow())

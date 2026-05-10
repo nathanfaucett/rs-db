@@ -65,22 +65,15 @@ impl Sorter {
       });
     }
 
-    let offset = offset.unwrap_or(0);
-    let mut out: Vec<EngineRow> = Vec::new();
-    let mut taken = 0usize;
-    for (idx, (_, row)) in input.into_iter().enumerate() {
-      if idx < offset {
-        continue;
-      }
-      out.push(row);
-      taken += 1;
-      if let Some(lim) = limit
-        && taken >= lim
-      {
-        break;
-      }
+    let rows = input
+      .into_iter()
+      .skip(offset.unwrap_or(0))
+      .map(|(_, row)| row);
+
+    match limit {
+      Some(limit) => rows.take(limit).collect(),
+      None => rows.collect(),
     }
-    out
   }
 }
 

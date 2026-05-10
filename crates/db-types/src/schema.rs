@@ -16,6 +16,22 @@ use alloc::format;
 
 use crate::{EngineKey, EngineRow, EngineType, EngineValue};
 
+fn key_from_indices<F>(
+  row: &EngineRow,
+  indices: &[usize],
+  error: F,
+) -> Result<EngineKey, SchemaError>
+where
+  F: Fn(usize) -> SchemaError,
+{
+  let values = indices
+    .iter()
+    .map(|index| row.get(*index).cloned().ok_or_else(|| error(*index)))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  Ok(EngineKey::from_values(values))
+}
+
 /// Errors returned by schema-level validation in the `db-types` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
@@ -88,21 +104,12 @@ impl TableSchema {
   }
 
   pub fn primary_key(&self, row: &EngineRow) -> Result<EngineKey, SchemaError> {
-    let values = self
-      .primary_key
-      .iter()
-      .map(|index| {
-        row
-          .get(*index)
-          .cloned()
-          .ok_or(SchemaError::SchemaMismatch(format!(
-            "primary key index {} is out of bounds for table {}",
-            index, self.name
-          )))
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(EngineKey::from_values(values))
+    key_from_indices(row, &self.primary_key, |index| {
+      SchemaError::SchemaMismatch(format!(
+        "primary key index {} is out of bounds for table {}",
+        index, self.name
+      ))
+    })
   }
 }
 
@@ -147,21 +154,9 @@ impl IndexSchema {
   }
 
   pub fn key_for(&self, row: &EngineRow) -> Result<EngineKey, SchemaError> {
-    let values = self
-      .column_indices
-      .iter()
-      .map(|index| {
-        row
-          .get(*index)
-          .cloned()
-          .ok_or(SchemaError::SchemaMismatch(format!(
-            "index column index {} is out of bounds",
-            index
-          )))
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(EngineKey::from_values(values))
+    key_from_indices(row, &self.column_indices, |index| {
+      SchemaError::SchemaMismatch(format!("index column index {} is out of bounds", index))
+    })
   }
 }
 

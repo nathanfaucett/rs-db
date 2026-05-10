@@ -51,18 +51,16 @@ impl AggState {
       }
       Aggregate::Min(_) => {
         if let AggState::Min(opt) = self
-          && let Some(v) = value
-          && (opt.is_none() || v < *opt.as_ref().unwrap())
+          && let Some(value) = value
         {
-          *opt = Some(v);
+          update_best(opt, value, |value, current| value < current);
         }
       }
       Aggregate::Max(_) => {
         if let AggState::Max(opt) = self
-          && let Some(v) = value
-          && (opt.is_none() || v > *opt.as_ref().unwrap())
+          && let Some(value) = value
         {
-          *opt = Some(v);
+          update_best(opt, value, |value, current| value > current);
         }
       }
       Aggregate::Avg(_) => {
@@ -93,6 +91,18 @@ impl AggState {
         }
       }
     }
+  }
+}
+
+fn update_best<F>(current: &mut Option<EngineValue>, value: EngineValue, is_better: F)
+where
+  F: FnOnce(&EngineValue, &EngineValue) -> bool,
+{
+  if current
+    .as_ref()
+    .is_none_or(|current| is_better(&value, current))
+  {
+    *current = Some(value);
   }
 }
 
@@ -248,21 +258,16 @@ impl Aggregator {
       });
     }
 
-    let offset = offset.unwrap_or(0);
-    let mut limited: Vec<EngineRow> = Vec::new();
-    for (i, row) in out_rows.into_iter().enumerate() {
-      if i < offset {
-        continue;
-      }
-      limited.push(row);
-      if let Some(lim) = limit
-        && limited.len() >= lim
-      {
-        break;
-      }
-    }
+    let rows = match limit {
+      Some(limit) => out_rows
+        .into_iter()
+        .skip(offset.unwrap_or(0))
+        .take(limit)
+        .collect(),
+      None => out_rows.into_iter().skip(offset.unwrap_or(0)).collect(),
+    };
 
-    Ok(limited)
+    Ok(rows)
   }
 }
 

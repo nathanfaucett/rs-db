@@ -16,9 +16,7 @@ where
   V: Clone,
   Q: Borrow<K>,
 {
-  patch
-    .get_value(key)
-    .or_else(|| base.get(key.borrow()).cloned())
+  patch.get_base_value(base, key)
 }
 
 pub(crate) fn remove_from_patch_then_map<K, Q, V>(

@@ -113,11 +113,8 @@ where
     K: Ord,
     Q: Borrow<K> + Send + 'a,
   {
-    if let Some(value) = self.patch.get_value(&key) {
-      return Ok(Some(value));
-    }
     let guard = self.inner.read().await;
-    Ok(guard.get(key.borrow()).cloned())
+    Ok(self.patch.get_base_value(&guard, key.borrow()))
   }
 
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>

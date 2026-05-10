@@ -241,4 +241,20 @@ mod tests {
       assert_eq!(values, Vec::from([(1, 100), (2, 200)]));
     });
   }
+
+  #[test]
+  fn transaction_get_honors_pending_delete() {
+    block_on(async {
+      let mut store = InMemoryBTree::new();
+      store
+        .insert(1, 100)
+        .await
+        .expect("insert initial value into store");
+
+      let mut tx = store.transaction().await.expect("start transaction");
+      tx.remove(&1).await.expect("remove failed");
+
+      assert_eq!(tx.get(&1).await.expect("get failed"), None);
+    });
+  }
 }

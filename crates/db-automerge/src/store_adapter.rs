@@ -3,8 +3,6 @@ use std::{borrow::Borrow, sync::Arc};
 use async_lock::RwLock;
 use async_stream::stream;
 use automerge::AutoCommit;
-use automerge::ReadDoc;
-use automerge::transaction::Transactable;
 use db_core::encode_with_version;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
@@ -20,8 +18,8 @@ mod snapshot;
 
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 use snapshot::{
-  StoreSnapshotAdapter, decode_snapshot_base64, encode_snapshot_base64, find_entry, parse_entries,
-  set_entry,
+  StoreSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry, snapshot_bytes,
+  snapshot_doc,
 };
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
@@ -138,13 +136,10 @@ where
       let doc_id = doc_id_for_key(&key);
       match inner.get(&doc_id).await? {
         None => Ok(None),
-        Some(doc) => {
-          if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-            let bytes = decode_snapshot_base64(value)?;
-            return find_in_snapshot(&bytes, &key);
-          }
-          Ok(None)
-        }
+        Some(doc) => match snapshot_bytes(&doc)? {
+          Some(bytes) => find_in_snapshot(&bytes, &key),
+          None => Ok(None),
+        },
       }
     }
   }
@@ -161,12 +156,7 @@ where
     async move {
       let doc_id = doc_id_for_key(&key);
       let new_buf = set_in_snapshot(None, &key, &value)?;
-      let snapshot_str = encode_snapshot_base64(&new_buf);
-      let mut doc = AutoCommit::new();
-      doc
-        .put(&automerge::ROOT, "snapshot", snapshot_str)
-        .map_err(BTreeError::other)?;
-      inner.insert(doc_id, doc).await
+      inner.insert(doc_id, snapshot_doc(&new_buf)?).await
     }
   }
 
@@ -187,11 +177,7 @@ where
         return Ok(None);
       }
       let doc = existing.expect("checked is_some");
-      let buf_opt = if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-        Some(decode_snapshot_base64(value)?)
-      } else {
-        None
-      };
+      let buf_opt = snapshot_bytes(&doc)?;
       let prev = if let Some(ref b) = buf_opt {
         find_in_snapshot(b, &key)?
       } else {
@@ -217,24 +203,11 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
-        if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-          let bytes = match decode_snapshot_base64(value) {
-            Ok(b) => b,
-            Err(e) => { yield Err(e); continue; }
-          };
+        if let Some(bytes) = snapshot_bytes(&doc)? {
           match parse_snapshot(&bytes) {
             Ok(pairs) => {
               for (k, v) in pairs.into_iter() {
-                let in_range = match range.start_bound() {
-                  std::ops::Bound::Included(lower) => k >= *lower,
-                  std::ops::Bound::Excluded(lower) => k > *lower,
-                  std::ops::Bound::Unbounded => true,
-                } && match range.end_bound() {
-                  std::ops::Bound::Included(upper) => k <= *upper,
-                  std::ops::Bound::Excluded(upper) => k < *upper,
-                  std::ops::Bound::Unbounded => true,
-                };
-                if in_range {
+                if key_in_range(&k, &range) {
                   yield Ok((k, v));
                 }
               }
@@ -281,13 +254,10 @@ where
       let guard = automerge.read().await;
       match guard.get(&doc_id).await? {
         None => Ok(None),
-        Some(doc) => {
-          if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-            let bytes = decode_snapshot_base64(value)?;
-            return find_in_snapshot(&bytes, &k);
-          }
-          Ok(None)
-        }
+        Some(doc) => match snapshot_bytes(&doc)? {
+          Some(bytes) => find_in_snapshot(&bytes, &k),
+          None => Ok(None),
+        },
       }
     }
   }
@@ -306,12 +276,7 @@ where
       let guard = automerge.read().await;
       let mut tx = guard.transaction().await?;
       let new_buf = set_in_snapshot(None, &key, &value)?;
-      let snapshot_str = encode_snapshot_base64(&new_buf);
-      let mut doc = AutoCommit::new();
-      doc
-        .put(&automerge::ROOT, "snapshot", snapshot_str)
-        .map_err(BTreeError::other)?;
-      tx.insert(doc_id, doc).await?;
+      tx.insert(doc_id, snapshot_doc(&new_buf)?).await?;
       tx.commit().await
     }
   }
@@ -335,11 +300,7 @@ where
         return Ok(None);
       }
       let doc = existing.expect("checked is_some");
-      let buf_opt = if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-        Some(decode_snapshot_base64(value)?)
-      } else {
-        None
-      };
+      let buf_opt = snapshot_bytes(&doc)?;
       let prev = if let Some(ref b) = buf_opt {
         find_in_snapshot(b, &key)?
       } else {
@@ -366,24 +327,11 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
-        if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
-          let bytes = match decode_snapshot_base64(value) {
-            Ok(b) => b,
-            Err(e) => { yield Err(e); continue; }
-          };
+        if let Some(bytes) = snapshot_bytes(&doc)? {
           match parse_snapshot(&bytes) {
             Ok(pairs) => {
               for (k, v) in pairs.into_iter() {
-                let in_range = match range.start_bound() {
-                  std::ops::Bound::Included(lower) => k >= *lower,
-                  std::ops::Bound::Excluded(lower) => k > *lower,
-                  std::ops::Bound::Unbounded => true,
-                } && match range.end_bound() {
-                  std::ops::Bound::Included(upper) => k <= *upper,
-                  std::ops::Bound::Excluded(upper) => k < *upper,
-                  std::ops::Bound::Unbounded => true,
-                };
-                if in_range {
+                if key_in_range(&k, &range) {
                   yield Ok((k, v));
                 }
               }

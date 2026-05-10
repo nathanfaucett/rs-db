@@ -1,3 +1,6 @@
+use automerge::AutoCommit;
+use automerge::ReadDoc;
+use automerge::transaction::Transactable;
 use db_core::{BTreeError, Cursor, DecodeError, encode_with_version};
 use db_types::codec::{
   decode_engine_key, decode_engine_row, decode_store_key, decode_store_value,
@@ -115,6 +118,26 @@ pub(crate) fn find_entry<A: SnapshotAdapter>(
   Ok(None)
 }
 
+pub(crate) fn key_in_range<K, R>(key: &K, range: &R) -> bool
+where
+  K: Ord,
+  R: core::ops::RangeBounds<K>,
+{
+  use core::ops::Bound;
+
+  let start = match range.start_bound() {
+    Bound::Included(lower) => key >= lower,
+    Bound::Excluded(lower) => key > lower,
+    Bound::Unbounded => true,
+  };
+  let end = match range.end_bound() {
+    Bound::Included(upper) => key <= upper,
+    Bound::Excluded(upper) => key < upper,
+    Bound::Unbounded => true,
+  };
+  start && end
+}
+
 pub(crate) fn set_entry<A: SnapshotAdapter>(
   buf: Option<&[u8]>,
   key: &A::Key,
@@ -181,6 +204,23 @@ pub(crate) fn decode_snapshot_base64(value: impl ToString) -> Result<Vec<u8>, BT
 
 pub(crate) fn encode_snapshot_base64(bytes: &[u8]) -> String {
   general_purpose::STANDARD.encode(bytes)
+}
+
+pub(crate) fn snapshot_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, "snapshot") {
+    Ok(Some(decode_snapshot_base64(value)?))
+  } else {
+    Ok(None)
+  }
+}
+
+pub(crate) fn snapshot_doc(snapshot: &[u8]) -> Result<AutoCommit, BTreeError> {
+  let snapshot_str = encode_snapshot_base64(snapshot);
+  let mut doc = AutoCommit::new();
+  doc
+    .put(&automerge::ROOT, "snapshot", snapshot_str)
+    .map_err(BTreeError::other)?;
+  Ok(doc)
 }
 
 #[cfg(test)]

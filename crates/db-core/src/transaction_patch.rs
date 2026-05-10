@@ -49,6 +49,18 @@ impl<K, V> DerefMut for TransactionPatch<K, V> {
 }
 
 impl<K, V> TransactionPatch<K, V> {
+  pub fn get_base_value<Q>(&self, base: &BTreeMap<K, V>, key: &Q) -> Option<V>
+  where
+    K: Ord,
+    V: Clone,
+    Q: Borrow<K>,
+  {
+    match self.0.get(key.borrow()) {
+      Some(entry) => entry.as_option().cloned(),
+      None => base.get(key.borrow()).cloned(),
+    }
+  }
+
   pub fn get_value<Q>(&self, key: &Q) -> Option<V>
   where
     K: Ord,

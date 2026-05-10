@@ -70,6 +70,18 @@ pub fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, Decod
   }
 }
 
+fn decode_vec<T, F>(cursor: &mut Cursor<'_>, mut decode: F) -> Result<Vec<T>, DecodeError>
+where
+  F: FnMut(&mut Cursor<'_>) -> Result<T, DecodeError>,
+{
+  let len = decode_len(cursor)?;
+  let mut out = Vec::with_capacity(len);
+  for _ in 0..len {
+    out.push(decode(cursor)?);
+  }
+  Ok(out)
+}
+
 pub fn encode_engine_row_into_sink<S: BufferSink>(sink: &mut S, row: &EngineRow) {
   encode_len_into_sink(sink, row.len());
   for value in row {
@@ -78,12 +90,7 @@ pub fn encode_engine_row_into_sink<S: BufferSink>(sink: &mut S, row: &EngineRow)
 }
 
 pub fn decode_engine_row(cursor: &mut Cursor<'_>) -> Result<EngineRow, DecodeError> {
-  let len = decode_len(cursor)?;
-  let mut out = Vec::with_capacity(len);
-  for _ in 0..len {
-    out.push(decode_engine_value(cursor)?);
-  }
-  Ok(out)
+  decode_vec(cursor, decode_engine_value)
 }
 
 pub fn encode_engine_key_into_sink<S: BufferSink>(sink: &mut S, value: &EngineKey) {
@@ -106,11 +113,7 @@ pub fn decode_engine_key(cursor: &mut Cursor<'_>) -> Result<EngineKey, DecodeErr
   match cursor.read_u8()? {
     0 => Ok(EngineKey::Scalar(decode_engine_value(cursor)?)),
     1 => {
-      let len = decode_len(cursor)?;
-      let mut values = Vec::with_capacity(len);
-      for _ in 0..len {
-        values.push(decode_engine_value(cursor)?);
-      }
+      let values = decode_vec(cursor, decode_engine_value)?;
       Ok(EngineKey::Tuple(values))
     }
     _ => Err(DecodeError::Malformed),
@@ -155,16 +158,8 @@ pub fn decode_column_schema(cursor: &mut Cursor<'_>) -> Result<ColumnSchema, Dec
 
 pub fn decode_table_schema(cursor: &mut Cursor<'_>) -> Result<TableSchema, DecodeError> {
   let name = decode_string(cursor)?;
-  let columns_len = decode_len(cursor)?;
-  let mut columns = Vec::with_capacity(columns_len);
-  for _ in 0..columns_len {
-    columns.push(decode_column_schema(cursor)?);
-  }
-  let primary_key_len = decode_len(cursor)?;
-  let mut primary_key = Vec::with_capacity(primary_key_len);
-  for _ in 0..primary_key_len {
-    primary_key.push(decode_usize(cursor)?);
-  }
+  let columns = decode_vec(cursor, decode_column_schema)?;
+  let primary_key = decode_vec(cursor, decode_usize)?;
 
   Ok(TableSchema {
     name,
@@ -176,11 +171,7 @@ pub fn decode_table_schema(cursor: &mut Cursor<'_>) -> Result<TableSchema, Decod
 pub fn decode_index_schema(cursor: &mut Cursor<'_>) -> Result<IndexSchema, DecodeError> {
   let name = decode_string(cursor)?;
   let table_name = decode_string(cursor)?;
-  let indices_len = decode_len(cursor)?;
-  let mut column_indices = Vec::with_capacity(indices_len);
-  for _ in 0..indices_len {
-    column_indices.push(decode_usize(cursor)?);
-  }
+  let column_indices = decode_vec(cursor, decode_usize)?;
   let unique = decode_bool(cursor)?;
 
   Ok(IndexSchema {
