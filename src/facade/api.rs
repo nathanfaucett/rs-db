@@ -99,11 +99,6 @@ where
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
 
   for (doc_id, doc) in docs {
-    let _ = tx
-      .remove(doc_id)
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-
     tx.insert(*doc_id, doc.clone())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;

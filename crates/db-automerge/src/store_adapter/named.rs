@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 
 use async_stream::stream;
 use automerge::AutoCommit;
+use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -16,8 +17,8 @@ use db_types::{EngineKey, EngineRow};
 
 use super::AutomergeEngineStore;
 use super::snapshot::{
-  EngineSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry, snapshot_bytes,
-  snapshot_doc,
+  EngineSnapshotAdapter, encode_snapshot_base64, find_entry, key_in_range, parse_entries,
+  set_entry, snapshot_bytes, snapshot_doc,
 };
 
 fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, EngineRow)>, BTreeError> {
@@ -129,8 +130,25 @@ where
     EngineKey: Ord,
   {
     let doc_id = row_doc_id(tree, &key);
-    let snapshot = set_in_named_snapshot(None, key, value)?;
-    self.inner.insert(doc_id, snapshot_doc(&snapshot)?).await
+    let existing = self.inner.get(&doc_id).await?;
+    let existing_bytes = match &existing {
+      Some(doc) => snapshot_bytes(doc)?,
+      None => None,
+    };
+    let new_snapshot = set_in_named_snapshot(existing_bytes.as_deref(), key, value)?;
+    let new_doc = if let Some(mut doc) = existing {
+      doc
+        .put(
+          &automerge::ROOT,
+          "snapshot",
+          encode_snapshot_base64(&new_snapshot),
+        )
+        .map_err(BTreeError::other)?;
+      doc
+    } else {
+      snapshot_doc(&new_snapshot)?
+    };
+    self.inner.insert(doc_id, new_doc).await
   }
 
   async fn remove<'a>(
@@ -152,7 +170,13 @@ where
       None
     };
     if removed.is_some() {
-      let _ = self.inner.remove(&doc_id).await?;
+      // Tombstone: update the snapshot to empty so the delete is recorded as
+      // an Automerge operation and propagates causally to peers on sync.
+      let mut tombstone = existing;
+      tombstone
+        .put(&automerge::ROOT, "snapshot", encode_snapshot_base64(&[]))
+        .map_err(BTreeError::other)?;
+      self.inner.insert(doc_id, tombstone).await?;
     }
     Ok(removed)
   }

@@ -129,34 +129,33 @@ where
         let change_hash = hash_heads(&doc.get_heads());
         let bytes = doc.save();
 
-        // If an identical snapshot already exists in the underlying
-        // transaction, treat this as idempotent and skip inserting.
-        let start = DocumentChangeKey {
+        // Remove all existing snapshot entries for this doc so stale
+        // snapshots do not survive and produce non-deterministic
+        // reconstruction when their hashes do not sort in causal order.
+        let snap_start = DocumentChangeKey {
           doc_id,
           doc_type: DocumentType::Snapshot,
           change_hash: [0u8; 32],
         };
-        let end = DocumentChangeKey {
+        let snap_end = DocumentChangeKey {
           doc_id,
           doc_type: DocumentType::Snapshot,
           change_hash: [255u8; 32],
         };
 
-        let mut found_identical = false;
-        {
-          let stream = inner_tx.range(start.clone()..=end.clone());
+        let old_snap_keys: alloc::vec::Vec<DocumentChangeKey> = {
+          let mut collected = alloc::vec::Vec::new();
+          let stream = inner_tx.range(snap_start..=snap_end);
           futures::pin_mut!(stream);
           while let Some(item) = stream.next().await {
-            let (_k, v) = item?;
-            if v == bytes {
-              found_identical = true;
-              break;
-            }
+            let (k, _) = item?;
+            collected.push(k);
           }
-        }
+          collected
+        };
 
-        if found_identical {
-          continue;
+        for k in old_snap_keys {
+          inner_tx.remove(&k).await?;
         }
 
         let key = DocumentChangeKey {

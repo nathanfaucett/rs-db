@@ -607,7 +607,6 @@ mod tests {
   }
 
   #[test]
-  #[ignore = "Known Automerge mutation convergence gap; tracked for backend fix"]
   fn automerge_in_memory_offline_sync_mutations_converge() {
     block_on(async {
       let mut left = Database::open_automerge_in_memory()
@@ -670,7 +669,6 @@ mod tests {
 
   #[cfg(feature = "redb")]
   #[test]
-  #[ignore = "Known Automerge mutation convergence gap; tracked for backend fix"]
   fn automerge_redb_offline_sync_mutations_converge() {
     block_on(async {
       let left_path = temp_redb_path("left_mutations");
