@@ -353,7 +353,6 @@ dependencies = [
  "console_error_panic_hook",
  "db-core",
  "db-engine",
- "db-in-memory",
  "db-sql-to-engine",
  "db-types",
  "tsify",

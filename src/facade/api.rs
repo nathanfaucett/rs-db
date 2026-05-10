@@ -3,7 +3,9 @@ extern crate alloc;
 
 #[cfg(feature = "automerge")]
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-use db_engine::{EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineRow};
+use db_engine::{EngineDatabase, EngineQuery, EngineResult};
+#[cfg(feature = "redb")]
+use db_engine::{EngineKey, EngineRow};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
@@ -17,34 +19,45 @@ use std::path::Path;
 use db_sql_to_engine::SchemaResolver;
 
 use super::dispatch;
-use super::types::{
-  Database, DatabaseError, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec, Row, Transaction,
-};
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use super::types::RedbAutomergeStore;
+#[cfg(feature = "redb")]
+use super::types::RedbEngineStore;
+use super::types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
+#[cfg(feature = "automerge")]
+use super::types::{FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec, InMemoryAutomergeStore};
 
-impl SchemaResolver for Database {
+impl<S> SchemaResolver for Database<S>
+where
+  S: FacadeStore,
+{
   fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema> {
     dispatch::describe_table(self, name)
   }
 }
 
-impl Database {
+impl Database<InMemoryEngineStore> {
   /// Open an in-memory database (dev/test convenience).
   pub async fn open_in_memory() -> Result<Self, DatabaseError> {
     let store = InMemoryNamedBTree::new();
     let engine = EngineDatabase::new(store);
-    Ok(Self::InMemory(engine))
+    Ok(Self { engine })
   }
+}
 
+#[cfg(feature = "automerge")]
+impl Database<InMemoryAutomergeStore> {
   /// Open an Automerge-backed database (feature-gated).
-  #[cfg(feature = "automerge")]
   pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
     let backend = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
     let store = AutomergeEngineStore::new_with_backend(backend);
     let engine = EngineDatabase::new(store);
-    Ok(Self::AutomergeInMemory(engine))
+    Ok(Self { engine })
   }
+}
 
-  #[cfg(all(feature = "automerge", feature = "redb"))]
+#[cfg(all(feature = "automerge", feature = "redb"))]
+impl Database<RedbAutomergeStore> {
   pub async fn open_automerge_with_redb(
     path: impl AsRef<Path>,
     table_name: &'static str,
@@ -58,10 +71,12 @@ impl Database {
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let store = AutomergeEngineStore::new_with_backend(backend);
     let engine = EngineDatabase::new(store);
-    Ok(Self::AutomergeRedb(engine))
+    Ok(Self { engine })
   }
+}
 
-  #[cfg(feature = "redb")]
+#[cfg(feature = "redb")]
+impl Database<RedbEngineStore> {
   pub async fn open_in_redb(
     path: impl AsRef<Path>,
     _table_name: &'static str,
@@ -72,9 +87,14 @@ impl Database {
       )
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let engine = EngineDatabase::new(store);
-    Ok(Self::Redb(engine))
+    Ok(Self { engine })
   }
+}
 
+impl<S> Database<S>
+where
+  S: FacadeStore,
+{
   /// Register a table schema with the engine.
   pub async fn register_table(
     &mut self,
@@ -96,7 +116,7 @@ impl Database {
   /// Convenience: run a closure in a transaction context.
   pub async fn transaction<F, Fut, T>(&self, f: F) -> Result<T, DatabaseError>
   where
-    F: FnOnce(&mut Transaction<'_>) -> Fut,
+    F: FnOnce(&mut Transaction<'_, S>) -> Fut,
     Fut: core::future::Future<Output = Result<T, DatabaseError>>,
   {
     let mut tx = dispatch::begin_transaction(self);
@@ -114,7 +134,10 @@ impl Database {
   }
 }
 
-impl<'db> Transaction<'db> {
+impl<'db, S> Transaction<'db, S>
+where
+  S: FacadeStore,
+{
   pub async fn insert_row(&mut self, table: &str, row: Row) -> Result<(), DatabaseError> {
     dispatch::transaction_insert_row(self, table, row).await
   }

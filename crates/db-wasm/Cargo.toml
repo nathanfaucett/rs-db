@@ -17,11 +17,17 @@ default = []
 
 [dependencies]
 wasm-bindgen = { version = "0.2" }
-console_error_panic_hook = {version = "0.1" }
+console_error_panic_hook = { version = "0.1" }
 tsify = { version = "0.5" }
+
 # workspace dependencies
 db-core = { path = "../db-core", default-features = false, features = ["wasm"] }
-db-engine = { path = "../db-engine", default-features = false, features = ["wasm"] }
-db-in-memory = { path = "../db-in-memory", default-features = false, features = [] }
-db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = ["wasm"] }
-db-types = { path = "../db-types", default-features = false, features = ["wasm"] }
+db-engine = { path = "../db-engine", default-features = false, features = [
+  "wasm",
+] }
+db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = [
+  "wasm",
+] }
+db-types = { path = "../db-types", default-features = false, features = [
+  "wasm",
+] }

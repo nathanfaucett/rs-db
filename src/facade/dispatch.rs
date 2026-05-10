@@ -9,104 +9,57 @@ use db_sql_to_engine::{
   CanonicalStatement, DdlOp, SchemaResolver, parse_and_translate, parse_and_translate_statement,
 };
 
-use super::types::{Database, DatabaseError, Row, Transaction};
+use super::types::{Database, DatabaseError, FacadeStore, Row, Transaction};
 
-macro_rules! with_database {
-  ($database:expr, |$engine:ident| $body:expr) => {
-    match $database {
-      Database::InMemory($engine) => $body,
-      #[cfg(feature = "automerge")]
-      Database::AutomergeInMemory($engine) => $body,
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Database::AutomergeRedb($engine) => $body,
-      #[cfg(feature = "redb")]
-      Database::Redb($engine) => $body,
-    }
-  };
-}
-
-macro_rules! with_database_mut {
-  ($database:expr, |$engine:ident| $body:expr) => {
-    match $database {
-      Database::InMemory($engine) => $body,
-      #[cfg(feature = "automerge")]
-      Database::AutomergeInMemory($engine) => $body,
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Database::AutomergeRedb($engine) => $body,
-      #[cfg(feature = "redb")]
-      Database::Redb($engine) => $body,
-    }
-  };
-}
-
-macro_rules! with_transaction_mut {
-  ($transaction:expr, |$inner:ident| $body:expr) => {
-    match $transaction {
-      Transaction::InMemory($inner) => $body,
-      #[cfg(feature = "automerge")]
-      Transaction::AutomergeInMemory($inner) => $body,
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Transaction::AutomergeRedb($inner) => $body,
-      #[cfg(feature = "redb")]
-      Transaction::Redb($inner) => $body,
-    }
-  };
-}
-
-macro_rules! with_transaction_owned {
-  ($transaction:expr, |$inner:ident| $body:expr) => {
-    match $transaction {
-      Transaction::InMemory($inner) => $body,
-      #[cfg(feature = "automerge")]
-      Transaction::AutomergeInMemory($inner) => $body,
-      #[cfg(all(feature = "automerge", feature = "redb"))]
-      Transaction::AutomergeRedb($inner) => $body,
-      #[cfg(feature = "redb")]
-      Transaction::Redb($inner) => $body,
-    }
-  };
-}
-
-pub(crate) fn describe_table(database: &Database, name: &str) -> Option<TableSchema> {
-  with_database!(database, |engine| engine.describe_table(name))
+pub(crate) fn describe_table<S>(database: &Database<S>, name: &str) -> Option<TableSchema>
+where
+  S: FacadeStore,
+{
+  database.engine.describe_table(name)
 }
 
 pub(crate) async fn register_table(
-  database: &mut Database,
+  database: &mut Database<impl FacadeStore>,
   schema: TableSchema,
 ) -> Result<(), DatabaseError> {
-  with_database_mut!(database, |engine| engine.register_table(schema).await?);
+  database.engine.register_table(schema).await?;
   Ok(())
 }
 
 pub(crate) async fn execute_query(
-  database: &Database,
+  database: &Database<impl FacadeStore>,
   query: EngineQuery,
 ) -> Result<EngineResult, DatabaseError> {
-  let result = with_database!(database, |engine| engine.execute(query).await?);
+  let result = database.engine.execute(query).await?;
   Ok(result)
 }
 
-async fn drop_table(database: &mut Database, name: &str) -> Result<(), DatabaseError> {
-  with_database_mut!(database, |engine| engine.drop_table(name).await?);
+async fn drop_table(
+  database: &mut Database<impl FacadeStore>,
+  name: &str,
+) -> Result<(), DatabaseError> {
+  database.engine.drop_table(name).await?;
   Ok(())
 }
 
 async fn register_index(
-  database: &mut Database,
+  database: &mut Database<impl FacadeStore>,
   schema: db_engine::IndexSchema,
 ) -> Result<(), DatabaseError> {
-  with_database_mut!(database, |engine| engine.register_index(schema).await?);
+  database.engine.register_index(schema).await?;
   Ok(())
 }
 
-async fn drop_index(database: &mut Database, name: &str) -> Result<(), DatabaseError> {
-  with_database_mut!(database, |engine| engine.drop_index(name).await?);
+async fn drop_index(
+  database: &mut Database<impl FacadeStore>,
+  name: &str,
+) -> Result<(), DatabaseError> {
+  database.engine.drop_index(name).await?;
   Ok(())
 }
 
 pub(crate) async fn execute_sql(
-  database: &mut Database,
+  database: &mut Database<impl FacadeStore>,
   sql: &str,
 ) -> Result<EngineResult, DatabaseError> {
   match parse_and_translate_statement(sql, database) {
@@ -131,52 +84,48 @@ pub(crate) async fn execute_sql(
   }
 }
 
-pub(crate) fn begin_transaction(database: &Database) -> Transaction<'_> {
-  match database {
-    Database::InMemory(engine) => Transaction::InMemory(engine.transaction()),
-    #[cfg(feature = "automerge")]
-    Database::AutomergeInMemory(engine) => Transaction::AutomergeInMemory(engine.transaction()),
-    #[cfg(all(feature = "automerge", feature = "redb"))]
-    Database::AutomergeRedb(engine) => Transaction::AutomergeRedb(engine.transaction()),
-    #[cfg(feature = "redb")]
-    Database::Redb(engine) => Transaction::Redb(engine.transaction()),
+pub(crate) fn begin_transaction<S>(database: &Database<S>) -> Transaction<'_, S>
+where
+  S: FacadeStore,
+{
+  Transaction {
+    inner: database.engine.transaction(),
   }
 }
 
 pub(crate) async fn transaction_insert_row(
-  transaction: &mut Transaction<'_>,
+  transaction: &mut Transaction<'_, impl FacadeStore>,
   table: &str,
   row: Row,
 ) -> Result<(), DatabaseError> {
-  with_transaction_mut!(transaction, |inner| inner.insert_row(table, row).await?);
+  transaction.inner.insert_row(table, row).await?;
   Ok(())
 }
 
 async fn transaction_update_rows(
-  transaction: &mut Transaction<'_>,
+  transaction: &mut Transaction<'_, impl FacadeStore>,
   table: &str,
   assignments: Vec<(usize, db_engine::EngineValue)>,
   predicate: Option<db_engine::QualifiedPredicate>,
 ) -> Result<(), DatabaseError> {
-  with_transaction_mut!(transaction, |inner| {
-    inner.update_rows(table, assignments, predicate).await?
-  });
+  transaction
+    .inner
+    .update_rows(table, assignments, predicate)
+    .await?;
   Ok(())
 }
 
 async fn transaction_delete_rows(
-  transaction: &mut Transaction<'_>,
+  transaction: &mut Transaction<'_, impl FacadeStore>,
   table: &str,
   predicate: Option<db_engine::QualifiedPredicate>,
 ) -> Result<(), DatabaseError> {
-  with_transaction_mut!(transaction, |inner| {
-    inner.delete_rows(table, predicate).await?
-  });
+  transaction.inner.delete_rows(table, predicate).await?;
   Ok(())
 }
 
 pub(crate) async fn transaction_execute_sql(
-  transaction: &mut Transaction<'_>,
+  transaction: &mut Transaction<'_, impl FacadeStore>,
   resolver: &dyn SchemaResolver,
   sql: &str,
 ) -> Result<EngineResult, DatabaseError> {
@@ -205,14 +154,16 @@ pub(crate) async fn transaction_execute_sql(
   }
 }
 
-pub(crate) async fn transaction_commit(transaction: Transaction<'_>) -> Result<(), DatabaseError> {
-  with_transaction_owned!(transaction, |inner| inner.commit().await?);
+pub(crate) async fn transaction_commit(
+  transaction: Transaction<'_, impl FacadeStore>,
+) -> Result<(), DatabaseError> {
+  transaction.inner.commit().await?;
   Ok(())
 }
 
 pub(crate) async fn transaction_rollback(
-  transaction: Transaction<'_>,
+  transaction: Transaction<'_, impl FacadeStore>,
 ) -> Result<(), DatabaseError> {
-  with_transaction_owned!(transaction, |inner| inner.rollback().await?);
+  transaction.inner.rollback().await?;
   Ok(())
 }

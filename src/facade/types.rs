@@ -10,6 +10,7 @@ use core::fmt;
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentType};
 #[cfg(feature = "automerge")]
 use db_core::BufferSink;
+use db_core::NamedTreeProvider;
 use db_engine::{EngineDatabase, EngineKey, EngineRow, EngineValue};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -55,26 +56,30 @@ pub type RedbAutomergeStore = AutomergeEngineStore<
 pub type InMemoryAutomergeStore =
   AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
 
-/// Opaque database handle.
-pub enum Database {
-  InMemory(EngineDatabase<InMemoryEngineStore>),
-  #[cfg(feature = "automerge")]
-  AutomergeInMemory(EngineDatabase<InMemoryAutomergeStore>),
-  #[cfg(all(feature = "automerge", feature = "redb"))]
-  AutomergeRedb(EngineDatabase<RedbAutomergeStore>),
-  #[cfg(feature = "redb")]
-  Redb(EngineDatabase<RedbEngineStore>),
+pub trait FacadeStore:
+  Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
+{
 }
 
-/// Transaction wrapper delegating to EngineTransaction
-pub enum Transaction<'db> {
-  InMemory(db_engine::EngineTransaction<'db, InMemoryEngineStore>),
-  #[cfg(feature = "automerge")]
-  AutomergeInMemory(db_engine::EngineTransaction<'db, InMemoryAutomergeStore>),
-  #[cfg(all(feature = "automerge", feature = "redb"))]
-  AutomergeRedb(db_engine::EngineTransaction<'db, RedbAutomergeStore>),
-  #[cfg(feature = "redb")]
-  Redb(db_engine::EngineTransaction<'db, RedbEngineStore>),
+impl<T> FacadeStore for T where
+  T: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
+{
+}
+
+/// Opaque database handle.
+pub struct Database<S>
+where
+  S: FacadeStore,
+{
+  pub(crate) engine: EngineDatabase<S>,
+}
+
+/// Transaction wrapper delegating to EngineTransaction.
+pub struct Transaction<'db, S>
+where
+  S: FacadeStore,
+{
+  pub(crate) inner: db_engine::EngineTransaction<'db, S>,
 }
 
 #[cfg(feature = "automerge")]
