@@ -1,5 +1,4 @@
 pub mod aggregate;
-mod aggregator;
 pub mod index_join;
 pub mod nested_loop_join;
 pub mod scan;
