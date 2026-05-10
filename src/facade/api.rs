@@ -1,9 +1,12 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use alloc::format;
+use alloc::vec::Vec;
+
 #[cfg(feature = "automerge")]
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-use db_engine::{EngineDatabase, EngineQuery, EngineResult};
+use db_engine::{EngineDatabase, EngineQuery, EngineResult, TableSchema};
 #[cfg(feature = "redb")]
 use db_engine::{EngineKey, EngineRow};
 #[cfg(feature = "automerge")]
@@ -16,9 +19,10 @@ use db_types::{EngineKeyCodec, EngineRowCodec};
 #[cfg(feature = "redb")]
 use std::path::Path;
 
-use db_sql_to_engine::SchemaResolver;
+use db_sql_to_engine::{
+  CanonicalStatement, DdlOp, SchemaResolver, parse_and_translate, parse_and_translate_statement,
+};
 
-use super::dispatch;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use super::types::RedbAutomergeStore;
 #[cfg(feature = "redb")]
@@ -31,8 +35,8 @@ impl<S> SchemaResolver for Database<S>
 where
   S: FacadeStore,
 {
-  fn describe_table(&self, name: &str) -> Option<db_engine::TableSchema> {
-    dispatch::describe_table(self, name)
+  fn describe_table(&self, name: &str) -> Option<TableSchema> {
+    self.engine.describe_table(name)
   }
 }
 
@@ -96,21 +100,39 @@ where
   S: FacadeStore,
 {
   /// Register a table schema with the engine.
-  pub async fn register_table(
-    &mut self,
-    schema: db_engine::TableSchema,
-  ) -> Result<(), DatabaseError> {
-    dispatch::register_table(self, schema).await
+  pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), DatabaseError> {
+    self.engine.register_table(schema).await?;
+    Ok(())
   }
 
   /// Execute an `EngineQuery` directly against the engine.
   pub async fn execute_query(&self, query: EngineQuery) -> Result<EngineResult, DatabaseError> {
-    dispatch::execute_query(self, query).await
+    let result = self.engine.execute(query).await?;
+    Ok(result)
   }
 
   /// Execute a SQL string using the database schema catalog.
   pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, DatabaseError> {
-    dispatch::execute_sql(self, sql).await
+    match parse_and_translate_statement(sql, self) {
+      Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
+        self.register_table(schema).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
+        self.engine.drop_table(&name).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
+        self.engine.register_index(schema).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
+        self.engine.drop_index(&name).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Err(e) => Err(DatabaseError::Other(format!("{e}"))),
+    }
   }
 
   /// Convenience: run a closure in a transaction context.
@@ -119,15 +141,17 @@ where
     F: FnOnce(&mut Transaction<'_, S>) -> Fut,
     Fut: core::future::Future<Output = Result<T, DatabaseError>>,
   {
-    let mut tx = dispatch::begin_transaction(self);
+    let mut tx = Transaction {
+      inner: self.engine.transaction(),
+    };
     let out = f(&mut tx).await;
     match out {
       Ok(v) => {
-        dispatch::transaction_commit(tx).await?;
+        tx.inner.commit().await?;
         Ok(v)
       }
       Err(e) => {
-        let _ = dispatch::transaction_rollback(tx).await;
+        let _ = tx.inner.rollback().await;
         Err(e)
       }
     }
@@ -139,7 +163,8 @@ where
   S: FacadeStore,
 {
   pub async fn insert_row(&mut self, table: &str, row: Row) -> Result<(), DatabaseError> {
-    dispatch::transaction_insert_row(self, table, row).await
+    self.inner.insert_row(table, row).await?;
+    Ok(())
   }
 
   /// Execute a SQL string inside this transaction. Supports INSERT/UPDATE/DELETE.
@@ -149,15 +174,42 @@ where
     resolver: &dyn SchemaResolver,
     sql: &str,
   ) -> Result<EngineResult, DatabaseError> {
-    dispatch::transaction_execute_sql(self, resolver, sql).await
+    let query =
+      parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    match query {
+      EngineQuery::Insert { table, row } => {
+        self.insert_row(&table, row).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+      } => {
+        self
+          .inner
+          .update_rows(&table, assignments, predicate)
+          .await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      EngineQuery::Delete { table, predicate } => {
+        self.inner.delete_rows(&table, predicate).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      EngineQuery::Select { .. } => Err(DatabaseError::Other(
+        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
+      )),
+    }
   }
 
   pub async fn commit(self) -> Result<(), DatabaseError> {
-    dispatch::transaction_commit(self).await
+    self.inner.commit().await?;
+    Ok(())
   }
 
   pub async fn rollback(self) -> Result<(), DatabaseError> {
-    dispatch::transaction_rollback(self).await
+    self.inner.rollback().await?;
+    Ok(())
   }
 }
 
