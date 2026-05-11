@@ -1,7 +1,15 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+#[cfg(feature = "wasm")]
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, format, string::ToString};
 
 #[derive(Clone, Debug)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct CanonicalQuery {
   pub engine_query: db_engine::EngineQuery,
 }
@@ -13,6 +21,11 @@ impl From<db_engine::EngineQuery> for CanonicalQuery {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum DdlOp {
   CreateTable(db_engine::TableSchema),
   DropTable(String),
@@ -21,6 +34,11 @@ pub enum DdlOp {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum CanonicalStatement {
   Query(db_engine::EngineQuery),
   Ddl(DdlOp),

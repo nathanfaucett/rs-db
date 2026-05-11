@@ -20,40 +20,28 @@ workspace = true
 [features]
 default = ["std", "automerge", "redb"]
 std = []
-redb = ["std", "db-redb", "dep:redb"]
-automerge = ["std", "db-automerge"]
+redb = ["std", "db-facade/redb"]
+automerge = ["std", "db-facade/automerge"]
 
 [lib]
 name = "db"
 
 [dependencies]
-db-engine = { path = "crates/db-engine", default-features = false, features = [
+db-facade = { path = "crates/db-facade", default-features = false, features = [
     "std",
 ] }
-db-in-memory = { path = "crates/db-in-memory", default-features = false, features = [
-    "std",
-] }
-db-redb = { path = "crates/db-redb", default-features = false, optional = true }
-db-automerge = { path = "crates/db-automerge", default-features = false, optional = true }
-thiserror = { version = "1.0", default-features = false }
-db-sql-to-engine = { path = "crates/db-sql-to-engine", default-features = false, features = [
-    "std",
-] }
+
+[dev-dependencies]
 db-core = { path = "crates/db-core", default-features = false, features = [
     "std",
 ] }
-futures = { version = "0.3", default-features = false }
-db-types = { path = "crates/db-types", default-features = false, features = [
+db-engine = { path = "crates/db-engine", default-features = false, features = [
     "std",
 ] }
-redb = { version = "4.0", default-features = false, features = [
-], optional = true }
-uuid = { version = "1.18", default-features = false }
-
-[dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 [workspace]
 members = [
+    "crates/db-facade",
     "crates/db-core",
     "crates/db-types",
     "crates/db-engine",

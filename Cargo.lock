@@ -236,17 +236,10 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
- "db-automerge",
  "db-core",
  "db-engine",
- "db-in-memory",
- "db-redb",
- "db-sql-to-engine",
- "db-types",
+ "db-facade",
  "futures",
- "redb",
- "thiserror 1.0.69",
- "uuid",
 ]
 
 [[package]]
@@ -297,6 +290,22 @@ dependencies = [
  "thiserror 1.0.69",
  "tsify",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "db-facade"
+version = "0.1.0"
+dependencies = [
+ "db-automerge",
+ "db-core",
+ "db-engine",
+ "db-in-memory",
+ "db-redb",
+ "db-sql-to-engine",
+ "db-types",
+ "futures",
+ "redb",
+ "uuid",
 ]
 
 [[package]]
@@ -353,10 +362,14 @@ dependencies = [
  "console_error_panic_hook",
  "db-core",
  "db-engine",
+ "db-facade",
  "db-sql-to-engine",
  "db-types",
+ "js-sys",
+ "serde-wasm-bindgen",
  "tsify",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -550,19 +563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gloo-utils"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5555354113b18c547c1d3a98fbf7fb32a9ff4f6fa112ce823a21641a0ba3aa"
-dependencies = [
- "js-sys",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,6 +651,8 @@ version = "0.3.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca"
 dependencies = [
+ "cfg-if",
+ "futures-util",
  "once_cell",
  "wasm-bindgen",
 ]
@@ -1095,10 +1097,8 @@ version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ec5505497c87f1c050b4392d3f11b49a04537fcb9dc0da57bc0af168a6331f2"
 dependencies = [
- "gloo-utils",
  "serde",
  "serde-wasm-bindgen",
- "serde_json",
  "tsify-macros",
  "wasm-bindgen",
 ]
@@ -1189,6 +1189,16 @@ dependencies = [
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.68"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f371d383f2fb139252e0bfac3b81b265689bf45b6874af544ffa4c975ac1ebf8"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

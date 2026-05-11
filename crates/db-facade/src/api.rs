@@ -1,14 +1,16 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use alloc::format;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{format, vec::Vec};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 #[cfg(feature = "automerge")]
 use db_automerge::{AutoCommit, AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "automerge")]
 use db_core::{BTree, BTreeExecutor, BTreeTransaction};
-use db_engine::{EngineDatabase, EngineQuery, EngineResult, TableSchema};
+use db_engine::{EngineDatabase, EngineQuery, EngineResult, IndexSchema, TableSchema};
 #[cfg(feature = "redb")]
 use db_engine::{EngineKey, EngineRow};
 #[cfg(feature = "automerge")]
@@ -52,11 +54,15 @@ where
 }
 
 impl Database<InMemoryEngineStore> {
-  /// Open an in-memory database (dev/test convenience).
-  pub async fn open_in_memory() -> Result<Self, DatabaseError> {
+  pub fn open_in_memory_sync() -> Self {
     let store = InMemoryNamedBTree::new();
     let engine = EngineDatabase::new(store);
-    Ok(Self { engine })
+    Self { engine }
+  }
+
+  /// Open an in-memory database (dev/test convenience).
+  pub async fn open_in_memory() -> Result<Self, DatabaseError> {
+    Ok(Self::open_in_memory_sync())
   }
 }
 
@@ -232,9 +238,28 @@ impl<S> Database<S>
 where
   S: FacadeStore,
 {
+  pub fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
+    self.engine.describe_table(table_name)
+  }
+
   /// Register a table schema with the engine.
   pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), DatabaseError> {
     self.engine.register_table(schema).await?;
+    Ok(())
+  }
+
+  pub async fn drop_table(&mut self, table_name: &str) -> Result<(), DatabaseError> {
+    self.engine.drop_table(table_name).await?;
+    Ok(())
+  }
+
+  pub async fn register_index(&mut self, schema: IndexSchema) -> Result<(), DatabaseError> {
+    self.engine.register_index(schema).await?;
+    Ok(())
+  }
+
+  pub async fn drop_index(&mut self, index_name: &str) -> Result<(), DatabaseError> {
+    self.engine.drop_index(index_name).await?;
     Ok(())
   }
 

@@ -1,6 +1,11 @@
 use crate::{EngineRow, EngineValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum UpdateValueExpr {
   Value(EngineValue),
   Column(QualifiedColumn),
@@ -11,6 +16,11 @@ pub enum UpdateValueExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct UpdateAssignment {
   pub column_index: usize,
   pub value: UpdateValueExpr,
@@ -26,12 +36,22 @@ impl UpdateAssignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct QualifiedColumn {
   pub table: String,
   pub column_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum JoinKind {
   Inner,
   Left,
@@ -40,6 +60,11 @@ pub enum JoinKind {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum JoinOn {
   ColumnEq {
     left: QualifiedColumn,
@@ -48,6 +73,11 @@ pub enum JoinOn {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct JoinClause {
   pub kind: JoinKind,
   pub left_table: String,
@@ -56,6 +86,11 @@ pub struct JoinClause {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum Aggregate {
   Count(Option<QualifiedColumn>),
   Sum(QualifiedColumn),
@@ -65,23 +100,43 @@ pub enum Aggregate {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum SortDirection {
   Asc,
   Desc,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct OrderBy {
   pub expr: QualifiedColumn,
   pub direction: SortDirection,
 }
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum QualifiedOperand {
   Column(QualifiedColumn),
   Value(crate::EngineValue),
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum QualifiedPredicate {
   Equals(QualifiedOperand, QualifiedOperand),
   NotEquals(QualifiedOperand, QualifiedOperand),
@@ -107,12 +162,22 @@ pub enum QualifiedPredicate {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum RefOrAgg {
   Column(QualifiedColumn),
   AggregateIndex(usize),
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum HavingPredicate {
   Equals(RefOrAgg, crate::EngineValue),
   NotEquals(RefOrAgg, crate::EngineValue),
@@ -128,6 +193,11 @@ pub enum HavingPredicate {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct SelectOptions {
   pub joins: Vec<JoinClause>,
   pub aggregates: Vec<Aggregate>,
@@ -140,6 +210,11 @@ pub struct SelectOptions {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum EngineQuery {
   Select {
     table: String,
@@ -167,6 +242,11 @@ pub enum EngineQuery {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct EngineResult {
   pub rows: Vec<EngineRow>,
 }

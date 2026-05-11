@@ -1,0 +1,14 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+mod api;
+mod types;
+
+#[cfg(feature = "automerge")]
+pub use types::InMemoryAutomergeStore;
+#[cfg(all(feature = "automerge", feature = "redb"))]
+pub use types::RedbAutomergeStore;
+#[cfg(feature = "redb")]
+pub use types::RedbEngineStore;
+#[cfg(feature = "automerge")]
+pub use types::{AutomergeSyncMetrics, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec};
+pub use types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};

@@ -40,7 +40,7 @@ clean:
     cargo clean
 
 wasm:
-    cd ./crates/db-wasm && wasm-pack build --target web
+    cd ./crates/db-wasm && wasm-pack build --target web && node ./scripts/postbuild.mjs
 
 doc:
     cargo doc --workspace --no-deps

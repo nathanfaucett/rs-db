@@ -1,9 +1,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "automerge")]
