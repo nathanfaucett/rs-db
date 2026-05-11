@@ -1973,6 +1973,39 @@ mod tests {
   }
 
   #[test]
+  fn empty_table_select_returns_no_rows() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+
+      database
+        .register_table(TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "score".into(),
+              data_type: EngineType::Integer,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register users table");
+
+      let result = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select empty users");
+
+      assert!(result.rows.is_empty());
+    });
+  }
+
+  #[test]
   fn unique_index_violates_on_insert() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();

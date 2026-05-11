@@ -86,6 +86,26 @@ mod tests {
   }
 
   #[test]
+  fn automerge_in_memory_empty_table_select_returns_no_rows() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      let result = db
+        .execute_sql("SELECT id, score FROM users;")
+        .await
+        .expect("select empty users");
+
+      assert!(result.rows.is_empty());
+    });
+  }
+
+  #[test]
   fn automerge_in_memory_update_delete_sql_roundtrip() {
     block_on(async {
       let mut db = Database::open_automerge_in_memory()

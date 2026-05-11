@@ -42,17 +42,11 @@ fn seed_joined_row_states(
 ) -> JoinedRowStates {
   let mut partial_results: JoinedRowStates = Vec::new();
   if let Some(base_rows) = table_rows_map.get(base_table) {
-    if !base_rows.is_empty() {
-      for row in base_rows {
-        let mut m = template.clone();
-        m.insert(base_table.to_string(), Some(row.clone()));
-        partial_results.push(m);
-      }
-    } else {
-      partial_results.push(template.clone());
+    for row in base_rows {
+      let mut m = template.clone();
+      m.insert(base_table.to_string(), Some(row.clone()));
+      partial_results.push(m);
     }
-  } else {
-    partial_results.push(template.clone());
   }
   partial_results
 }
