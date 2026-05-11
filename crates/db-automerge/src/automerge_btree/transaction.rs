@@ -8,6 +8,7 @@ use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
 use super::codec::encode_doc_key_range_value_codec;
+use super::hash::hash_hashes;
 use super::hash::hash_heads;
 use super::key::{all_document_bounds, document_entry_bounds};
 use super::reconstruction::reconstruct;
@@ -86,19 +87,18 @@ where
   async fn reconstruct_inner_doc(&self, doc_id: Uuid) -> Result<Option<Vec<u8>>, BTreeError> {
     let (start, end) = document_entry_bounds(doc_id);
     let mut latest_snapshot: Option<Vec<u8>> = None;
-    let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+    let mut deltas: Vec<Vec<u8>> = Vec::new();
 
-    let stream = self.inner_tx.range(start.clone()..=end.clone());
+    let stream = self.inner_tx.range(start..=end);
     futures::pin_mut!(stream);
     let mut has_entries = false;
     while let Some(item) = stream.next().await {
       let (key, entry) = item?;
       has_entries = true;
       if key.doc_type.is_snapshot() {
-        latest_snapshot = Some(entry.clone());
-        deltas_after_snapshot.clear();
+        latest_snapshot = Some(entry);
       } else {
-        deltas_after_snapshot.push(entry.clone());
+        deltas.push(entry);
       }
     }
 
@@ -106,10 +106,7 @@ where
       return Ok(None);
     }
 
-    Ok(Some(reconstruct_state(
-      latest_snapshot,
-      &deltas_after_snapshot,
-    )))
+    Ok(Some(reconstruct_state(latest_snapshot, &deltas)))
   }
 }
 
@@ -124,46 +121,78 @@ where
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
-        // staged insert: write a snapshot internal entry
         let mut doc = snapshot_doc;
-        let change_hash = hash_heads(&doc.get_heads());
-        let bytes = doc.save();
 
-        // Remove all existing snapshot entries for this doc so stale
-        // snapshots do not survive and produce non-deterministic
-        // reconstruction when their hashes do not sort in causal order.
-        let snap_start = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash: [0u8; 32],
-        };
-        let snap_end = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash: [255u8; 32],
-        };
+        // Reconstruct the existing committed state. If the doc already exists
+        // write only the Incremental delta; if new write a full Snapshot.
+        // This mirrors AutomergeBTree::insert and avoids multiple Snapshot
+        // entries with different hashes (non-deterministic reconstruction).
+        // Compaction collapses Incremental chains over time.
+        let existing_state: Option<Vec<u8>> = {
+          let (start, end) = document_entry_bounds(doc_id);
+          let mut latest_snapshot: Option<Vec<u8>> = None;
+          let mut deltas: Vec<Vec<u8>> = Vec::new();
+          let mut has_entries = false;
 
-        let old_snap_keys: alloc::vec::Vec<DocumentChangeKey> = {
-          let mut collected = alloc::vec::Vec::new();
-          let stream = inner_tx.range(snap_start..=snap_end);
+          let stream = inner_tx.range(start..=end);
           futures::pin_mut!(stream);
           while let Some(item) = stream.next().await {
-            let (k, _) = item?;
-            collected.push(k);
+            let (key, entry) = item?;
+            has_entries = true;
+            if key.doc_type.is_snapshot() {
+              latest_snapshot = Some(entry);
+            } else {
+              deltas.push(entry);
+            }
           }
-          collected
+
+          if has_entries {
+            Some(reconstruct_state(latest_snapshot, &deltas))
+          } else {
+            None
+          }
         };
 
-        for k in old_snap_keys {
-          inner_tx.remove(&k).await?;
+        if let Some(existing_bytes) = existing_state {
+          let mut current_doc = load_autocommit(&existing_bytes)?;
+          let changes = doc.get_changes(&current_doc.get_heads());
+
+          if changes.is_empty() {
+            // Identical state — same hash, same key, nothing new to write.
+            continue;
+          }
+
+          let mut delta_bytes = Vec::new();
+          let mut change_hashes = Vec::with_capacity(changes.len());
+          for c in &changes {
+            delta_bytes.extend_from_slice(c.raw_bytes());
+            change_hashes.push(c.hash().0);
+          }
+          let change_hash = hash_hashes(change_hashes);
+          inner_tx
+            .insert(
+              DocumentChangeKey {
+                doc_id,
+                doc_type: DocumentType::Incremental,
+                change_hash,
+              },
+              delta_bytes,
+            )
+            .await?;
+        } else {
+          let change_hash = hash_heads(&doc.get_heads());
+          let bytes = doc.save();
+          inner_tx
+            .insert(
+              DocumentChangeKey {
+                doc_id,
+                doc_type: DocumentType::Snapshot,
+                change_hash,
+              },
+              bytes,
+            )
+            .await?;
         }
-
-        let key = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash,
-        };
-        inner_tx.insert(key, bytes).await?;
       } else {
         // staged delete: remove all internal entries for this doc_id
         let (start, end) = document_entry_bounds(doc_id);
@@ -281,10 +310,9 @@ where
         }
 
         if k.doc_type.is_snapshot() {
-          latest_snapshot = Some(v.clone());
-          deltas_after_snapshot.clear();
+          latest_snapshot = Some(v);
         } else {
-          deltas_after_snapshot.push(v.clone());
+          deltas_after_snapshot.push(v);
         }
       }
 

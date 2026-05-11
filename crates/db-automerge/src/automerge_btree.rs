@@ -660,7 +660,12 @@ mod tests {
         .get_document(doc_id)
         .await
         .expect("final get_document");
-      assert_eq!(final_state, expected_read_state);
+      // After compaction, the store contains a Snapshot (compacted from the
+      // concurrent read state) plus the writer's Incremental delta inserted
+      // after compaction. Reconstruction yields snapshot + delta.
+      let mut expected_final_state = expected_read_state.clone();
+      expected_final_state.extend_from_slice(&writer_delta);
+      assert_eq!(final_state, expected_final_state);
 
       let actual_writer_value = underlying
         .get(&writer_key)

@@ -31,7 +31,10 @@ impl ReconstructionAccumulator {
   pub(super) fn apply(&mut self, doc_type: DocumentType, entry: Vec<u8>) {
     if doc_type.is_snapshot() {
       self.latest_snapshot = Some(entry);
-      self.deltas_after_snapshot.clear();
+      // Do not clear deltas: Incremental entries sort before Snapshots in key
+      // space (Incremental=0 < Snapshot=1), so accumulated deltas may
+      // represent changes that are causally after the snapshot. Automerge
+      // handles duplicate pre-snapshot changes idempotently.
     } else {
       self.deltas_after_snapshot.push(entry);
     }

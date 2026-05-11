@@ -94,9 +94,12 @@ where
         Ok(pair) => pair,
         Err(err) => return Err(CompactionError::Scan(err)),
       };
-      if k.change_hash != new_hash {
-        collected.push(k);
+      // Remove all old entries: any Incremental (deltas) or Snapshot with mismatched hash
+      if k.doc_type.is_snapshot() && k.change_hash == new_hash {
+        // Skip the new compacted snapshot itself
+        continue;
       }
+      collected.push(k);
     }
     collected
   };
