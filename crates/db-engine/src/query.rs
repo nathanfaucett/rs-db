@@ -1,5 +1,30 @@
 use crate::{EngineRow, EngineValue};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateValueExpr {
+  Value(EngineValue),
+  Column(QualifiedColumn),
+  Add(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
+  Subtract(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
+  Multiply(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
+  Divide(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAssignment {
+  pub column_index: usize,
+  pub value: UpdateValueExpr,
+}
+
+impl UpdateAssignment {
+  pub fn value(column_index: usize, value: EngineValue) -> Self {
+    Self {
+      column_index,
+      value: UpdateValueExpr::Value(value),
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QualifiedColumn {
   pub table: String,
@@ -128,12 +153,16 @@ pub enum EngineQuery {
   },
   Update {
     table: String,
-    assignments: Vec<(usize, EngineValue)>,
+    assignments: Vec<UpdateAssignment>,
     predicate: Option<QualifiedPredicate>,
+    joins: Vec<JoinClause>,
+    from_tables: Vec<String>,
+    returning: Option<Vec<QualifiedColumn>>,
   },
   Delete {
     table: String,
     predicate: Option<QualifiedPredicate>,
+    returning: Option<Vec<QualifiedColumn>>,
   },
 }
 

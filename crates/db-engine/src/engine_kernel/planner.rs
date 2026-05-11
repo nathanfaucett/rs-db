@@ -176,17 +176,33 @@ where
         table,
         assignments,
         predicate,
+        joins,
+        from_tables,
+        returning,
       } => {
         let mut writer = self.writer();
-        writer.update(&table, assignments, predicate).await?;
+        let rows = writer
+          .update(
+            &table,
+            assignments,
+            predicate,
+            joins,
+            from_tables,
+            returning,
+          )
+          .await?;
         writer.commit().await?;
-        Ok(EngineResult::default())
+        Ok(EngineResult::new(rows))
       }
-      EngineQuery::Delete { table, predicate } => {
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => {
         let mut writer = self.writer();
-        writer.delete(&table, predicate).await?;
+        let rows = writer.delete(&table, predicate, returning).await?;
         writer.commit().await?;
-        Ok(EngineResult::default())
+        Ok(EngineResult::new(rows))
       }
     }
   }

@@ -10,10 +10,11 @@ use alloc::{
 pub use db_engine::SchemaResolver;
 use hashbrown::HashMap;
 use sqlparser::ast::{
-  BinaryOperator, ColumnOption, CreateIndex, CreateTable, DataType, Expr as SqlExpr, FunctionArg,
-  FunctionArgExpr, FunctionArguments, GroupByExpr, JoinConstraint, JoinOperator, LimitClause,
-  ObjectName, ObjectType, Query, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
-  Value as SqlValue,
+  AssignmentTarget, BinaryOperator, ColumnOption, CreateIndex, CreateTable, DataType,
+  Delete as SqlDelete, Expr as SqlExpr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
+  GroupByExpr, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType, Query,
+  SelectItem, SetExpr, Statement, TableConstraint, TableFactor, Update as SqlUpdate,
+  UpdateTableFromKind, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -574,8 +575,368 @@ pub fn translate_statement(
         _ => Err(TranslateError::UnsupportedStatement),
       }
     }
+    Statement::Update(update) => translate_update(update, resolver, mapper),
+    Statement::Delete(delete) => translate_delete(delete, resolver, mapper),
     Statement::Insert(insert) => translate_insert(insert, resolver, mapper),
     _ => Err(TranslateError::UnsupportedStatement),
+  }
+}
+
+fn translate_update(
+  update: &SqlUpdate,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  if update.limit.is_some() {
+    return Err(TranslateError::UnsupportedFeature(
+      "UPDATE LIMIT is not supported".into(),
+    ));
+  }
+
+  let mut alias_map: HashMap<String, String> = HashMap::new();
+  let mut referenced_tables: Vec<String> = Vec::new();
+  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+
+  let table = parse_from_clause(
+    &update.table,
+    resolver,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+  )?;
+
+  let mut joins = parse_joins(
+    &update.table.joins,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+    resolver,
+    &table,
+  )?;
+
+  let mut from_tables: Vec<String> = Vec::new();
+  if let Some(update_from) = &update.from {
+    let from_items = match update_from {
+      UpdateTableFromKind::BeforeSet(items) | UpdateTableFromKind::AfterSet(items) => items,
+    };
+
+    for from_item in from_items {
+      let from_base = parse_from_clause(
+        from_item,
+        resolver,
+        &mut alias_map,
+        &mut referenced_tables,
+        &mut table_schemas,
+      )?;
+      from_tables.push(from_base.clone());
+      joins.extend(parse_joins(
+        &from_item.joins,
+        &mut alias_map,
+        &mut referenced_tables,
+        &mut table_schemas,
+        resolver,
+        &from_base,
+      )?);
+    }
+  }
+
+  let schema = resolver
+    .describe_table(&table)
+    .ok_or_else(|| TranslateError::UnknownTable(table.clone()))?;
+
+  let mut resolved_assignments: Vec<db_engine::UpdateAssignment> = Vec::new();
+  for assignment in &update.assignments {
+    let column = assignment_target_column_name(&assignment.target, &alias_map, &table)?;
+    let column_index = schema
+      .columns
+      .iter()
+      .position(|column_schema| column_schema.name == column)
+      .ok_or_else(|| TranslateError::UnknownColumn(column.clone()))?;
+    let value =
+      sql_expr_to_update_value_expr(&assignment.value, &alias_map, &table_schemas, mapper)?;
+    resolved_assignments.push(db_engine::UpdateAssignment {
+      column_index,
+      value,
+    });
+  }
+
+  let predicate = if let Some(selection) = &update.selection {
+    Some(expr_to_qualified_predicate(
+      selection,
+      &alias_map,
+      &table_schemas,
+      resolver,
+      mapper,
+    )?)
+  } else {
+    None
+  };
+
+  let returning = if let Some(returning_items) = &update.returning {
+    Some(translate_returning_projection(
+      returning_items,
+      &table,
+      &alias_map,
+      &table_schemas,
+    )?)
+  } else {
+    None
+  };
+
+  Ok(db_engine::EngineQuery::Update {
+    table,
+    assignments: resolved_assignments,
+    predicate,
+    joins,
+    from_tables,
+    returning,
+  })
+}
+
+fn sql_expr_to_update_value_expr(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  match expr {
+    SqlExpr::Value(_) => Ok(db_engine::UpdateValueExpr::Value(
+      mapper.map_sql_value(expr)?,
+    )),
+    SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_) => {
+      let column = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
+      Ok(db_engine::UpdateValueExpr::Column(column))
+    }
+    SqlExpr::BinaryOp { left, op, right } => {
+      let left_expr = sql_expr_to_update_value_expr(left, alias_map, table_schemas, mapper)?;
+      let right_expr = sql_expr_to_update_value_expr(right, alias_map, table_schemas, mapper)?;
+      match op {
+        BinaryOperator::Plus => Ok(db_engine::UpdateValueExpr::Add(
+          Box::new(left_expr),
+          Box::new(right_expr),
+        )),
+        BinaryOperator::Minus => Ok(db_engine::UpdateValueExpr::Subtract(
+          Box::new(left_expr),
+          Box::new(right_expr),
+        )),
+        BinaryOperator::Multiply => Ok(db_engine::UpdateValueExpr::Multiply(
+          Box::new(left_expr),
+          Box::new(right_expr),
+        )),
+        BinaryOperator::Divide => Ok(db_engine::UpdateValueExpr::Divide(
+          Box::new(left_expr),
+          Box::new(right_expr),
+        )),
+        _ => Err(TranslateError::UnsupportedFeature(
+          "unsupported operator in UPDATE assignment expression".into(),
+        )),
+      }
+    }
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported UPDATE assignment expression".into(),
+    )),
+  }
+}
+
+fn translate_delete(
+  delete: &SqlDelete,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  if !delete.tables.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "multi-table DELETE is not supported".into(),
+    ));
+  }
+  if delete.using.is_some() {
+    return Err(TranslateError::UnsupportedFeature(
+      "DELETE USING is not supported".into(),
+    ));
+  }
+  if !delete.order_by.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "DELETE ORDER BY is not supported".into(),
+    ));
+  }
+  if delete.limit.is_some() {
+    return Err(TranslateError::UnsupportedFeature(
+      "DELETE LIMIT is not supported".into(),
+    ));
+  }
+
+  let from_tables = match &delete.from {
+    FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+  };
+  if from_tables.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "DELETE requires exactly one target table".into(),
+    ));
+  }
+
+  let target = &from_tables[0];
+  if !target.joins.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "DELETE with JOIN is not supported".into(),
+    ));
+  }
+
+  let mut alias_map: HashMap<String, String> = HashMap::new();
+  let mut referenced_tables: Vec<String> = Vec::new();
+  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+
+  let table = parse_from_clause(
+    target,
+    resolver,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+  )?;
+
+  let predicate = if let Some(selection) = &delete.selection {
+    Some(expr_to_qualified_predicate(
+      selection,
+      &alias_map,
+      &table_schemas,
+      resolver,
+      mapper,
+    )?)
+  } else {
+    None
+  };
+
+  let returning = if let Some(returning_items) = &delete.returning {
+    Some(translate_returning_projection(
+      returning_items,
+      &table,
+      &alias_map,
+      &table_schemas,
+    )?)
+  } else {
+    None
+  };
+
+  Ok(db_engine::EngineQuery::Delete {
+    table,
+    predicate,
+    returning,
+  })
+}
+
+fn translate_returning_projection(
+  returning: &[SelectItem],
+  target_table: &str,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<Vec<db_engine::QualifiedColumn>, TranslateError> {
+  let schema = table_schemas
+    .get(target_table)
+    .ok_or_else(|| TranslateError::UnknownTable(target_table.to_string()))?;
+
+  let mut projection: Vec<db_engine::QualifiedColumn> = Vec::new();
+  for item in returning {
+    match item {
+      SelectItem::Wildcard(_) => {
+        projection.extend(
+          (0..schema.columns.len()).map(|index| db_engine::QualifiedColumn {
+            table: target_table.to_string(),
+            column_index: index,
+          }),
+        );
+      }
+      SelectItem::QualifiedWildcard(kind, _) => {
+        let table_name = match kind {
+          sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+            let raw = object_name_to_string(name);
+            alias_map.get(&raw).cloned().unwrap_or(raw)
+          }
+          _ => {
+            return Err(TranslateError::UnsupportedFeature(
+              "RETURNING qualified wildcard expression is not supported".into(),
+            ));
+          }
+        };
+        if table_name != target_table {
+          return Err(TranslateError::UnsupportedFeature(
+            "RETURNING can reference only target table columns".into(),
+          ));
+        }
+        projection.extend(
+          (0..schema.columns.len()).map(|index| db_engine::QualifiedColumn {
+            table: target_table.to_string(),
+            column_index: index,
+          }),
+        );
+      }
+      SelectItem::UnnamedExpr(expr) => {
+        let qc = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
+        if qc.table != target_table {
+          return Err(TranslateError::UnsupportedFeature(
+            "RETURNING can reference only target table columns".into(),
+          ));
+        }
+        projection.push(qc);
+      }
+      SelectItem::ExprWithAlias { expr, .. } => {
+        let qc = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
+        if qc.table != target_table {
+          return Err(TranslateError::UnsupportedFeature(
+            "RETURNING can reference only target table columns".into(),
+          ));
+        }
+        projection.push(qc);
+      }
+    }
+  }
+
+  Ok(projection)
+}
+
+fn assignment_target_column_name(
+  target: &AssignmentTarget,
+  alias_map: &HashMap<String, String>,
+  target_table: &str,
+) -> Result<String, TranslateError> {
+  match target {
+    AssignmentTarget::ColumnName(name) => object_name_to_column(name, alias_map, target_table),
+    AssignmentTarget::Tuple(_) => Err(TranslateError::UnsupportedFeature(
+      "tuple assignment in UPDATE is not supported".into(),
+    )),
+  }
+}
+
+fn object_name_to_column(
+  name: &ObjectName,
+  alias_map: &HashMap<String, String>,
+  target_table: &str,
+) -> Result<String, TranslateError> {
+  let parts = name
+    .0
+    .iter()
+    .map(|part| {
+      part
+        .as_ident()
+        .map(|ident| ident.value.clone())
+        .ok_or_else(|| TranslateError::UnsupportedFeature("unsupported object name part".into()))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+
+  match parts.as_slice() {
+    [column] => Ok(column.clone()),
+    [table, column] => {
+      let resolved_table = alias_map
+        .get(table)
+        .cloned()
+        .unwrap_or_else(|| table.clone());
+      if resolved_table != target_table {
+        return Err(TranslateError::UnsupportedFeature(
+          "assignment target must reference the update table".into(),
+        ));
+      }
+      Ok(column.clone())
+    }
+    _ => Err(TranslateError::UnsupportedFeature(
+      "assignment target must be column or table.column".into(),
+    )),
   }
 }
 
@@ -1172,7 +1533,7 @@ mod tests {
   use super::*;
   use db_engine::{
     ColumnSchema, EngineQuery, EngineType, EngineValue, JoinKind, JoinOn, QualifiedColumn,
-    QualifiedOperand, QualifiedPredicate, TableSchema,
+    QualifiedOperand, QualifiedPredicate, TableSchema, UpdateAssignment, UpdateValueExpr,
   };
   use std::collections::HashMap;
 
@@ -1573,6 +1934,425 @@ mod tests {
         assert_eq!(
           row,
           vec![EngineValue::Integer(1), EngineValue::Text("One".into())]
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_update_values() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate("UPDATE users SET score = 11 WHERE id = 1;", &resolver)
+      .expect("translate update");
+
+    match q {
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      } => {
+        assert_eq!(table, "users");
+        assert_eq!(assignments.len(), 1);
+        assert!(joins.is_empty());
+        assert!(from_tables.is_empty());
+        assert!(returning.is_none());
+        assert_eq!(
+          assignments[0],
+          UpdateAssignment {
+            column_index: 2,
+            value: UpdateValueExpr::Value(EngineValue::Integer(11)),
+          }
+        );
+
+        match predicate {
+          Some(QualifiedPredicate::Equals(
+            QualifiedOperand::Column(qc),
+            QualifiedOperand::Value(v),
+          )) => {
+            assert_eq!(qc.table, "users");
+            assert_eq!(qc.column_index, 0);
+            assert_eq!(v, EngineValue::Integer(1));
+          }
+          other => panic!("unexpected predicate: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_update_expression_value() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate(
+      "UPDATE users SET score = score + 1 WHERE id = 1;",
+      &resolver,
+    )
+    .expect("translate update expression");
+
+    match q {
+      EngineQuery::Update { assignments, .. } => {
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].column_index, 1);
+        assert_eq!(
+          assignments[0].value,
+          UpdateValueExpr::Add(
+            Box::new(UpdateValueExpr::Column(QualifiedColumn {
+              table: "users".into(),
+              column_index: 1,
+            })),
+            Box::new(UpdateValueExpr::Value(EngineValue::Integer(1)))
+          )
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_update_join_expression_value() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "team_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+    tables.insert(
+      "teams".into(),
+      TableSchema {
+        name: "teams".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "bonus".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate(
+      "UPDATE users u JOIN teams t ON u.team_id = t.id SET score = score + t.bonus WHERE u.id = 1;",
+      &resolver,
+    )
+    .expect("translate update join expression");
+
+    match q {
+      EngineQuery::Update {
+        assignments,
+        joins,
+        from_tables,
+        returning,
+        ..
+      } => {
+        assert_eq!(joins.len(), 1);
+        assert!(from_tables.is_empty());
+        assert!(returning.is_none());
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].column_index, 2);
+        assert_eq!(
+          assignments[0].value,
+          UpdateValueExpr::Add(
+            Box::new(UpdateValueExpr::Column(QualifiedColumn {
+              table: "users".into(),
+              column_index: 2,
+            })),
+            Box::new(UpdateValueExpr::Column(QualifiedColumn {
+              table: "teams".into(),
+              column_index: 1,
+            }))
+          )
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_update_from_expression_value() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "team_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+    tables.insert(
+      "teams".into(),
+      TableSchema {
+        name: "teams".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "bonus".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate(
+      "UPDATE users SET score = score + teams.bonus FROM teams WHERE users.team_id = teams.id AND users.id = 1;",
+      &resolver,
+    )
+    .expect("translate update from expression");
+
+    match q {
+      EngineQuery::Update {
+        assignments,
+        joins,
+        from_tables,
+        returning,
+        ..
+      } => {
+        assert!(joins.is_empty());
+        assert_eq!(from_tables, vec!["teams".to_string()]);
+        assert!(returning.is_none());
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].column_index, 2);
+        assert_eq!(
+          assignments[0].value,
+          UpdateValueExpr::Add(
+            Box::new(UpdateValueExpr::Column(QualifiedColumn {
+              table: "users".into(),
+              column_index: 2,
+            })),
+            Box::new(UpdateValueExpr::Column(QualifiedColumn {
+              table: "teams".into(),
+              column_index: 1,
+            }))
+          )
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_delete_values() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q =
+      parse_and_translate("DELETE FROM users WHERE id = 2;", &resolver).expect("translate delete");
+
+    match q {
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => {
+        assert_eq!(table, "users");
+        assert!(returning.is_none());
+        match predicate {
+          Some(QualifiedPredicate::Equals(
+            QualifiedOperand::Column(qc),
+            QualifiedOperand::Value(v),
+          )) => {
+            assert_eq!(qc.table, "users");
+            assert_eq!(qc.column_index, 0);
+            assert_eq!(v, EngineValue::Integer(2));
+          }
+          other => panic!("unexpected predicate: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_delete_returning_projection() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate("DELETE FROM users RETURNING id;", &resolver)
+      .expect("delete returning should translate");
+
+    match q {
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => {
+        assert_eq!(table, "users");
+        assert!(predicate.is_none());
+        let projection = returning.expect("returning projection");
+        assert_eq!(
+          projection,
+          vec![QualifiedColumn {
+            table: "users".into(),
+            column_index: 0,
+          }]
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_update_returning_projection() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate(
+      "UPDATE users SET score = score + 1 RETURNING id, score;",
+      &resolver,
+    )
+    .expect("update returning should translate");
+
+    match q {
+      EngineQuery::Update {
+        returning,
+        joins,
+        from_tables,
+        ..
+      } => {
+        assert!(joins.is_empty());
+        assert!(from_tables.is_empty());
+        let projection = returning.expect("returning projection");
+        assert_eq!(
+          projection,
+          vec![
+            QualifiedColumn {
+              table: "users".into(),
+              column_index: 0,
+            },
+            QualifiedColumn {
+              table: "users".into(),
+              column_index: 1,
+            },
+          ]
         );
       }
       other => panic!("unexpected query kind: {:?}", other),

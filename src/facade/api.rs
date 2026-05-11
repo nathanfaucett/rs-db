@@ -318,17 +318,32 @@ where
         table,
         assignments,
         predicate,
+        joins,
+        from_tables,
+        returning,
       } => {
-        self
+        let result = self
           .inner
-          .update_rows(&table, assignments, predicate)
+          .update_rows_with_sources_and_returning(
+            &table,
+            assignments,
+            predicate,
+            joins,
+            from_tables,
+            returning,
+          )
           .await?;
-        Ok(EngineResult::new(Vec::new()))
+        Ok(result)
       }
-      EngineQuery::Delete { table, predicate } => {
-        self.inner.delete_rows(&table, predicate).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => self
+        .inner
+        .delete_rows_with_returning(&table, predicate, returning)
+        .await
+        .map_err(Into::into),
       EngineQuery::Select { .. } => Err(DatabaseError::Other(
         "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
       )),

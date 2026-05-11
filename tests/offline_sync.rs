@@ -4,7 +4,7 @@ mod tests {
   use db_core::NamedTreeProvider;
   use db_engine::{
     EngineKey, EngineQuery, EngineRow, EngineValue, QualifiedColumn, QualifiedOperand,
-    QualifiedPredicate,
+    QualifiedPredicate, UpdateAssignment,
   };
   use futures::executor::block_on;
 
@@ -357,8 +357,11 @@ mod tests {
       $left
         .execute_query(EngineQuery::Update {
           table: "users".into(),
-          assignments: vec![(2, EngineValue::Integer(11))],
+          assignments: vec![UpdateAssignment::value(2, EngineValue::Integer(11))],
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
         })
         .await
         .expect("update score for alice on left");
@@ -396,6 +399,7 @@ mod tests {
         .execute_query(EngineQuery::Delete {
           table: "users".into(),
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          returning: None,
         })
         .await
         .expect("delete bob on right");
@@ -427,8 +431,14 @@ mod tests {
       $left
         .execute_query(EngineQuery::Update {
           table: "users".into(),
-          assignments: vec![(1, EngineValue::Text("Alice L".into()))],
+          assignments: vec![UpdateAssignment::value(
+            1,
+            EngineValue::Text("Alice L".into()),
+          )],
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
         })
         .await
         .expect("update alice name on left");
@@ -436,8 +446,11 @@ mod tests {
       $right
         .execute_query(EngineQuery::Update {
           table: "users".into(),
-          assignments: vec![(2, EngineValue::Integer(31))],
+          assignments: vec![UpdateAssignment::value(2, EngineValue::Integer(31))],
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(3))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
         })
         .await
         .expect("update cara score on right");

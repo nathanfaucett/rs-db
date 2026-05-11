@@ -85,6 +85,212 @@ mod tests {
     });
   }
 
+  #[test]
+  fn automerge_in_memory_update_delete_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql("INSERT INTO users (id, name, score) VALUES (1, 'Alice', 10);")
+        .await
+        .expect("insert alice");
+      db.execute_sql("INSERT INTO users (id, name, score) VALUES (2, 'Bob', 20);")
+        .await
+        .expect("insert bob");
+
+      db.execute_sql("UPDATE users SET score = 11 WHERE id = 1;")
+        .await
+        .expect("update alice score");
+      db.execute_sql("DELETE FROM users WHERE id = 2;")
+        .await
+        .expect("delete bob");
+
+      let result = db
+        .execute_sql("SELECT id, name, score FROM users;")
+        .await
+        .expect("select users");
+
+      assert_eq!(result.rows.len(), 1);
+      assert_eq!(
+        result.rows[0],
+        vec![
+          EngineValue::Integer(1),
+          EngineValue::Text("Alice".into()),
+          EngineValue::Integer(11),
+        ]
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_update_join_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, team_id INT, score INT);")
+        .await
+        .expect("create users");
+      db.execute_sql("CREATE TABLE teams (id INT PRIMARY KEY, bonus INT);")
+        .await
+        .expect("create teams");
+
+      db.execute_sql("INSERT INTO users (id, team_id, score) VALUES (1, 10, 5);")
+        .await
+        .expect("insert user 1");
+      db.execute_sql("INSERT INTO users (id, team_id, score) VALUES (2, 20, 7);")
+        .await
+        .expect("insert user 2");
+      db.execute_sql("INSERT INTO teams (id, bonus) VALUES (10, 3);")
+        .await
+        .expect("insert team 10");
+      db.execute_sql("INSERT INTO teams (id, bonus) VALUES (20, 4);")
+        .await
+        .expect("insert team 20");
+
+      db.execute_sql(
+        "UPDATE users u JOIN teams t ON u.team_id = t.id SET score = score + t.bonus WHERE u.id = 1;",
+      )
+      .await
+      .expect("update joined user score");
+
+      let result = db
+        .execute_sql("SELECT id, score FROM users;")
+        .await
+        .expect("select users");
+
+      assert_eq!(result.rows.len(), 2);
+      assert!(
+        result
+          .rows
+          .contains(&vec![EngineValue::Integer(1), EngineValue::Integer(8),])
+      );
+      assert!(
+        result
+          .rows
+          .contains(&vec![EngineValue::Integer(2), EngineValue::Integer(7),])
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_update_from_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, team_id INT, score INT);")
+        .await
+        .expect("create users");
+      db.execute_sql("CREATE TABLE teams (id INT PRIMARY KEY, bonus INT);")
+        .await
+        .expect("create teams");
+
+      db.execute_sql("INSERT INTO users (id, team_id, score) VALUES (1, 10, 5);")
+        .await
+        .expect("insert user 1");
+      db.execute_sql("INSERT INTO users (id, team_id, score) VALUES (2, 20, 7);")
+        .await
+        .expect("insert user 2");
+      db.execute_sql("INSERT INTO teams (id, bonus) VALUES (10, 3);")
+        .await
+        .expect("insert team 10");
+      db.execute_sql("INSERT INTO teams (id, bonus) VALUES (20, 4);")
+        .await
+        .expect("insert team 20");
+
+      db.execute_sql(
+        "UPDATE users SET score = score + teams.bonus FROM teams WHERE users.team_id = teams.id AND users.id = 1;",
+      )
+      .await
+      .expect("update from user score");
+
+      let result = db
+        .execute_sql("SELECT id, score FROM users;")
+        .await
+        .expect("select users");
+
+      assert_eq!(result.rows.len(), 2);
+      assert!(
+        result
+          .rows
+          .contains(&vec![EngineValue::Integer(1), EngineValue::Integer(8),])
+      );
+      assert!(
+        result
+          .rows
+          .contains(&vec![EngineValue::Integer(2), EngineValue::Integer(7),])
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_update_returning_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql("INSERT INTO users (id, score) VALUES (1, 10);")
+        .await
+        .expect("insert user");
+
+      let result = db
+        .execute_sql("UPDATE users SET score = score + 2 WHERE id = 1 RETURNING id, score;")
+        .await
+        .expect("update returning");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(12)]],
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_delete_returning_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql("INSERT INTO users (id, score) VALUES (1, 10);")
+        .await
+        .expect("insert user");
+
+      let result = db
+        .execute_sql("DELETE FROM users WHERE id = 1 RETURNING id, score;")
+        .await
+        .expect("delete returning");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(10)]],
+      );
+
+      let remaining = db
+        .execute_sql("SELECT id, score FROM users WHERE id = 1;")
+        .await
+        .expect("select users");
+      assert!(remaining.rows.is_empty());
+    });
+  }
+
   #[cfg(feature = "redb")]
   #[test]
   fn automerge_redb_join_returns_two_rows() {

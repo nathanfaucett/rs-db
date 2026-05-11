@@ -1,9 +1,11 @@
 use crate::{
-  EngineError, EngineRow, EngineValue, IndexSchema, TableSchema,
+  EngineError, EngineRow, IndexSchema, TableSchema,
   engine_kernel::{EngineKernel, EngineWriteTxn},
   query::EngineQuery,
   query::EngineResult,
+  query::JoinClause,
   query::QualifiedPredicate,
+  query::UpdateAssignment,
   store_adapter::EngineStore,
 };
 
@@ -98,16 +100,90 @@ where
     table_name: &str,
     predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
-    self.inner.delete(table_name, predicate).await
+    let _ = self.inner.delete(table_name, predicate, None).await?;
+    Ok(())
+  }
+
+  pub async fn delete_rows_with_returning(
+    &mut self,
+    table_name: &str,
+    predicate: Option<QualifiedPredicate>,
+    returning: Option<Vec<crate::query::QualifiedColumn>>,
+  ) -> Result<EngineResult, EngineError> {
+    let rows = self.inner.delete(table_name, predicate, returning).await?;
+    Ok(EngineResult::new(rows))
   }
 
   pub async fn update_rows(
     &mut self,
     table_name: &str,
-    assignments: Vec<(usize, EngineValue)>,
+    assignments: Vec<UpdateAssignment>,
     predicate: Option<QualifiedPredicate>,
   ) -> Result<(), EngineError> {
-    self.inner.update(table_name, assignments, predicate).await
+    let _ = self
+      .inner
+      .update(
+        table_name,
+        assignments,
+        predicate,
+        Vec::new(),
+        Vec::new(),
+        None,
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn update_rows_with_joins(
+    &mut self,
+    table_name: &str,
+    assignments: Vec<UpdateAssignment>,
+    predicate: Option<QualifiedPredicate>,
+    joins: Vec<JoinClause>,
+  ) -> Result<(), EngineError> {
+    let _ = self
+      .inner
+      .update(table_name, assignments, predicate, joins, Vec::new(), None)
+      .await?;
+    Ok(())
+  }
+
+  pub async fn update_rows_with_sources(
+    &mut self,
+    table_name: &str,
+    assignments: Vec<UpdateAssignment>,
+    predicate: Option<QualifiedPredicate>,
+    joins: Vec<JoinClause>,
+    from_tables: Vec<String>,
+  ) -> Result<(), EngineError> {
+    let _ = self
+      .inner
+      .update(table_name, assignments, predicate, joins, from_tables, None)
+      .await?;
+    Ok(())
+  }
+
+  pub async fn update_rows_with_sources_and_returning(
+    &mut self,
+    table_name: &str,
+    assignments: Vec<UpdateAssignment>,
+    predicate: Option<QualifiedPredicate>,
+    joins: Vec<JoinClause>,
+    from_tables: Vec<String>,
+    returning: Option<Vec<crate::query::QualifiedColumn>>,
+  ) -> Result<EngineResult, EngineError> {
+    let rows = self
+      .inner
+      .update(
+        table_name,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      )
+      .await?;
+    Ok(EngineResult::new(rows))
   }
 
   pub async fn commit(self) -> Result<(), EngineError> {
@@ -124,11 +200,11 @@ mod tests {
   use super::*;
   use crate::query::{
     JoinClause, JoinKind, JoinOn, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
-    SelectOptions,
+    SelectOptions, UpdateValueExpr,
   };
   use crate::{
     ColumnSchema, EngineError, EngineKey, EngineQuery, EngineRow, EngineType, EngineValue,
-    IndexSchema, TableSchema,
+    IndexSchema, TableSchema, UpdateAssignment,
   };
   use db_in_memory::InMemoryNamedBTree;
   use db_redb::REDBNamedBTree;
@@ -1541,8 +1617,14 @@ mod tests {
       database
         .execute(EngineQuery::Update {
           table: "users".into(),
-          assignments: vec![(1, EngineValue::Text("Robert".into()))],
+          assignments: vec![UpdateAssignment::value(
+            1,
+            EngineValue::Text("Robert".into()),
+          )],
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
         })
         .await
         .expect("update row");
@@ -1629,8 +1711,14 @@ mod tests {
       let error = database
         .execute(EngineQuery::Update {
           table: "users".into(),
-          assignments: vec![(1, EngineValue::Text("Alice".into()))],
+          assignments: vec![UpdateAssignment::value(
+            1,
+            EngineValue::Text("Alice".into()),
+          )],
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
         })
         .await
         .expect_err("update duplicate unique index row");
@@ -1683,6 +1771,7 @@ mod tests {
         .execute(EngineQuery::Delete {
           table: "users".into(),
           predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          returning: None,
         })
         .await
         .expect("delete first row");
@@ -1698,6 +1787,187 @@ mod tests {
           EngineValue::Integer(2),
           EngineValue::Text("Bob".into())
         ]]
+      );
+    });
+  }
+
+  #[test]
+  fn update_row_with_expression_assignment() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Integer(10)],
+        })
+        .await
+        .expect("insert row");
+
+      database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![UpdateAssignment {
+            column_index: 1,
+            value: UpdateValueExpr::Add(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 1,
+              })),
+              Box::new(UpdateValueExpr::Value(EngineValue::Integer(5))),
+            ),
+          }],
+          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
+        })
+        .await
+        .expect("update row with expression");
+
+      let result = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select row");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(15)]],
+      );
+    });
+  }
+
+  #[test]
+  fn update_row_with_join_assignment_expression() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+
+      database
+        .register_table(TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "team_id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "score".into(),
+              data_type: EngineType::Integer,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register users table");
+
+      database
+        .register_table(TableSchema {
+          name: "teams".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "bonus".into(),
+              data_type: EngineType::Integer,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register teams table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![
+            EngineValue::Integer(1),
+            EngineValue::Integer(10),
+            EngineValue::Integer(5),
+          ],
+        })
+        .await
+        .expect("insert user row");
+      database
+        .execute(EngineQuery::Insert {
+          table: "teams".into(),
+          row: vec![EngineValue::Integer(10), EngineValue::Integer(3)],
+        })
+        .await
+        .expect("insert team row");
+
+      database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![UpdateAssignment {
+            column_index: 2,
+            value: UpdateValueExpr::Add(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 2,
+              })),
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "teams".into(),
+                column_index: 1,
+              })),
+            ),
+          }],
+          predicate: None,
+          joins: vec![JoinClause {
+            kind: JoinKind::Inner,
+            left_table: "users".into(),
+            right_table: "teams".into(),
+            on: JoinOn::ColumnEq {
+              left: QualifiedColumn {
+                table: "users".into(),
+                column_index: 1,
+              },
+              right: QualifiedColumn {
+                table: "teams".into(),
+                column_index: 0,
+              },
+            },
+          }],
+          from_tables: Vec::new(),
+          returning: None,
+        })
+        .await
+        .expect("join update");
+
+      let result = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 2], None))
+        .await
+        .expect("select updated user row");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(8)]],
       );
     });
   }
