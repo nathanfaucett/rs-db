@@ -8,20 +8,10 @@ use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
 use uuid::Uuid;
 
 use super::codec::encode_doc_key_range_value_codec;
-use super::hash::hash_hashes;
-use super::hash::hash_heads;
 use super::key::{all_document_bounds, document_entry_bounds};
-use super::reconstruction::reconstruct;
+use super::lifecycle::{build_lifecycle_write, load_autocommit, reconstruct_state};
 use super::scan::uuid_in_range;
-use super::{AutomergeEntry, DocumentChangeKey, DocumentType, encode_doc_key_range};
-
-fn reconstruct_state(
-  latest_snapshot: Option<Vec<u8>>,
-  deltas_after_snapshot: &[Vec<u8>],
-) -> Vec<u8> {
-  let state = latest_snapshot.unwrap_or_default();
-  reconstruct(&state, deltas_after_snapshot)
-}
+use super::{AutomergeEntry, DocumentChangeKey, encode_doc_key_range};
 
 fn flush_current_doc(
   merged: &mut BTreeMap<Uuid, Vec<u8>>,
@@ -54,10 +44,6 @@ fn apply_pending_overrides<R>(
       merged.remove(doc_id);
     }
   }
-}
-
-fn load_autocommit(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
-  AutoCommit::load(bytes).map_err(BTreeError::other)
 }
 
 fn decode_entry_or_raw<VC>(data: &[u8]) -> Vec<u8>
@@ -121,13 +107,6 @@ where
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
-        let mut doc = snapshot_doc;
-
-        // Reconstruct the existing committed state. If the doc already exists
-        // write only the Incremental delta; if new write a full Snapshot.
-        // This mirrors AutomergeBTree::insert and avoids multiple Snapshot
-        // entries with different hashes (non-deterministic reconstruction).
-        // Compaction collapses Incremental chains over time.
         let existing_state: Option<Vec<u8>> = {
           let (start, end) = document_entry_bounds(doc_id);
           let mut latest_snapshot: Option<Vec<u8>> = None;
@@ -153,45 +132,15 @@ where
           }
         };
 
-        if let Some(existing_bytes) = existing_state {
-          let mut current_doc = load_autocommit(&existing_bytes)?;
-          let changes = doc.get_changes(&current_doc.get_heads());
+        let existing_doc = match existing_state.as_ref() {
+          Some(bytes) => Some(load_autocommit(bytes)?),
+          None => None,
+        };
 
-          if changes.is_empty() {
-            // Identical state — same hash, same key, nothing new to write.
-            continue;
-          }
-
-          let mut delta_bytes = Vec::new();
-          let mut change_hashes = Vec::with_capacity(changes.len());
-          for c in &changes {
-            delta_bytes.extend_from_slice(c.raw_bytes());
-            change_hashes.push(c.hash().0);
-          }
-          let change_hash = hash_hashes(change_hashes);
-          inner_tx
-            .insert(
-              DocumentChangeKey {
-                doc_id,
-                doc_type: DocumentType::Incremental,
-                change_hash,
-              },
-              delta_bytes,
-            )
-            .await?;
-        } else {
-          let change_hash = hash_heads(&doc.get_heads());
-          let bytes = doc.save();
-          inner_tx
-            .insert(
-              DocumentChangeKey {
-                doc_id,
-                doc_type: DocumentType::Snapshot,
-                change_hash,
-              },
-              bytes,
-            )
-            .await?;
+        if let Some((entry_key, entry_bytes)) =
+          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+        {
+          inner_tx.insert(entry_key, entry_bytes).await?;
         }
       } else {
         // staged delete: remove all internal entries for this doc_id
@@ -415,45 +364,56 @@ where
     } = self;
     for (doc_id, op) in pending {
       if let Some(snapshot_doc) = op {
-        let mut doc = snapshot_doc;
-        let change_hash = hash_heads(&doc.get_heads());
-        let bytes = doc.save();
-
         let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
+        let existing_state: Option<Vec<u8>> = {
+          let mut latest_snapshot: Option<Vec<u8>> = None;
+          let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+          let mut has_entries = false;
 
-        let mut found_identical = false;
-        {
           let stream = inner_tx.range(start_enc.clone()..=end_enc.clone());
           futures::pin_mut!(stream);
           while let Some(item) = stream.next().await {
-            let (_k_enc, v_enc) = item?;
-            let v = decode_entry_or_raw::<VC>(&v_enc);
-            if v == bytes {
-              found_identical = true;
-              break;
+            let (k_enc, entry_enc) = item?;
+            let key = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
+              Ok(decoded) => decoded,
+              Err(_) => continue,
+            };
+            has_entries = true;
+            if key.doc_type.is_snapshot() {
+              latest_snapshot = Some(decode_entry_or_raw::<VC>(&entry_enc));
+              deltas_after_snapshot.clear();
+            } else {
+              deltas_after_snapshot.push(decode_entry_or_raw::<VC>(&entry_enc));
             }
           }
-        }
 
-        if found_identical {
-          continue;
-        }
-
-        let key = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash,
+          if has_entries {
+            Some(reconstruct_state(latest_snapshot, &deltas_after_snapshot))
+          } else {
+            None
+          }
         };
-        let mut key_scratch = db_core::KeyScratch::with_capacity(49);
-        <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-          &key_codec,
-          &key,
-          &mut key_scratch,
-        );
-        let val_enc: Vec<u8> = <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&bytes)
-          .as_ref()
-          .to_vec();
-        inner_tx.insert(key_scratch.buf, val_enc).await?;
+
+        let existing_doc = match existing_state.as_ref() {
+          Some(bytes) => Some(load_autocommit(bytes)?),
+          None => None,
+        };
+
+        if let Some((entry_key, entry_bytes)) =
+          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+        {
+          let mut key_scratch = db_core::KeyScratch::with_capacity(49);
+          <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+            &key_codec,
+            &entry_key,
+            &mut key_scratch,
+          );
+          let value_encoded: Vec<u8> =
+            <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&entry_bytes)
+              .as_ref()
+              .to_vec();
+          inner_tx.insert(key_scratch.buf, value_encoded).await?;
+        }
       } else {
         let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
 

@@ -1,8 +1,8 @@
 use super::catalog::EngineCatalog;
-use super::operators::nested_loop_join::{
-  apply_full_join, apply_inner_join, apply_left_join, apply_right_join,
+use super::join_builder::{
+  JoinedRowState, apply_join_clauses, build_join_template, collect_table_rows_map, collect_tables,
+  expand_with_from_tables, seed_joined_row_states,
 };
-use super::select_pipeline::JoinedRowState;
 use crate::predicate::{EvalContext, JoinedRowContext, eval_predicate};
 use crate::store_adapter::{
   EngineStore, EngineStoreTransaction, collect_table_rows, delete_row, find_conflicting_index_entry,
@@ -371,102 +371,13 @@ where
     from_tables: &[String],
     predicate: Option<&QualifiedPredicate>,
   ) -> Result<Vec<(EngineKey, EngineRow, Option<JoinedRowState>)>, EngineError> {
-    let mut all_tables: HashSet<String> = HashSet::new();
-    all_tables.insert(table_name.to_string());
-    for from_table in from_tables {
-      all_tables.insert(from_table.clone());
-    }
-    for join in joins {
-      all_tables.insert(join.left_table.clone());
-      all_tables.insert(join.right_table.clone());
-    }
-
-    let mut table_rows_map: HashMap<String, Vec<EngineRow>> = HashMap::new();
-    for table_name in &all_tables {
-      let rows_with_pk = collect_table_rows(tx, table_name, None).await?;
-      let rows = rows_with_pk
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect::<Vec<_>>();
-      table_rows_map.insert(table_name.clone(), rows);
-    }
-
-    let mut template: JoinedRowState = HashMap::new();
-    for table_name in &all_tables {
-      template.insert(table_name.clone(), None);
-    }
-
-    let base_rows = table_rows_map.get(table_name).cloned().unwrap_or_default();
-    let mut partial_results: Vec<JoinedRowState> = base_rows
-      .iter()
-      .map(|row| {
-        let mut partial = template.clone();
-        partial.insert(table_name.to_string(), Some(row.clone()));
-        partial
-      })
-      .collect();
-
-    for from_table in from_tables {
-      let source_rows = table_rows_map.get(from_table).cloned().unwrap_or_default();
-      if source_rows.is_empty() {
-        partial_results.clear();
-        break;
-      }
-
-      let mut expanded: Vec<JoinedRowState> = Vec::new();
-      for partial in &partial_results {
-        for source_row in &source_rows {
-          let mut next = partial.clone();
-          next.insert(from_table.clone(), Some(source_row.clone()));
-          expanded.push(next);
-        }
-      }
-      partial_results = expanded;
-    }
-
-    for join in joins {
-      let right_rows = table_rows_map
-        .get(&join.right_table)
-        .cloned()
-        .unwrap_or_default();
-
-      let (left_qc, right_qc) = match &join.on {
-        crate::query::JoinOn::ColumnEq { left, right } => (left, right),
-      };
-
-      partial_results = match join.kind {
-        crate::query::JoinKind::Inner => apply_inner_join(
-          &partial_results,
-          &right_rows,
-          &join.right_table,
-          left_qc,
-          right_qc,
-        ),
-        crate::query::JoinKind::Left => apply_left_join(
-          &partial_results,
-          &right_rows,
-          &join.right_table,
-          left_qc,
-          right_qc,
-        ),
-        crate::query::JoinKind::Right => apply_right_join(
-          &partial_results,
-          &right_rows,
-          &join.right_table,
-          left_qc,
-          right_qc,
-          &template,
-        ),
-        crate::query::JoinKind::Full => apply_full_join(
-          &partial_results,
-          &right_rows,
-          &join.right_table,
-          left_qc,
-          right_qc,
-          &template,
-        ),
-      };
-    }
+    let all_tables = collect_tables(table_name, from_tables, joins);
+    let table_rows_map = collect_table_rows_map::<S>(tx, &all_tables).await?;
+    let template = build_join_template(&all_tables);
+    let partial_results = seed_joined_row_states(table_name, &table_rows_map, &template);
+    let partial_results = expand_with_from_tables(partial_results, from_tables, &table_rows_map)?;
+    let mut partial_results =
+      apply_join_clauses(joins, &table_rows_map, &template, partial_results)?;
 
     if let Some(pred) = predicate {
       let eval_ctx = EvalContext::empty();

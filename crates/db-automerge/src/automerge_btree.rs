@@ -10,11 +10,12 @@ mod codec;
 mod compaction;
 mod hash;
 mod key;
+mod lifecycle;
 mod reconstruction;
 mod scan;
 mod transaction;
 
-use crate::automerge_btree::hash::{hash_hashes, hash_heads};
+use crate::automerge_btree::hash::hash_heads;
 
 use self::codec::encode_doc_key_range;
 #[cfg(test)]
@@ -23,6 +24,7 @@ pub use self::codec::{DocumentChangeKeyCodec, VecBytesCodec};
 use self::compaction::{CompactionPolicy, ThresholdPolicy, run_compaction};
 pub use self::key::{AutomergeEntry, DocumentChangeKey, DocumentType};
 use self::key::{all_document_bounds, document_entry_bounds};
+use self::lifecycle::build_lifecycle_write;
 use self::scan::{
   ReconstructionAccumulator, collect_range_keys, flush_reconstructed_doc, load_document,
   scan_document_entries, uuid_in_range,
@@ -117,40 +119,16 @@ where
     }
   }
 
-  async fn insert<'a>(&'a mut self, key: Uuid, mut value: AutoCommit) -> Result<(), BTreeError>
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
   where
     Uuid: Ord,
   {
-    let (internal_key, bytes) = if let Some(mut current_doc) = self.get(key).await? {
-      let changes = value.get_changes(&current_doc.get_heads());
-      let mut bytes = Vec::new();
-      let mut change_hashes = Vec::with_capacity(changes.len());
-      for c in &changes {
-        bytes.extend_from_slice(c.raw_bytes());
-        change_hashes.push(c.hash().0);
-      }
-      let change_hash = hash_hashes(change_hashes);
-
-      let internal_key = DocumentChangeKey {
-        doc_id: key,
-        doc_type: DocumentType::Incremental,
-        change_hash,
-      };
-      (internal_key, bytes)
+    let existing = self.get(key).await?;
+    if let Some((internal_key, bytes)) = build_lifecycle_write(key, value, existing) {
+      self.inner.insert(internal_key, bytes).await
     } else {
-      let heads = value.get_heads();
-      let change_hash = hash_heads(&heads);
-
-      let internal_key = DocumentChangeKey {
-        doc_id: key,
-        doc_type: DocumentType::Snapshot,
-        change_hash,
-      };
-      let bytes = value.save();
-      (internal_key, bytes)
-    };
-
-    self.inner.insert(internal_key, bytes).await
+      Ok(())
+    }
   }
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>

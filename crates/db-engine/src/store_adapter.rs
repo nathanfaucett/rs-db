@@ -11,9 +11,11 @@ use db_types::persistence::{
 };
 use futures::{Stream, StreamExt, pin_mut};
 
+mod backend_contract;
 mod helpers;
 mod transaction;
 
+pub use backend_contract::{BackendCapability, TransactionContract};
 pub(crate) use helpers::{
   collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_rows,
   remove_index_entries, remove_table_rows,
@@ -43,6 +45,13 @@ pub trait EngineStore: Clone + Send + Sync + 'static {
   type Transaction: EngineStoreTransaction + Send + 'static;
 
   fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>>;
+
+  /// Return the transactional contract this backend honors.
+  /// Must be consistent across all calls and implementations.
+  fn transaction_contract(&self) -> TransactionContract {
+    // Default: assume coupled multi-tree atomicity (safest assumption).
+    TransactionContract::coupled_multi_tree()
+  }
 }
 
 /// Engine transaction that routes operations to named trees via a

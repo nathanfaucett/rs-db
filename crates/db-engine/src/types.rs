@@ -31,6 +31,9 @@ pub enum EngineError {
   #[error("type mismatch: {0}")]
   TypeMismatch(String),
 
+  #[error("query limit exceeded: {0}")]
+  QueryLimitExceeded(String),
+
   #[error("primary key missing")]
   PrimaryKeyMissing,
 

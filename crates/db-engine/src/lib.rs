@@ -15,4 +15,5 @@ pub use query::{
 };
 pub use query::{EngineQuery, EngineResult};
 pub use schema_resolver::SchemaResolver;
+pub use store_adapter::{BackendCapability, EngineStore, TransactionContract};
 pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue};

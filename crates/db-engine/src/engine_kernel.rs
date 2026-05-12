@@ -1,5 +1,6 @@
 mod catalog;
 mod executor;
+mod join_builder;
 mod operators;
 mod plan;
 mod planner;

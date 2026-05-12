@@ -32,6 +32,27 @@ type ProjectionParseResult = (
   HashMap<String, db_engine::QualifiedColumn>,
 );
 
+/// Bundles translation context to avoid parameter threading across 20+ functions.
+pub struct TranslationContext<'a> {
+  pub alias_map: HashMap<String, String>,
+  pub referenced_tables: Vec<String>,
+  pub table_schemas: HashMap<String, db_engine::TableSchema>,
+  pub resolver: &'a dyn SchemaResolver,
+  pub mapper: &'a dyn ValueMapper,
+}
+
+impl<'a> TranslationContext<'a> {
+  pub fn new(resolver: &'a dyn SchemaResolver, mapper: &'a dyn ValueMapper) -> Self {
+    Self {
+      alias_map: HashMap::new(),
+      referenced_tables: Vec::new(),
+      table_schemas: HashMap::new(),
+      resolver,
+      mapper,
+    }
+  }
+}
+
 /// Errors returned by the translator.
 #[derive(Error, Debug)]
 pub enum TranslateError {

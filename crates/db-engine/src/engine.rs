@@ -1973,6 +1973,138 @@ mod tests {
   }
 
   #[test]
+  fn update_join_rejects_multiple_matches_for_target_row() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+
+      database
+        .register_table(TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "team_id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "score".into(),
+              data_type: EngineType::Integer,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register users table");
+
+      database
+        .register_table(TableSchema {
+          name: "teams".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "dept_id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "bonus".into(),
+              data_type: EngineType::Integer,
+            },
+          ],
+          primary_key: vec![0],
+        })
+        .await
+        .expect("register teams table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![
+            EngineValue::Integer(1),
+            EngineValue::Integer(10),
+            EngineValue::Integer(5),
+          ],
+        })
+        .await
+        .expect("insert user row");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "teams".into(),
+          row: vec![
+            EngineValue::Integer(100),
+            EngineValue::Integer(10),
+            EngineValue::Integer(3),
+          ],
+        })
+        .await
+        .expect("insert first team row");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "teams".into(),
+          row: vec![
+            EngineValue::Integer(101),
+            EngineValue::Integer(10),
+            EngineValue::Integer(4),
+          ],
+        })
+        .await
+        .expect("insert second team row");
+
+      let result = database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![UpdateAssignment {
+            column_index: 2,
+            value: UpdateValueExpr::Add(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 2,
+              })),
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "teams".into(),
+                column_index: 2,
+              })),
+            ),
+          }],
+          predicate: None,
+          joins: vec![JoinClause {
+            kind: JoinKind::Inner,
+            left_table: "users".into(),
+            right_table: "teams".into(),
+            on: JoinOn::ColumnEq {
+              left: QualifiedColumn {
+                table: "users".into(),
+                column_index: 1,
+              },
+              right: QualifiedColumn {
+                table: "teams".into(),
+                column_index: 1,
+              },
+            },
+          }],
+          from_tables: Vec::new(),
+          returning: None,
+        })
+        .await;
+
+      match result {
+        Err(EngineError::SchemaMismatch(message)) => {
+          assert!(message.contains("matched target row more than once"));
+        }
+        other => panic!("expected SchemaMismatch duplicate-match error, got {other:?}"),
+      }
+    });
+  }
+
+  #[test]
   fn empty_table_select_returns_no_rows() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
