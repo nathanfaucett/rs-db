@@ -230,26 +230,6 @@ where
   decode_schema_rows(rows, decode_index_schema_row)
 }
 
-pub fn make_index_entry_key(
-  index: &IndexSchema,
-  index_key: &EngineKey,
-  row_pk: &EngineKey,
-) -> EngineKey {
-  let n = index.column_indices.len();
-  let mut values = Vec::with_capacity(n + row_pk.values().len());
-  values.extend_from_slice(index_key.values());
-  values.extend_from_slice(row_pk.values());
-  EngineKey::from_values(values)
-}
-
-pub fn split_index_entry_key(composite: &EngineKey, n_index_cols: usize) -> (EngineKey, EngineKey) {
-  let values = composite.values();
-  let n = n_index_cols.min(values.len());
-  let index_key = EngineKey::from_values(values[..n].to_vec());
-  let row_pk = EngineKey::from_values(values[n..].to_vec());
-  (index_key, row_pk)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;

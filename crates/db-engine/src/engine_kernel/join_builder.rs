@@ -4,8 +4,8 @@ use crate::query::{JoinClause, JoinKind, JoinOn};
 use crate::store_adapter::{EngineStore, collect_table_rows};
 use crate::{EngineError, EngineRow};
 
-use super::operators::nested_loop_join::{
-  apply_full_join, apply_inner_join, apply_left_join, apply_right_join,
+use super::operators::{
+  JoinAlgorithm, NestedLoopFull, NestedLoopInner, NestedLoopLeft, NestedLoopRight,
 };
 
 pub(crate) type JoinedRowState = HashMap<String, Option<EngineRow>>;
@@ -124,38 +124,20 @@ pub(crate) fn apply_join_clauses(
 
     let right_rows = table_rows_map.get(right_table).cloned().unwrap_or_default();
 
-    partial_results = match join.kind {
-      JoinKind::Inner => apply_inner_join(
-        &partial_results,
-        &right_rows,
-        right_table,
-        left_qc,
-        right_qc,
-      ),
-      JoinKind::Left => apply_left_join(
-        &partial_results,
-        &right_rows,
-        right_table,
-        left_qc,
-        right_qc,
-      ),
-      JoinKind::Right => apply_right_join(
-        &partial_results,
-        &right_rows,
-        right_table,
-        left_qc,
-        right_qc,
-        template,
-      ),
-      JoinKind::Full => apply_full_join(
-        &partial_results,
-        &right_rows,
-        right_table,
-        left_qc,
-        right_qc,
-        template,
-      ),
+    let algorithm: &dyn JoinAlgorithm = match join.kind {
+      JoinKind::Inner => &NestedLoopInner,
+      JoinKind::Left => &NestedLoopLeft,
+      JoinKind::Right => &NestedLoopRight,
+      JoinKind::Full => &NestedLoopFull,
     };
+    partial_results = algorithm.apply(
+      &partial_results,
+      &right_rows,
+      right_table,
+      left_qc,
+      right_qc,
+      template,
+    );
 
     ensure_join_state_limit(partial_results.len())?;
   }

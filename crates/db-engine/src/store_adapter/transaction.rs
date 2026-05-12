@@ -3,13 +3,8 @@ use futures::Stream;
 
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
 
-/// An engine-level storage transaction. All methods operate on typed engine
-/// values; no storage-level key encoding appears in this interface.
-///
-/// The backing store routes each operation to the appropriate named tree.
-pub trait EngineStoreTransaction: Send + 'static {
-  // Row operations.
-
+/// Read and write row data for a single table within a transaction.
+pub trait RowStore: Send + 'static {
   fn get_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
@@ -33,9 +28,10 @@ pub trait EngineStoreTransaction: Send + 'static {
     &'a self,
     table_name: &'a str,
   ) -> impl Stream<Item = Result<(EngineKey, EngineRow), EngineError>> + 'a;
+}
 
-  // Schema operations.
-
+/// Read and write catalog schemas (tables and indexes) within a transaction.
+pub trait SchemaStore: Send + 'static {
   fn insert_table_schema<'a>(
     &'a mut self,
     schema: TableSchema,
@@ -59,9 +55,10 @@ pub trait EngineStoreTransaction: Send + 'static {
   fn load_catalog<'a>(
     &'a mut self,
   ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a;
+}
 
-  // Index operations.
-
+/// Read and write index entries within a transaction.
+pub trait IndexStore: Send + 'static {
   fn insert_index_entry<'a>(
     &'a mut self,
     index: &'a IndexSchema,
@@ -80,10 +77,24 @@ pub trait EngineStoreTransaction: Send + 'static {
     &'a self,
     index: &'a IndexSchema,
   ) -> impl Stream<Item = Result<(EngineKey, EngineKey), EngineError>> + 'a;
+}
 
-  // Transaction control.
-
+/// Lifecycle control for a transaction (commit or rollback).
+pub trait TransactionControl: Send + 'static {
   fn commit(self) -> impl Future<Output = Result<(), EngineError>>;
 
   fn rollback(self) -> impl Future<Output = Result<(), EngineError>>;
+}
+
+/// Full engine-level storage transaction. Composed of [`RowStore`],
+/// [`SchemaStore`], [`IndexStore`], and [`TransactionControl`]. Any type
+/// implementing all four sub-traits satisfies this trait via the blanket impl.
+///
+/// All methods operate on typed engine values; no storage-level key encoding
+/// appears in this interface.
+pub trait EngineStoreTransaction: RowStore + SchemaStore + IndexStore + TransactionControl {}
+
+impl<T> EngineStoreTransaction for T where
+  T: RowStore + SchemaStore + IndexStore + TransactionControl
+{
 }

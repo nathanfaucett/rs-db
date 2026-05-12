@@ -100,22 +100,6 @@ fn eval_binary_op(op: ComparisonOp, left: Option<EngineValue>, right: Option<Eng
   }
 }
 
-/// Trait for unified predicate evaluation across WHERE and HAVING contexts.
-pub trait Predicate {
-  fn eval_in_single_row(&self, table: &str, row: &EngineRow, eval_ctx: &EvalContext) -> bool {
-    let ctx = SingleRowContext { table, row };
-    self.eval(&ctx, eval_ctx)
-  }
-
-  fn eval(&self, ctx: &dyn RowContext, eval_ctx: &EvalContext) -> bool;
-}
-
-impl Predicate for QualifiedPredicate {
-  fn eval(&self, ctx: &dyn RowContext, eval_ctx: &EvalContext) -> bool {
-    eval_predicate(self, ctx, eval_ctx)
-  }
-}
-
 pub fn eval_predicate(
   pred: &QualifiedPredicate,
   ctx: &dyn RowContext,
@@ -208,45 +192,24 @@ fn resolve_having_ref(r: &RefOrAgg, ctx: &GroupRowContext<'_>) -> Option<EngineV
   }
 }
 
+fn having_cmp(op: ComparisonOp, r: &RefOrAgg, v: &EngineValue, ctx: &GroupRowContext<'_>) -> bool {
+  eval_binary_op(op, resolve_having_ref(r, ctx), Some(v.clone()))
+}
+
 pub fn eval_having_predicate(h: &HavingPredicate, ctx: &GroupRowContext<'_>) -> bool {
   match h {
-    HavingPredicate::Equals(r, v) => eval_binary_op(
-      ComparisonOp::Eq,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
-    HavingPredicate::NotEquals(r, v) => eval_binary_op(
-      ComparisonOp::Ne,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
-    HavingPredicate::LessThan(r, v) => eval_binary_op(
-      ComparisonOp::Lt,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
-    HavingPredicate::LessThanOrEquals(r, v) => eval_binary_op(
-      ComparisonOp::Le,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
-    HavingPredicate::GreaterThan(r, v) => eval_binary_op(
-      ComparisonOp::Gt,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
-    HavingPredicate::GreaterThanOrEquals(r, v) => eval_binary_op(
-      ComparisonOp::Ge,
-      resolve_having_ref(r, ctx),
-      Some(v.clone()),
-    ),
+    HavingPredicate::Equals(r, v) => having_cmp(ComparisonOp::Eq, r, v, ctx),
+    HavingPredicate::NotEquals(r, v) => having_cmp(ComparisonOp::Ne, r, v, ctx),
+    HavingPredicate::LessThan(r, v) => having_cmp(ComparisonOp::Lt, r, v, ctx),
+    HavingPredicate::LessThanOrEquals(r, v) => having_cmp(ComparisonOp::Le, r, v, ctx),
+    HavingPredicate::GreaterThan(r, v) => having_cmp(ComparisonOp::Gt, r, v, ctx),
+    HavingPredicate::GreaterThanOrEquals(r, v) => having_cmp(ComparisonOp::Ge, r, v, ctx),
     HavingPredicate::IsNull(r) => {
       matches!(resolve_having_ref(r, ctx), Some(EngineValue::Null))
     }
     HavingPredicate::IsNotNull(r) => match resolve_having_ref(r, ctx) {
-      Some(EngineValue::Null) => false,
+      Some(EngineValue::Null) | None => false,
       Some(_) => true,
-      None => false,
     },
     HavingPredicate::And(l, r) => eval_having_predicate(l, ctx) && eval_having_predicate(r, ctx),
     HavingPredicate::Or(l, r) => eval_having_predicate(l, ctx) || eval_having_predicate(r, ctx),
@@ -517,16 +480,20 @@ mod tests {
   }
 
   #[test]
-  fn predicate_trait_eval_qualified() {
+  fn eval_predicate_qualified() {
     let row = vec![EngineValue::Integer(42)];
-    let pred: Box<dyn Predicate> = Box::new(QualifiedPredicate::Equals(
+    let pred = QualifiedPredicate::Equals(
       QualifiedOperand::Column(QualifiedColumn {
         table: "t".into(),
         column_index: 0,
       }),
       QualifiedOperand::Value(EngineValue::Integer(42)),
-    ));
+    );
 
-    assert!(pred.eval_in_single_row("t", &row, &EvalContext::empty()));
+    let ctx = SingleRowContext {
+      table: "t",
+      row: &row,
+    };
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 }

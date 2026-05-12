@@ -6,8 +6,8 @@ use core::future::Future;
 use db_core::{NamedTreeProvider, NamedTreeTransaction};
 use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
-  encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree,
-  make_index_entry_key, row_tree, split_index_entry_key, table_schema_entry_key,
+  encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
+  table_schema_entry_key,
 };
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -20,7 +20,9 @@ pub(crate) use helpers::{
   collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_rows,
   remove_index_entries, remove_table_rows,
 };
-pub use transaction::EngineStoreTransaction;
+pub use transaction::{
+  EngineStoreTransaction, IndexStore, RowStore, SchemaStore, TransactionControl,
+};
 
 fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
   EngineError::SchemaMismatch(error.to_string())
@@ -72,7 +74,7 @@ where
   }
 }
 
-impl<T> EngineStoreTransaction for NamedTreeEngineTransaction<T>
+impl<T> RowStore for NamedTreeEngineTransaction<T>
 where
   T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
 {
@@ -133,7 +135,12 @@ where
       }
     }
   }
+}
 
+impl<T> SchemaStore for NamedTreeEngineTransaction<T>
+where
+  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+{
   fn insert_table_schema<'a>(
     &'a mut self,
     schema: TableSchema,
@@ -205,7 +212,12 @@ where
       Ok((tables, indexes))
     }
   }
+}
 
+impl<T> IndexStore for NamedTreeEngineTransaction<T>
+where
+  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+{
   fn insert_index_entry<'a>(
     &'a mut self,
     index: &'a IndexSchema,
@@ -213,7 +225,7 @@ where
     row_pk: &'a EngineKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let composite = make_index_entry_key(index, index_key, row_pk);
+      let composite = index.make_entry_key(index_key, row_pk);
       self
         .inner
         .insert(&index_tree(&index.name), composite, Vec::new())
@@ -229,7 +241,7 @@ where
     row_pk: &'a EngineKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let composite = make_index_entry_key(index, index_key, row_pk);
+      let composite = index.make_entry_key(index_key, row_pk);
       self
         .inner
         .remove(&index_tree(&index.name), &composite)
@@ -244,19 +256,23 @@ where
     index: &'a IndexSchema,
   ) -> impl Stream<Item = Result<(EngineKey, EngineKey), EngineError>> + 'a {
     let tree = index_tree(&index.name);
-    let n = index.column_indices.len();
     let inner = &self.inner;
     stream! {
       let s = inner.range(&tree, ..);
       pin_mut!(s);
       while let Some(item) = s.next().await {
         yield item
-          .map(|(composite, _)| split_index_entry_key(&composite, n))
+          .map(|(composite, _)| index.split_entry_key(&composite))
           .map_err(EngineError::from);
       }
     }
   }
+}
 
+impl<T> TransactionControl for NamedTreeEngineTransaction<T>
+where
+  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+{
   fn commit(self) -> impl Future<Output = Result<(), EngineError>> {
     async move { self.inner.commit().await.map_err(EngineError::from) }
   }

@@ -1724,6 +1724,19 @@ mod tests {
         .expect_err("update duplicate unique index row");
 
       assert!(matches!(error, EngineError::UniqueIndexViolation(name) if name == "users_name_idx"));
+
+      let unchanged = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select unchanged rows after failed update");
+
+      assert_eq!(
+        unchanged.rows,
+        vec![
+          vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        ],
+      );
     });
   }
 
@@ -1853,6 +1866,184 @@ mod tests {
       assert_eq!(
         result.rows,
         vec![vec![EngineValue::Integer(1), EngineValue::Integer(15)]],
+      );
+    });
+  }
+
+  #[test]
+  fn update_division_by_zero_rolls_back_changes() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Integer(1), EngineValue::Integer(10)],
+        })
+        .await
+        .expect("insert row");
+
+      let error = database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![UpdateAssignment {
+            column_index: 1,
+            value: UpdateValueExpr::Divide(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 1,
+              })),
+              Box::new(UpdateValueExpr::Value(EngineValue::Integer(0))),
+            ),
+          }],
+          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
+        })
+        .await
+        .expect_err("division by zero should fail update");
+
+      assert!(
+        matches!(error, EngineError::TypeMismatch(message) if message.contains("division by zero"))
+      );
+
+      let unchanged = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select unchanged row");
+
+      assert_eq!(
+        unchanged.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(10)]],
+      );
+    });
+  }
+
+  #[test]
+  fn multi_row_update_failure_rolls_back_partial_changes() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(store);
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Float,
+          },
+          ColumnSchema {
+            name: "divisor".into(),
+            data_type: EngineType::Float,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users)
+        .await
+        .expect("register users table");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![
+            EngineValue::Integer(1),
+            EngineValue::Float(10.0),
+            EngineValue::Float(2.0),
+          ],
+        })
+        .await
+        .expect("insert first row");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![
+            EngineValue::Integer(2),
+            EngineValue::Float(7.0),
+            EngineValue::Float(0.0),
+          ],
+        })
+        .await
+        .expect("insert second row");
+
+      let error = database
+        .execute(EngineQuery::Update {
+          table: "users".into(),
+          assignments: vec![UpdateAssignment {
+            column_index: 1,
+            value: UpdateValueExpr::Divide(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 1,
+              })),
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "users".into(),
+                column_index: 2,
+              })),
+            ),
+          }],
+          predicate: None,
+          joins: Vec::new(),
+          from_tables: Vec::new(),
+          returning: None,
+        })
+        .await
+        .expect_err("division by zero should fail multi-row update");
+
+      assert!(
+        matches!(error, EngineError::TypeMismatch(message) if message.contains("division by zero"))
+      );
+
+      let unchanged = database
+        .execute(EngineQuery::select_simple(
+          "users".into(),
+          vec![0, 1, 2],
+          None,
+        ))
+        .await
+        .expect("select unchanged rows");
+
+      assert_eq!(
+        unchanged.rows,
+        vec![
+          vec![
+            EngineValue::Integer(1),
+            EngineValue::Float(10.0),
+            EngineValue::Float(2.0),
+          ],
+          vec![
+            EngineValue::Integer(2),
+            EngineValue::Float(7.0),
+            EngineValue::Float(0.0),
+          ],
+        ],
       );
     });
   }
@@ -2101,6 +2292,16 @@ mod tests {
         }
         other => panic!("expected SchemaMismatch duplicate-match error, got {other:?}"),
       }
+
+      let unchanged = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 2], None))
+        .await
+        .expect("select unchanged users after failed join update");
+
+      assert_eq!(
+        unchanged.rows,
+        vec![vec![EngineValue::Integer(1), EngineValue::Integer(5)]],
+      );
     });
   }
 
@@ -2188,6 +2389,19 @@ mod tests {
         .expect_err("insert duplicate unique index row");
 
       assert!(matches!(error, EngineError::UniqueIndexViolation(name) if name == "users_name_idx"));
+
+      let unchanged = database
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select unchanged rows after failed insert");
+
+      assert_eq!(
+        unchanged.rows,
+        vec![vec![
+          EngineValue::Integer(1),
+          EngineValue::Text("Alice".into())
+        ]],
+      );
     });
   }
 

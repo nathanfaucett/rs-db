@@ -3,9 +3,11 @@ use super::join_builder::{
   JoinedRowState, apply_join_clauses, build_join_template, collect_table_rows_map, collect_tables,
   expand_with_from_tables, seed_joined_row_states,
 };
+use super::transaction_lifecycle::TransactionLifecycle;
 use crate::predicate::{EvalContext, JoinedRowContext, eval_predicate};
 use crate::store_adapter::{
-  EngineStore, EngineStoreTransaction, collect_table_rows, delete_row, find_conflicting_index_entry,
+  EngineStore, EngineStoreTransaction, RowStore, TransactionControl, collect_table_rows,
+  delete_row, find_conflicting_index_entry,
 };
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, query::JoinClause,
@@ -60,7 +62,7 @@ where
 {
   pub(crate) store: &'db S,
   pub(crate) catalog: &'db EngineCatalog,
-  pub(crate) tx: Option<S::Transaction>,
+  pub(crate) lifecycle: TransactionLifecycle<S::Transaction>,
 }
 
 impl<'db, S> EngineWriteTxn<'db, S>
@@ -69,12 +71,10 @@ where
   S::Transaction: EngineStoreTransaction,
 {
   pub(crate) async fn transaction(&mut self) -> Result<&mut S::Transaction, EngineError> {
-    if self.tx.is_none() {
-      let tx = self.store.engine_transaction().await?;
-      self.tx = Some(tx);
-    }
-
-    Ok(self.tx.as_mut().expect("transaction should be initialized"))
+    self
+      .lifecycle
+      .transaction(|| self.store.engine_transaction())
+      .await
   }
 
   pub(crate) async fn insert(
@@ -414,14 +414,14 @@ where
   }
 
   pub(crate) async fn commit(mut self) -> Result<(), EngineError> {
-    if let Some(tx) = self.tx.take() {
+    if let Some(tx) = self.lifecycle.take_for_commit() {
       tx.commit().await?;
     }
     Ok(())
   }
 
   pub(crate) async fn rollback(mut self) -> Result<(), EngineError> {
-    if let Some(tx) = self.tx.take() {
+    if let Some(tx) = self.lifecycle.take_for_rollback() {
       tx.rollback().await?;
     }
     Ok(())

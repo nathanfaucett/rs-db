@@ -8,9 +8,10 @@ use crate::{
 
 use super::catalog::EngineCatalog;
 use super::executor::EngineWriteTxn;
-use super::select_pipeline::{
-  build_sorted_projection_rows, filter_joined_rows, materialize_joined_rows,
+use super::select_orchestrator::{
+  SelectStageOutput, execute_select_pipeline, finalize_grouped_result,
 };
+use super::transaction_lifecycle::TransactionLifecycle;
 
 #[derive(Debug, Clone)]
 pub(crate) struct EngineKernel<S> {
@@ -67,7 +68,7 @@ where
     EngineWriteTxn {
       store: &self.store,
       catalog: &self.catalog,
-      tx: None,
+      lifecycle: TransactionLifecycle::new(),
     }
   }
 
@@ -115,51 +116,32 @@ where
   ) -> Result<EngineResult, EngineError> {
     let mut writer = self.writer();
     let tx = writer.transaction().await?;
-
-    let mut partial_results = materialize_joined_rows::<S>(tx, base_table, options).await?;
-
-    // If no grouping/aggregation requested, build output rows and apply ORDER/LIMIT
-    let needs_grouping = !options.group_by.is_empty() || !options.aggregates.is_empty();
-
-    if let Some(qpred) = &predicate {
-      filter_joined_rows(&mut partial_results, qpred, |q| self.run(q)).await?;
+    match execute_select_pipeline::<S, _, _>(tx, base_table, projection, predicate, options, |q| {
+      self.run(q)
+    })
+    .await?
+    {
+      SelectStageOutput::Final(result) => Ok(result),
+      SelectStageOutput::Joined(partial_results) => {
+        finalize_grouped_result(partial_results, options)
+      }
     }
-
-    if !needs_grouping {
-      let keyed = build_sorted_projection_rows(&partial_results, projection, options)?;
-
-      let out_rows = super::operators::Sorter::new(
-        options.order_by.clone(),
-        options.distinct,
-        options.limit,
-        options.offset,
-        keyed,
-      )
-      .execute();
-
-      return Ok(EngineResult::new(out_rows));
-    }
-
-    // Aggregation path: delegate to Aggregator operator.
-    let aggregator = super::operators::Aggregator::new(
-      options.group_by.clone(),
-      options.aggregates.clone(),
-      options.having.clone(),
-      options.order_by.clone(),
-      options.limit,
-      options.offset,
-      partial_results,
-    );
-    Ok(EngineResult::new(aggregator.execute()?))
   }
 
   pub(crate) async fn run(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
     match query {
       EngineQuery::Insert { table, row } => {
         let mut writer = self.writer();
-        writer.insert(&table, row).await?;
-        writer.commit().await?;
-        Ok(EngineResult::default())
+        match writer.insert(&table, row).await {
+          Ok(()) => {
+            writer.commit().await?;
+            Ok(EngineResult::default())
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
       }
       EngineQuery::Select {
         table,
@@ -181,7 +163,7 @@ where
         returning,
       } => {
         let mut writer = self.writer();
-        let rows = writer
+        match writer
           .update(
             &table,
             assignments,
@@ -190,9 +172,17 @@ where
             from_tables,
             returning,
           )
-          .await?;
-        writer.commit().await?;
-        Ok(EngineResult::new(rows))
+          .await
+        {
+          Ok(rows) => {
+            writer.commit().await?;
+            Ok(EngineResult::new(rows))
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
       }
       EngineQuery::Delete {
         table,
@@ -200,9 +190,16 @@ where
         returning,
       } => {
         let mut writer = self.writer();
-        let rows = writer.delete(&table, predicate, returning).await?;
-        writer.commit().await?;
-        Ok(EngineResult::new(rows))
+        match writer.delete(&table, predicate, returning).await {
+          Ok(rows) => {
+            writer.commit().await?;
+            Ok(EngineResult::new(rows))
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
       }
     }
   }

@@ -2,7 +2,7 @@ use futures::{Stream, StreamExt, pin_mut};
 
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema};
 
-use super::EngineStoreTransaction;
+use super::transaction::{IndexStore, RowStore};
 
 async fn try_collect<T, S>(stream: S) -> Result<Vec<T>, EngineError>
 where
@@ -55,7 +55,7 @@ pub(crate) async fn collect_table_rows<TX>(
   predicate: Option<crate::QualifiedPredicate>,
 ) -> Result<Vec<(EngineKey, EngineRow)>, EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: RowStore,
 {
   collect_matching_table_rows(
     tx.range_table_rows(table_name),
@@ -73,7 +73,7 @@ pub(crate) async fn delete_row<TX>(
   indexes: &[IndexSchema],
 ) -> Result<(), EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: RowStore + IndexStore,
 {
   tx.remove_table_row(table_name, primary_key).await?;
   for index in indexes {
@@ -86,7 +86,7 @@ where
 
 pub(crate) async fn remove_table_rows<TX>(tx: &mut TX, table_name: &str) -> Result<(), EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: RowStore,
 {
   let keys = try_collect(
     tx.range_table_rows(table_name)
@@ -104,7 +104,7 @@ pub(crate) async fn remove_index_entries<TX>(
   index: &IndexSchema,
 ) -> Result<(), EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: IndexStore,
 {
   let keys = try_collect(tx.range_index_entries(index)).await?;
   for (idx_key, row_pk) in keys {
@@ -120,7 +120,7 @@ pub(crate) async fn find_conflicting_index_entry<TX>(
   row_pk: &EngineKey,
 ) -> Result<Option<EngineKey>, EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: IndexStore,
 {
   let stream = tx.range_index_entries(index);
   pin_mut!(stream);
@@ -140,7 +140,7 @@ pub(crate) async fn lookup_index_rows<TX>(
   predicate: &crate::query::QualifiedPredicate,
 ) -> Result<Vec<EngineRow>, EngineError>
 where
-  TX: EngineStoreTransaction,
+  TX: RowStore + IndexStore,
 {
   let index_key = predicate
     .index_key_for(index)

@@ -158,6 +158,27 @@ impl IndexSchema {
       SchemaError::SchemaMismatch(format!("index column index {} is out of bounds", index))
     })
   }
+
+  /// Build a composite storage key from an index key and a row primary key.
+  /// The composite key concatenates the index key values followed by the
+  /// primary key values, enabling ordered range scans over one index entry
+  /// set.
+  pub fn make_entry_key(&self, index_key: &EngineKey, row_pk: &EngineKey) -> EngineKey {
+    let n = self.column_indices.len();
+    let mut values = Vec::with_capacity(n + row_pk.values().len());
+    values.extend_from_slice(index_key.values());
+    values.extend_from_slice(row_pk.values());
+    EngineKey::from_values(values)
+  }
+
+  /// Split a composite entry key back into `(index_key, row_pk)`.
+  pub fn split_entry_key(&self, composite: &EngineKey) -> (EngineKey, EngineKey) {
+    let values = composite.values();
+    let n = self.column_indices.len().min(values.len());
+    let index_key = EngineKey::from_values(values[..n].to_vec());
+    let row_pk = EngineKey::from_values(values[n..].to_vec());
+    (index_key, row_pk)
+  }
 }
 
 #[cfg(test)]
