@@ -1,6 +1,10 @@
 use db_engine::{EngineQuery, EngineResult, IndexSchema, TableSchema};
-use db_facade::{Database, InMemoryEngineStore};
+use db_facade::Database;
+use db_in_memory::InMemoryNamedBTree;
 use wasm_bindgen::prelude::*;
+
+use crate::pluggable_store::PluggableBackendStore;
+use crate::store_adapter::{StoreAdapter, StoreAdapterCallbacks};
 
 fn to_js_error(message: impl core::fmt::Display) -> JsValue {
   js_sys::Error::new(&message.to_string()).into()
@@ -8,16 +12,29 @@ fn to_js_error(message: impl core::fmt::Display) -> JsValue {
 
 #[wasm_bindgen]
 pub struct BrowserDatabase {
-  inner: Database<InMemoryEngineStore>,
+  inner: Database<PluggableBackendStore>,
 }
 
 #[wasm_bindgen]
 impl BrowserDatabase {
   #[wasm_bindgen(js_name = open)]
   pub fn open() -> BrowserDatabase {
-    let inner = Database::open_in_memory_sync();
+    let store = PluggableBackendStore::InMemory(InMemoryNamedBTree::new());
+    let inner = Database::from_store(store);
 
     BrowserDatabase { inner }
+  }
+
+  #[wasm_bindgen(js_name = openWithBackend)]
+  pub async fn open_with_backend(adapter: StoreAdapter) -> Result<BrowserDatabase, JsValue> {
+    let adapter_value: JsValue = adapter.into();
+    let adapter = StoreAdapterCallbacks::try_from(adapter_value).map_err(to_js_error)?;
+    let store = PluggableBackendStore::External(adapter);
+    let inner = Database::open_with_store(store)
+      .await
+      .map_err(to_js_error)?;
+
+    Ok(BrowserDatabase { inner })
   }
 
   #[wasm_bindgen(js_name = registerTable)]

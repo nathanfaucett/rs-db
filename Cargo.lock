@@ -359,13 +359,17 @@ dependencies = [
 name = "db-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "console_error_panic_hook",
  "db-core",
  "db-engine",
  "db-facade",
+ "db-in-memory",
  "db-sql-to-engine",
  "db-types",
+ "futures",
  "js-sys",
+ "serde",
  "serde-wasm-bindgen",
  "tsify",
  "wasm-bindgen",

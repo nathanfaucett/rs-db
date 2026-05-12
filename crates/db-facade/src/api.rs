@@ -238,6 +238,16 @@ impl<S> Database<S>
 where
   S: FacadeStore,
 {
+  pub fn from_store(store: S) -> Self {
+    let engine = EngineDatabase::new(store);
+    Self { engine }
+  }
+
+  pub async fn open_with_store(store: S) -> Result<Self, DatabaseError> {
+    let engine = EngineDatabase::open(store).await?;
+    Ok(Self { engine })
+  }
+
   pub fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
     self.engine.describe_table(table_name)
   }
