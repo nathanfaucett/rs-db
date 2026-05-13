@@ -9,6 +9,10 @@ use db_in_memory::InMemoryNamedBTree;
 
 type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<EngineValue>>>;
 
+fn uuid_value(id: u128) -> EngineValue {
+  EngineValue::Uuid(id.to_be_bytes())
+}
+
 fn make_db_with_items() -> TestDb {
   let store: InMemoryNamedBTree<EngineKey, Vec<EngineValue>> = InMemoryNamedBTree::new();
   let mut db = EngineDatabase::new(store);
@@ -18,7 +22,7 @@ fn make_db_with_items() -> TestDb {
       columns: vec![
         ColumnSchema {
           name: "id".into(),
-          data_type: EngineType::Integer,
+          data_type: EngineType::Uuid,
         },
         ColumnSchema {
           name: "name".into(),
@@ -44,7 +48,7 @@ fn make_db_with_items() -> TestDb {
       db.execute(EngineQuery::Insert {
         table: "items".into(),
         row: vec![
-          EngineValue::Integer(id),
+          uuid_value(id as u128),
           EngineValue::Text(name.into()),
           EngineValue::Integer(score),
         ],
@@ -103,7 +107,7 @@ fn engine_works_with_mock_btree() {
       columns: vec![
         ColumnSchema {
           name: "id".into(),
-          data_type: EngineType::Integer,
+          data_type: EngineType::Uuid,
         },
         ColumnSchema {
           name: "name".into(),
@@ -117,7 +121,7 @@ fn engine_works_with_mock_btree() {
 
     db.execute(EngineQuery::Insert {
       table: "items".into(),
-      row: vec![EngineValue::Integer(1), EngineValue::Text("One".into())],
+      row: vec![uuid_value(1), EngineValue::Text("One".into())],
     })
     .await
     .expect("insert");
@@ -131,7 +135,7 @@ fn engine_works_with_mock_btree() {
             table: "items".into(),
             column_index: 0,
           }),
-          QualifiedOperand::Value(EngineValue::Integer(1)),
+          QualifiedOperand::Value(uuid_value(1)),
         )),
       ))
       .await
@@ -314,7 +318,7 @@ fn in_subquery_filters_rows() {
       vec![2], // project score column
       Some(QualifiedPredicate::Equals(
         QualifiedOperand::Column(qcol("items", 0)),
-        QualifiedOperand::Value(EngineValue::Integer(2)),
+        QualifiedOperand::Value(uuid_value(2)),
       )),
     );
 
@@ -330,12 +334,12 @@ fn in_subquery_filters_rows() {
     )
     .await;
 
-    let mut ids: Vec<i64> = res
+    let mut ids: Vec<u128> = res
       .rows
       .iter()
       .map(|r| match r[0] {
-        EngineValue::Integer(i) => i,
-        _ => -1,
+        EngineValue::Uuid(bytes) => u128::from_be_bytes(bytes),
+        _ => 0,
       })
       .collect();
     ids.sort();
@@ -354,7 +358,7 @@ fn not_in_subquery_excludes_rows() {
       vec![2],
       Some(QualifiedPredicate::Equals(
         QualifiedOperand::Column(qcol("items", 0)),
-        QualifiedOperand::Value(EngineValue::Integer(2)),
+        QualifiedOperand::Value(uuid_value(2)),
       )),
     );
 
@@ -370,12 +374,12 @@ fn not_in_subquery_excludes_rows() {
     )
     .await;
 
-    let mut ids: Vec<i64> = res
+    let mut ids: Vec<u128> = res
       .rows
       .iter()
       .map(|r| match r[0] {
-        EngineValue::Integer(i) => i,
-        _ => -1,
+        EngineValue::Uuid(bytes) => u128::from_be_bytes(bytes),
+        _ => 0,
       })
       .collect();
     ids.sort();

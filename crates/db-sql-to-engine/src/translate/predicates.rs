@@ -18,9 +18,9 @@ fn resolve_operand(
         crate::translate::helpers::resolve_column_local(expr, alias_map, table_schemas)?,
       ))
     }
-    SqlExpr::Value(_) => Ok(db_engine::QualifiedOperand::Value(
-      mapper.map_sql_value(expr)?,
-    )),
+    _ if matches!(expr, SqlExpr::Value(_) | SqlExpr::Cast { .. }) => Ok(
+      db_engine::QualifiedOperand::Value(mapper.map_sql_value(expr)?),
+    ),
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported operand in comparison".into(),
     )),
@@ -127,13 +127,12 @@ pub fn expr_to_qualified_predicate(
       let qc = resolve_qc_local(in_expr)?;
       let mut values: Vec<db_engine::EngineValue> = Vec::new();
       for item in list {
-        match item {
-          SqlExpr::Value(_) => values.push(mapper.map_sql_value(item)?),
-          _ => {
-            return Err(TranslateError::UnsupportedFeature(
-              "IN list only supports literals in v1".into(),
-            ));
-          }
+        if matches!(item, SqlExpr::Value(_) | SqlExpr::Cast { .. }) {
+          values.push(mapper.map_sql_value(item)?);
+        } else {
+          return Err(TranslateError::UnsupportedFeature(
+            "IN list only supports literal values in v1".into(),
+          ));
         }
       }
       Ok(db_engine::QualifiedPredicate::InList {

@@ -40,6 +40,36 @@ pub enum SchemaError {
   PrimaryKeyMissing,
 }
 
+fn validate_uuid_primary_key(schema: &TableSchema) -> Result<(), SchemaError> {
+  if schema.primary_key.is_empty() {
+    return Err(SchemaError::PrimaryKeyMissing);
+  }
+
+  if schema.primary_key.len() != 1 {
+    return Err(SchemaError::SchemaMismatch(format!(
+      "table {} must define exactly one primary key column",
+      schema.name
+    )));
+  }
+
+  let pk_index = schema.primary_key[0];
+  let Some(pk_column) = schema.columns.get(pk_index) else {
+    return Err(SchemaError::SchemaMismatch(format!(
+      "primary key index {} is out of bounds for table {}",
+      pk_index, schema.name
+    )));
+  };
+
+  if pk_column.data_type != EngineType::Uuid {
+    return Err(SchemaError::SchemaMismatch(format!(
+      "table {} primary key column {} must use UUID type",
+      schema.name, pk_column.name
+    )));
+  }
+
+  Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
   feature = "wasm",
@@ -58,6 +88,7 @@ impl ColumnSchema {
       (EngineType::Integer, EngineValue::Integer(_))
         | (EngineType::Float, EngineValue::Float(_))
         | (EngineType::Text, EngineValue::Text(_))
+        | (EngineType::Uuid, EngineValue::Uuid(_))
         | (EngineType::Blob, EngineValue::Blob(_))
         | (_, EngineValue::Null)
     )
@@ -78,6 +109,8 @@ pub struct TableSchema {
 
 impl TableSchema {
   pub fn validate_row(&self, row: &EngineRow) -> Result<(), SchemaError> {
+    validate_uuid_primary_key(self)?;
+
     if row.len() != self.columns.len() {
       return Err(SchemaError::SchemaMismatch(format!(
         "row has {} values but table {} expects {} columns",
@@ -96,14 +129,15 @@ impl TableSchema {
       }
     }
 
-    if self.primary_key.is_empty() {
-      return Err(SchemaError::PrimaryKeyMissing);
-    }
-
     Ok(())
   }
 
+  pub fn validate_primary_key_definition(&self) -> Result<(), SchemaError> {
+    validate_uuid_primary_key(self)
+  }
+
   pub fn primary_key(&self, row: &EngineRow) -> Result<EngineKey, SchemaError> {
+    validate_uuid_primary_key(self)?;
     key_from_indices(row, &self.primary_key, |index| {
       SchemaError::SchemaMismatch(format!(
         "primary key index {} is out of bounds for table {}",
@@ -191,7 +225,7 @@ mod tests {
       columns: vec![
         ColumnSchema {
           name: "id".into(),
-          data_type: EngineType::Integer,
+          data_type: EngineType::Uuid,
         },
         ColumnSchema {
           name: "name".into(),
@@ -214,14 +248,14 @@ mod tests {
   #[test]
   fn validate_row_accepts_matching_row() {
     let table = sample_table();
-    let row = vec![EngineValue::Integer(1), EngineValue::Text("a".into())];
+    let row = vec![EngineValue::Uuid([1; 16]), EngineValue::Text("a".into())];
     assert!(table.validate_row(&row).is_ok());
   }
 
   #[test]
   fn validate_row_rejects_wrong_length() {
     let table = sample_table();
-    let row = vec![EngineValue::Integer(1)];
+    let row = vec![EngineValue::Uuid([1; 16])];
     assert!(matches!(
       table.validate_row(&row),
       Err(SchemaError::SchemaMismatch(_))
@@ -245,11 +279,22 @@ mod tests {
   fn validate_row_requires_primary_key() {
     let mut table = sample_table();
     table.primary_key.clear();
-    let row = vec![EngineValue::Integer(1), EngineValue::Text("a".into())];
+    let row = vec![EngineValue::Uuid([1; 16]), EngineValue::Text("a".into())];
     assert_eq!(
       table.validate_row(&row),
       Err(SchemaError::PrimaryKeyMissing)
     );
+  }
+
+  #[test]
+  fn validate_row_rejects_non_uuid_primary_key_column() {
+    let mut table = sample_table();
+    table.columns[0].data_type = EngineType::Integer;
+    let row = vec![EngineValue::Integer(7), EngineValue::Text("a".into())];
+    assert!(matches!(
+      table.validate_row(&row),
+      Err(SchemaError::SchemaMismatch(_))
+    ));
   }
 
   #[test]

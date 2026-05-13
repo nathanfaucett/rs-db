@@ -17,6 +17,22 @@ mod tests {
   #[cfg(feature = "redb")]
   use std::time::{SystemTime, UNIX_EPOCH};
 
+  fn uuid_value(id: u128) -> EngineValue {
+    EngineValue::Uuid(id.to_be_bytes())
+  }
+
+  fn uuid_lit(id: u128) -> String {
+    let hex = format!("{id:032x}");
+    format!(
+      "'{}-{}-{}-{}-{}'::uuid",
+      &hex[0..8],
+      &hex[8..12],
+      &hex[12..16],
+      &hex[16..20],
+      &hex[20..32],
+    )
+  }
+
   #[cfg(feature = "redb")]
   fn temp_redb_path(label: &str) -> PathBuf {
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -36,8 +52,8 @@ mod tests {
 
   fn expected_user_rows() -> Vec<Vec<EngineValue>> {
     vec![
-      vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
-      vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      vec![uuid_value(1), EngineValue::Text("Alice".into())],
+      vec![uuid_value(2), EngineValue::Text("Bob".into())],
     ]
   }
 
@@ -103,18 +119,24 @@ mod tests {
   macro_rules! run_sync_scenario {
     ($left:expr, $right:expr) => {{
       $left
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+        .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
         .await
         .expect("create users on left");
 
       $left.sync_with(&mut $right).await.expect("first sync");
 
       $right
-        .execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob');")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name) VALUES ({}, 'Bob');",
+          uuid_lit(2)
+        ))
         .await
         .expect("insert bob on right");
       $left
-        .execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name) VALUES ({}, 'Alice');",
+          uuid_lit(1)
+        ))
         .await
         .expect("insert alice on left");
 
@@ -129,11 +151,11 @@ mod tests {
   macro_rules! run_lifecycle_sync_scenario {
     ($left:expr, $right:expr) => {{
       $left
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, level INT);")
+        .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, level INT);")
         .await
         .expect("create users on left");
       $left
-        .execute_sql("CREATE TABLE teams (id INT PRIMARY KEY, title TEXT);")
+        .execute_sql("CREATE TABLE teams (id UUID PRIMARY KEY, title TEXT);")
         .await
         .expect("create teams on left");
 
@@ -143,20 +165,32 @@ mod tests {
         .expect("sync initial schema");
 
       $left
-        .execute_sql("INSERT INTO users (id, name, level) VALUES (1, 'Alice', 10);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, level) VALUES ({}, 'Alice', 10);",
+          uuid_lit(1)
+        ))
         .await
         .expect("insert alice on left");
       $left
-        .execute_sql("INSERT INTO teams (id, title) VALUES (1, 'Core');")
+        .execute_sql(&format!(
+          "INSERT INTO teams (id, title) VALUES ({}, 'Core');",
+          uuid_lit(101)
+        ))
         .await
         .expect("insert core team on left");
 
       $right
-        .execute_sql("INSERT INTO users (id, name, level) VALUES (2, 'Bob', 20);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, level) VALUES ({}, 'Bob', 20);",
+          uuid_lit(2)
+        ))
         .await
         .expect("insert bob on right");
       $right
-        .execute_sql("INSERT INTO teams (id, title) VALUES (2, 'Infra');")
+        .execute_sql(&format!(
+          "INSERT INTO teams (id, title) VALUES ({}, 'Infra');",
+          uuid_lit(102)
+        ))
         .await
         .expect("insert infra team on right");
 
@@ -171,12 +205,12 @@ mod tests {
         "SELECT id, name, level FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice".into()),
             EngineValue::Integer(10),
           ],
           vec![
-            EngineValue::Integer(2),
+            uuid_value(2),
             EngineValue::Text("Bob".into()),
             EngineValue::Integer(20),
           ],
@@ -188,22 +222,31 @@ mod tests {
         &mut $right,
         "SELECT id, title FROM teams;",
         vec![
-          vec![EngineValue::Integer(1), EngineValue::Text("Core".into())],
-          vec![EngineValue::Integer(2), EngineValue::Text("Infra".into())],
+          vec![uuid_value(101), EngineValue::Text("Core".into())],
+          vec![uuid_value(102), EngineValue::Text("Infra".into())],
         ],
       )
       .await;
 
       $left
-        .execute_sql("INSERT INTO users (id, name, level) VALUES (3, 'Cara', 30);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, level) VALUES ({}, 'Cara', 30);",
+          uuid_lit(3)
+        ))
         .await
         .expect("insert cara on left");
       $left
-        .execute_sql("INSERT INTO teams (id, title) VALUES (3, 'Ops');")
+        .execute_sql(&format!(
+          "INSERT INTO teams (id, title) VALUES ({}, 'Ops');",
+          uuid_lit(103)
+        ))
         .await
         .expect("insert ops team on left");
       $right
-        .execute_sql("INSERT INTO users (id, name, level) VALUES (4, 'Dan', 40);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, level) VALUES ({}, 'Dan', 40);",
+          uuid_lit(4)
+        ))
         .await
         .expect("insert dan on right");
 
@@ -218,22 +261,22 @@ mod tests {
         "SELECT id, name, level FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice".into()),
             EngineValue::Integer(10),
           ],
           vec![
-            EngineValue::Integer(2),
+            uuid_value(2),
             EngineValue::Text("Bob".into()),
             EngineValue::Integer(20),
           ],
           vec![
-            EngineValue::Integer(3),
+            uuid_value(3),
             EngineValue::Text("Cara".into()),
             EngineValue::Integer(30),
           ],
           vec![
-            EngineValue::Integer(4),
+            uuid_value(4),
             EngineValue::Text("Dan".into()),
             EngineValue::Integer(40),
           ],
@@ -245,15 +288,15 @@ mod tests {
         &mut $right,
         "SELECT id, title FROM teams;",
         vec![
-          vec![EngineValue::Integer(1), EngineValue::Text("Core".into())],
-          vec![EngineValue::Integer(2), EngineValue::Text("Infra".into())],
-          vec![EngineValue::Integer(3), EngineValue::Text("Ops".into())],
+          vec![uuid_value(101), EngineValue::Text("Core".into())],
+          vec![uuid_value(102), EngineValue::Text("Infra".into())],
+          vec![uuid_value(103), EngineValue::Text("Ops".into())],
         ],
       )
       .await;
 
       $right
-        .execute_sql("CREATE TABLE profiles (id INT PRIMARY KEY, alias TEXT, status TEXT);")
+        .execute_sql("CREATE TABLE profiles (id UUID PRIMARY KEY, alias TEXT, status TEXT);")
         .await
         .expect("create profiles on right");
       $right
@@ -262,11 +305,17 @@ mod tests {
         .expect("sync profiles schema");
 
       $left
-        .execute_sql("INSERT INTO profiles (id, alias, status) VALUES (7, 'Dora', 'active');")
+        .execute_sql(&format!(
+          "INSERT INTO profiles (id, alias, status) VALUES ({}, 'Dora', 'active');",
+          uuid_lit(7)
+        ))
         .await
         .expect("insert dora on left");
       $right
-        .execute_sql("INSERT INTO profiles (id, alias, status) VALUES (8, 'Eli', 'offline');")
+        .execute_sql(&format!(
+          "INSERT INTO profiles (id, alias, status) VALUES ({}, 'Eli', 'offline');",
+          uuid_lit(8)
+        ))
         .await
         .expect("insert eli on right");
       $left
@@ -280,12 +329,12 @@ mod tests {
         "SELECT id, alias, status FROM profiles;",
         vec![
           vec![
-            EngineValue::Integer(7),
+            uuid_value(7),
             EngineValue::Text("Dora".into()),
             EngineValue::Text("active".into()),
           ],
           vec![
-            EngineValue::Integer(8),
+            uuid_value(8),
             EngineValue::Text("Eli".into()),
             EngineValue::Text("offline".into()),
           ],
@@ -298,8 +347,8 @@ mod tests {
         &mut $right,
         "SELECT status, id FROM profiles;",
         vec![
-          vec![EngineValue::Text("active".into()), EngineValue::Integer(7)],
-          vec![EngineValue::Text("offline".into()), EngineValue::Integer(8)],
+          vec![EngineValue::Text("active".into()), uuid_value(7)],
+          vec![EngineValue::Text("offline".into()), uuid_value(8)],
         ],
       )
       .await;
@@ -313,12 +362,12 @@ mod tests {
         "SELECT id, alias, status FROM profiles;",
         vec![
           vec![
-            EngineValue::Integer(7),
+            uuid_value(7),
             EngineValue::Text("Dora".into()),
             EngineValue::Text("active".into()),
           ],
           vec![
-            EngineValue::Integer(8),
+            uuid_value(8),
             EngineValue::Text("Eli".into()),
             EngineValue::Text("offline".into()),
           ],
@@ -331,7 +380,7 @@ mod tests {
   macro_rules! run_mutation_sync_scenario {
     ($left:expr, $right:expr) => {{
       $left
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
+        .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, score INT);")
         .await
         .expect("create users on left");
       $left
@@ -340,15 +389,24 @@ mod tests {
         .expect("sync users schema");
 
       $left
-        .execute_sql("INSERT INTO users (id, name, score) VALUES (1, 'Alice', 10);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, score) VALUES ({}, 'Alice', 10);",
+          uuid_lit(1)
+        ))
         .await
         .expect("insert alice on left");
       $left
-        .execute_sql("INSERT INTO users (id, name, score) VALUES (2, 'Bob', 20);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, score) VALUES ({}, 'Bob', 20);",
+          uuid_lit(2)
+        ))
         .await
         .expect("insert bob on left");
       $left
-        .execute_sql("INSERT INTO users (id, name, score) VALUES (3, 'Cara', 30);")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name, score) VALUES ({}, 'Cara', 30);",
+          uuid_lit(3)
+        ))
         .await
         .expect("insert cara on left");
 
@@ -358,7 +416,7 @@ mod tests {
         .execute_query(EngineQuery::Update {
           table: "users".into(),
           assignments: vec![UpdateAssignment::value(2, EngineValue::Integer(11))],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, uuid_value(1))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -377,17 +435,17 @@ mod tests {
         "SELECT id, name, score FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice".into()),
             EngineValue::Integer(11),
           ],
           vec![
-            EngineValue::Integer(2),
+            uuid_value(2),
             EngineValue::Text("Bob".into()),
             EngineValue::Integer(20),
           ],
           vec![
-            EngineValue::Integer(3),
+            uuid_value(3),
             EngineValue::Text("Cara".into()),
             EngineValue::Integer(30),
           ],
@@ -398,7 +456,7 @@ mod tests {
       $right
         .execute_query(EngineQuery::Delete {
           table: "users".into(),
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          predicate: Some(eq_pred("users", 0, uuid_value(2))),
           returning: None,
         })
         .await
@@ -415,12 +473,12 @@ mod tests {
         "SELECT id, name, score FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice".into()),
             EngineValue::Integer(11),
           ],
           vec![
-            EngineValue::Integer(3),
+            uuid_value(3),
             EngineValue::Text("Cara".into()),
             EngineValue::Integer(30),
           ],
@@ -435,7 +493,7 @@ mod tests {
             1,
             EngineValue::Text("Alice L".into()),
           )],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, uuid_value(1))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -447,7 +505,7 @@ mod tests {
         .execute_query(EngineQuery::Update {
           table: "users".into(),
           assignments: vec![UpdateAssignment::value(2, EngineValue::Integer(31))],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(3))),
+          predicate: Some(eq_pred("users", 0, uuid_value(3))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -466,12 +524,12 @@ mod tests {
         "SELECT id, name, score FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice L".into()),
             EngineValue::Integer(11),
           ],
           vec![
-            EngineValue::Integer(3),
+            uuid_value(3),
             EngineValue::Text("Cara".into()),
             EngineValue::Integer(31),
           ],
@@ -494,12 +552,12 @@ mod tests {
         "SELECT id, name, score FROM users;",
         vec![
           vec![
-            EngineValue::Integer(1),
+            uuid_value(1),
             EngineValue::Text("Alice L".into()),
             EngineValue::Integer(11),
           ],
           vec![
-            EngineValue::Integer(3),
+            uuid_value(3),
             EngineValue::Text("Cara".into()),
             EngineValue::Integer(31),
           ],
@@ -512,14 +570,15 @@ mod tests {
   macro_rules! run_efficiency_sync_scenario {
     ($left:expr, $right:expr) => {{
       $left
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+        .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
         .await
         .expect("create users on left");
 
       for i in 1..=8 {
         $left
           .execute_sql(&format!(
-            "INSERT INTO users (id, name) VALUES ({i}, 'user_{i}');"
+            "INSERT INTO users (id, name) VALUES ({}, 'user_{i}');",
+            uuid_lit(i as u128),
           ))
           .await
           .expect("insert seed user on left");
@@ -563,7 +622,10 @@ mod tests {
       assert!(right_after.total_document_bytes <= right_before.total_document_bytes + 128);
 
       $left
-        .execute_sql("INSERT INTO users (id, name) VALUES (100, 'new_user');")
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name) VALUES ({}, 'new_user');",
+          uuid_lit(100)
+        ))
         .await
         .expect("insert one delta row on left");
       $left

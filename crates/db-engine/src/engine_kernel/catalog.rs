@@ -108,6 +108,8 @@ impl EngineCatalog {
   {
     self.load_from_store(store).await?;
 
+    schema.validate_primary_key_definition()?;
+
     if self.contains_table(&schema.name) {
       return Err(EngineError::DuplicateTable(schema.name));
     }

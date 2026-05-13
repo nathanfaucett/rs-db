@@ -158,7 +158,7 @@ pub fn expr_to_having_predicate(
       | BinaryOperator::GtEq => {
         let lref = resolve_ref(left)?;
         let rval = match &**right {
-          SqlExpr::Value(_) => ctx.mapper.map_sql_value(right)?,
+          SqlExpr::Value(_) | SqlExpr::Cast { .. } => ctx.mapper.map_sql_value(right)?,
           _ => {
             return Err(TranslateError::UnsupportedFeature(
               "HAVING RHS must be literal value in v1".into(),

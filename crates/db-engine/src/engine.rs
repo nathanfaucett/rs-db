@@ -215,6 +215,7 @@ mod tests {
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
   };
+  use uuid::Uuid;
 
   fn redb_test_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -239,6 +240,10 @@ mod tests {
     )
   }
 
+  fn uuid(id: u128) -> EngineValue {
+    EngineValue::Uuid(*Uuid::from_u128(id).as_bytes())
+  }
+
   #[test]
   fn insert_and_select_from_table() {
     block_on(async {
@@ -249,7 +254,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -267,7 +272,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("execute insert query");
@@ -276,7 +281,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "users".into(),
           vec![1],
-          Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          Some(eq_pred("users", 0, uuid(1))),
         ))
         .await
         .expect("execute select query");
@@ -296,7 +301,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "value".into(),
@@ -314,7 +319,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "measurements".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Float(1.23)],
+          row: vec![uuid(1), EngineValue::Float(1.23)],
         })
         .await
         .expect("execute insert query");
@@ -323,7 +328,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "measurements".into(),
           vec![1],
-          Some(eq_pred("measurements", 0, EngineValue::Integer(1))),
+          Some(eq_pred("measurements", 0, uuid(1))),
         ))
         .await
         .expect("execute select query");
@@ -342,7 +347,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "data".into(),
@@ -362,7 +367,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "files".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Blob(blob.clone())],
+          row: vec![uuid(1), EngineValue::Blob(blob.clone())],
         })
         .await
         .expect("execute insert query");
@@ -371,7 +376,7 @@ mod tests {
         .execute(EngineQuery::select_simple(
           "files".into(),
           vec![1],
-          Some(eq_pred("files", 0, EngineValue::Integer(1))),
+          Some(eq_pred("files", 0, uuid(1))),
         ))
         .await
         .expect("execute select query");
@@ -390,7 +395,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -418,7 +423,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("execute first insert query");
@@ -426,7 +431,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+          row: vec![uuid(2), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("execute second insert query");
@@ -442,10 +447,7 @@ mod tests {
 
       assert_eq!(
         result.rows,
-        vec![vec![
-          EngineValue::Integer(2),
-          EngineValue::Text("Bob".into())
-        ]]
+        vec![vec![uuid(2), EngineValue::Text("Bob".into())]]
       );
     });
   }
@@ -461,7 +463,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -476,11 +478,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -496,14 +498,14 @@ mod tests {
       // Insert users
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
 
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        row: vec![uuid(2), EngineValue::Text("Bob".into())],
       })
       .await
       .expect("insert user 2");
@@ -511,33 +513,21 @@ mod tests {
       // Insert orders
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(100),
-        ],
+        row: vec![uuid(1), uuid(1), EngineValue::Integer(100)],
       })
       .await
       .expect("insert order 1");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(2),
-          EngineValue::Integer(2),
-          EngineValue::Integer(200),
-        ],
+        row: vec![uuid(2), uuid(2), EngineValue::Integer(200)],
       })
       .await
       .expect("insert order 2");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(3),
-          EngineValue::Integer(1),
-          EngineValue::Integer(50),
-        ],
+        row: vec![uuid(3), uuid(1), EngineValue::Integer(50)],
       })
       .await
       .expect("insert order 3");
@@ -609,7 +599,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -624,11 +614,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -644,14 +634,14 @@ mod tests {
       // Insert users
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
 
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        row: vec![uuid(2), EngineValue::Text("Bob".into())],
       })
       .await
       .expect("insert user 2");
@@ -659,33 +649,21 @@ mod tests {
       // Insert orders
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(100),
-        ],
+        row: vec![uuid(1), uuid(1), EngineValue::Integer(100)],
       })
       .await
       .expect("insert order 1");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(2),
-          EngineValue::Integer(2),
-          EngineValue::Integer(200),
-        ],
+        row: vec![uuid(2), uuid(2), EngineValue::Integer(200)],
       })
       .await
       .expect("insert order 2");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(3),
-          EngineValue::Integer(1),
-          EngineValue::Integer(50),
-        ],
+        row: vec![uuid(3), uuid(1), EngineValue::Integer(50)],
       })
       .await
       .expect("insert order 3");
@@ -786,7 +764,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -801,11 +779,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -820,44 +798,32 @@ mod tests {
 
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        row: vec![uuid(2), EngineValue::Text("Bob".into())],
       })
       .await
       .expect("insert user 2");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(100),
-        ],
+        row: vec![uuid(1), uuid(1), EngineValue::Integer(100)],
       })
       .await
       .expect("insert order 1");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(2),
-          EngineValue::Integer(2),
-          EngineValue::Integer(200),
-        ],
+        row: vec![uuid(2), uuid(2), EngineValue::Integer(200)],
       })
       .await
       .expect("insert order 2");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(3),
-          EngineValue::Integer(1),
-          EngineValue::Integer(50),
-        ],
+        row: vec![uuid(3), uuid(1), EngineValue::Integer(50)],
       })
       .await
       .expect("insert order 3");
@@ -945,7 +911,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -960,11 +926,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -980,19 +946,19 @@ mod tests {
       // Insert users: include a user with no orders
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        row: vec![uuid(2), EngineValue::Text("Bob".into())],
       })
       .await
       .expect("insert user 2");
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(3), EngineValue::Text("Charlie".into())],
+        row: vec![uuid(3), EngineValue::Text("Charlie".into())],
       })
       .await
       .expect("insert user 3");
@@ -1000,21 +966,13 @@ mod tests {
       // Insert orders for Alice and Bob only
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(100),
-        ],
+        row: vec![uuid(1), uuid(1), EngineValue::Integer(100)],
       })
       .await
       .expect("insert order 1");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(2),
-          EngineValue::Integer(2),
-          EngineValue::Integer(200),
-        ],
+        row: vec![uuid(2), uuid(2), EngineValue::Integer(200)],
       })
       .await
       .expect("insert order 2");
@@ -1094,7 +1052,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1108,11 +1066,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -1128,17 +1086,13 @@ mod tests {
       // Insert a user and an order that references a missing user
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(999),
-          EngineValue::Integer(55),
-        ],
+        row: vec![uuid(1), uuid(999), EngineValue::Integer(55)],
       })
       .await
       .expect("insert order missing user");
@@ -1215,7 +1169,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1229,11 +1183,11 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -1249,34 +1203,26 @@ mod tests {
       // user 1 exists, user 2 has no orders; order 3 references missing user 3
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user 1");
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+        row: vec![uuid(2), EngineValue::Text("Bob".into())],
       })
       .await
       .expect("insert user 2");
 
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(100),
-        ],
+        row: vec![uuid(1), uuid(1), EngineValue::Integer(100)],
       })
       .await
       .expect("insert order 1");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(2),
-          EngineValue::Integer(3),
-          EngineValue::Integer(55),
-        ],
+        row: vec![uuid(2), uuid(3), EngineValue::Integer(55)],
       })
       .await
       .expect("insert order missing user");
@@ -1348,7 +1294,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1362,15 +1308,15 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "user_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "product_id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "amount".into(),
@@ -1384,7 +1330,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "title".into(),
@@ -1402,24 +1348,19 @@ mod tests {
 
       db.execute(EngineQuery::Insert {
         table: "users".into(),
-        row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+        row: vec![uuid(1), EngineValue::Text("Alice".into())],
       })
       .await
       .expect("insert user");
       db.execute(EngineQuery::Insert {
         table: "products".into(),
-        row: vec![EngineValue::Integer(10), EngineValue::Text("Gadget".into())],
+        row: vec![uuid(10), EngineValue::Text("Gadget".into())],
       })
       .await
       .expect("insert product");
       db.execute(EngineQuery::Insert {
         table: "orders".into(),
-        row: vec![
-          EngineValue::Integer(1),
-          EngineValue::Integer(1),
-          EngineValue::Integer(10),
-          EngineValue::Integer(99),
-        ],
+        row: vec![uuid(1), uuid(1), uuid(10), EngineValue::Integer(99)],
       })
       .await
       .expect("insert order");
@@ -1511,7 +1452,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1538,7 +1479,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Bob".into())],
+          row: vec![uuid(1), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("execute insert query");
@@ -1557,10 +1498,7 @@ mod tests {
 
       assert_eq!(
         result.rows,
-        vec![vec![
-          EngineValue::Integer(1),
-          EngineValue::Text("Bob".into())
-        ]],
+        vec![vec![uuid(1), EngineValue::Text("Bob".into())]],
       );
     });
   }
@@ -1575,7 +1513,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1602,14 +1540,14 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("insert first row");
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+          row: vec![uuid(2), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("insert second row");
@@ -1621,7 +1559,7 @@ mod tests {
             1,
             EngineValue::Text("Robert".into()),
           )],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          predicate: Some(eq_pred("users", 0, uuid(2))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -1640,10 +1578,7 @@ mod tests {
 
       assert_eq!(
         result.rows,
-        vec![vec![
-          EngineValue::Integer(2),
-          EngineValue::Text("Robert".into())
-        ]],
+        vec![vec![uuid(2), EngineValue::Text("Robert".into())]],
       );
 
       let stale_result = database
@@ -1669,7 +1604,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1696,14 +1631,14 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("insert first row");
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+          row: vec![uuid(2), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("insert second row");
@@ -1715,7 +1650,7 @@ mod tests {
             1,
             EngineValue::Text("Alice".into()),
           )],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(2))),
+          predicate: Some(eq_pred("users", 0, uuid(2))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -1733,8 +1668,8 @@ mod tests {
       assert_eq!(
         unchanged.rows,
         vec![
-          vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
-          vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+          vec![uuid(1), EngineValue::Text("Alice".into())],
+          vec![uuid(2), EngineValue::Text("Bob".into())],
         ],
       );
     });
@@ -1750,7 +1685,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -1768,14 +1703,14 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("insert first row");
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+          row: vec![uuid(2), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("insert second row");
@@ -1783,7 +1718,7 @@ mod tests {
       database
         .execute(EngineQuery::Delete {
           table: "users".into(),
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, uuid(1))),
           returning: None,
         })
         .await
@@ -1796,10 +1731,7 @@ mod tests {
 
       assert_eq!(
         result.rows,
-        vec![vec![
-          EngineValue::Integer(2),
-          EngineValue::Text("Bob".into())
-        ]]
+        vec![vec![uuid(2), EngineValue::Text("Bob".into())]]
       );
     });
   }
@@ -1814,7 +1746,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "score".into(),
@@ -1832,7 +1764,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Integer(10)],
+          row: vec![uuid(1), EngineValue::Integer(10)],
         })
         .await
         .expect("insert row");
@@ -1850,7 +1782,7 @@ mod tests {
               Box::new(UpdateValueExpr::Value(EngineValue::Integer(5))),
             ),
           }],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, uuid(1))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -1863,10 +1795,7 @@ mod tests {
         .await
         .expect("select row");
 
-      assert_eq!(
-        result.rows,
-        vec![vec![EngineValue::Integer(1), EngineValue::Integer(15)]],
-      );
+      assert_eq!(result.rows, vec![vec![uuid(1), EngineValue::Integer(15)]],);
     });
   }
 
@@ -1880,7 +1809,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "score".into(),
@@ -1898,7 +1827,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Integer(10)],
+          row: vec![uuid(1), EngineValue::Integer(10)],
         })
         .await
         .expect("insert row");
@@ -1916,7 +1845,7 @@ mod tests {
               Box::new(UpdateValueExpr::Value(EngineValue::Integer(0))),
             ),
           }],
-          predicate: Some(eq_pred("users", 0, EngineValue::Integer(1))),
+          predicate: Some(eq_pred("users", 0, uuid(1))),
           joins: Vec::new(),
           from_tables: Vec::new(),
           returning: None,
@@ -1935,7 +1864,7 @@ mod tests {
 
       assert_eq!(
         unchanged.rows,
-        vec![vec![EngineValue::Integer(1), EngineValue::Integer(10)]],
+        vec![vec![uuid(1), EngineValue::Integer(10)]],
       );
     });
   }
@@ -1950,7 +1879,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "score".into(),
@@ -1972,11 +1901,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![
-            EngineValue::Integer(1),
-            EngineValue::Float(10.0),
-            EngineValue::Float(2.0),
-          ],
+          row: vec![uuid(1), EngineValue::Float(10.0), EngineValue::Float(2.0)],
         })
         .await
         .expect("insert first row");
@@ -1984,11 +1909,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![
-            EngineValue::Integer(2),
-            EngineValue::Float(7.0),
-            EngineValue::Float(0.0),
-          ],
+          row: vec![uuid(2), EngineValue::Float(7.0), EngineValue::Float(0.0)],
         })
         .await
         .expect("insert second row");
@@ -2033,16 +1954,8 @@ mod tests {
       assert_eq!(
         unchanged.rows,
         vec![
-          vec![
-            EngineValue::Integer(1),
-            EngineValue::Float(10.0),
-            EngineValue::Float(2.0),
-          ],
-          vec![
-            EngineValue::Integer(2),
-            EngineValue::Float(7.0),
-            EngineValue::Float(0.0),
-          ],
+          vec![uuid(1), EngineValue::Float(10.0), EngineValue::Float(2.0),],
+          vec![uuid(2), EngineValue::Float(7.0), EngineValue::Float(0.0),],
         ],
       );
     });
@@ -2060,11 +1973,11 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "team_id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "score".into(),
@@ -2082,7 +1995,7 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "bonus".into(),
@@ -2097,18 +2010,14 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![
-            EngineValue::Integer(1),
-            EngineValue::Integer(10),
-            EngineValue::Integer(5),
-          ],
+          row: vec![uuid(1), uuid(10), EngineValue::Integer(5)],
         })
         .await
         .expect("insert user row");
       database
         .execute(EngineQuery::Insert {
           table: "teams".into(),
-          row: vec![EngineValue::Integer(10), EngineValue::Integer(3)],
+          row: vec![uuid(10), EngineValue::Integer(3)],
         })
         .await
         .expect("insert team row");
@@ -2156,10 +2065,7 @@ mod tests {
         .await
         .expect("select updated user row");
 
-      assert_eq!(
-        result.rows,
-        vec![vec![EngineValue::Integer(1), EngineValue::Integer(8)]],
-      );
+      assert_eq!(result.rows, vec![vec![uuid(1), EngineValue::Integer(8)]],);
     });
   }
 
@@ -2175,11 +2081,11 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "team_id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "score".into(),
@@ -2197,11 +2103,11 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "dept_id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "bonus".into(),
@@ -2216,11 +2122,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![
-            EngineValue::Integer(1),
-            EngineValue::Integer(10),
-            EngineValue::Integer(5),
-          ],
+          row: vec![uuid(1), uuid(10), EngineValue::Integer(5)],
         })
         .await
         .expect("insert user row");
@@ -2228,11 +2130,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "teams".into(),
-          row: vec![
-            EngineValue::Integer(100),
-            EngineValue::Integer(10),
-            EngineValue::Integer(3),
-          ],
+          row: vec![uuid(100), uuid(10), EngineValue::Integer(3)],
         })
         .await
         .expect("insert first team row");
@@ -2240,11 +2138,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "teams".into(),
-          row: vec![
-            EngineValue::Integer(101),
-            EngineValue::Integer(10),
-            EngineValue::Integer(4),
-          ],
+          row: vec![uuid(101), uuid(10), EngineValue::Integer(4)],
         })
         .await
         .expect("insert second team row");
@@ -2298,10 +2192,7 @@ mod tests {
         .await
         .expect("select unchanged users after failed join update");
 
-      assert_eq!(
-        unchanged.rows,
-        vec![vec![EngineValue::Integer(1), EngineValue::Integer(5)]],
-      );
+      assert_eq!(unchanged.rows, vec![vec![uuid(1), EngineValue::Integer(5)]],);
     });
   }
 
@@ -2317,7 +2208,7 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "score".into(),
@@ -2348,7 +2239,7 @@ mod tests {
         columns: vec![
           ColumnSchema {
             name: "id".into(),
-            data_type: EngineType::Integer,
+            data_type: EngineType::Uuid,
           },
           ColumnSchema {
             name: "name".into(),
@@ -2375,7 +2266,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+          row: vec![uuid(1), EngineValue::Text("Alice".into())],
         })
         .await
         .expect("insert first row");
@@ -2383,7 +2274,7 @@ mod tests {
       let error = database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(2), EngineValue::Text("Alice".into())],
+          row: vec![uuid(2), EngineValue::Text("Alice".into())],
         })
         .await
         .expect_err("insert duplicate unique index row");
@@ -2397,10 +2288,7 @@ mod tests {
 
       assert_eq!(
         unchanged.rows,
-        vec![vec![
-          EngineValue::Integer(1),
-          EngineValue::Text("Alice".into())
-        ]],
+        vec![vec![uuid(1), EngineValue::Text("Alice".into())]],
       );
     });
   }
@@ -2424,7 +2312,7 @@ mod tests {
           columns: vec![
             ColumnSchema {
               name: "id".into(),
-              data_type: EngineType::Integer,
+              data_type: EngineType::Uuid,
             },
             ColumnSchema {
               name: "name".into(),
@@ -2449,7 +2337,7 @@ mod tests {
       database
         .execute(EngineQuery::Insert {
           table: "users".into(),
-          row: vec![EngineValue::Integer(1), EngineValue::Text("Bob".into())],
+          row: vec![uuid(1), EngineValue::Text("Bob".into())],
         })
         .await
         .expect("insert row into redb-backed engine");
@@ -2468,10 +2356,7 @@ mod tests {
 
       assert_eq!(
         result.rows,
-        vec![vec![
-          EngineValue::Integer(1),
-          EngineValue::Text("Bob".into())
-        ]],
+        vec![vec![uuid(1), EngineValue::Text("Bob".into())]],
       );
 
       let _ = fs::remove_file(&path);

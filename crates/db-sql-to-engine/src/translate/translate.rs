@@ -227,13 +227,10 @@ fn translate_create_table(
     }
   }
 
-  let primary_key = if pk_names.is_empty() {
-    if columns.is_empty() {
-      return Err(TranslateError::UnsupportedFeature(
-        "CREATE TABLE must specify at least one column".into(),
-      ));
-    }
-    vec![0]
+  let primary_key: Vec<usize> = if pk_names.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE TABLE must define exactly one PRIMARY KEY column".into(),
+    ));
   } else {
     pk_names
       .iter()
@@ -244,6 +241,23 @@ fn translate_create_table(
   if primary_key.is_empty() {
     return Err(TranslateError::UnsupportedFeature(
       "CREATE TABLE primary key columns not found".into(),
+    ));
+  }
+
+  if primary_key.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE TABLE must define exactly one PRIMARY KEY column".into(),
+    ));
+  }
+
+  let pk_index = primary_key[0];
+  if columns
+    .get(pk_index)
+    .map(|column| column.data_type != db_engine::EngineType::Uuid)
+    .unwrap_or(true)
+  {
+    return Err(TranslateError::UnsupportedFeature(
+      "PRIMARY KEY column must use UUID type".into(),
     ));
   }
 
@@ -306,6 +320,7 @@ fn sql_type_to_engine_type(data_type: &DataType) -> Result<db_engine::EngineType
     | SqlDataType::Clob(_)
     | SqlDataType::CharacterLargeObject(_)
     | SqlDataType::CharLargeObject(_) => db_engine::EngineType::Text,
+    SqlDataType::Uuid => db_engine::EngineType::Uuid,
     SqlDataType::Binary(_)
     | SqlDataType::Varbinary(_)
     | SqlDataType::Blob(_)
@@ -700,7 +715,7 @@ fn sql_expr_to_update_value_expr(
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::UpdateValueExpr, TranslateError> {
   match expr {
-    SqlExpr::Value(_) => Ok(db_engine::UpdateValueExpr::Value(
+    SqlExpr::Value(_) | SqlExpr::Cast { .. } => Ok(db_engine::UpdateValueExpr::Value(
       mapper.map_sql_value(expr)?,
     )),
     SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_) => {
@@ -1536,6 +1551,7 @@ mod tests {
     QualifiedOperand, QualifiedPredicate, TableSchema, UpdateAssignment, UpdateValueExpr,
   };
   use std::collections::HashMap;
+  use uuid::Uuid;
 
   struct DummyResolver {
     tables: HashMap<String, TableSchema>,
@@ -1841,6 +1857,74 @@ mod tests {
     let n_expr: SqlExpr = sqlparser::ast::Expr::Value(sqlparser::ast::Value::Null.into());
     let v = vm.map_sql_value(&n_expr).expect("null");
     assert_eq!(v, db_engine::EngineValue::Null);
+  }
+
+  #[test]
+  fn default_value_mapper_supports_explicit_uuid_cast_only() {
+    let vm = DefaultValueMapper;
+
+    let raw_uuid_expr: SqlExpr = sqlparser::ast::Expr::Value(
+      sqlparser::ast::Value::SingleQuotedString("550e8400-e29b-41d4-a716-446655440000".into())
+        .into(),
+    );
+    let raw = vm.map_sql_value(&raw_uuid_expr).expect("raw uuid string");
+    assert_eq!(
+      raw,
+      db_engine::EngineValue::Text("550e8400-e29b-41d4-a716-446655440000".into())
+    );
+
+    let cast_uuid_expr = SqlExpr::Cast {
+      kind: sqlparser::ast::CastKind::DoubleColon,
+      expr: Box::new(raw_uuid_expr),
+      data_type: sqlparser::ast::DataType::Uuid,
+      array: false,
+      format: None,
+    };
+    let cast = vm.map_sql_value(&cast_uuid_expr).expect("cast uuid");
+    let expected = *Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+      .expect("valid uuid")
+      .as_bytes();
+    assert_eq!(cast, db_engine::EngineValue::Uuid(expected));
+  }
+
+  #[test]
+  fn translate_create_table_requires_uuid_primary_key() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let err = parse_and_translate_statement(
+      "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);",
+      &resolver,
+    )
+    .expect_err("int primary key should be rejected");
+
+    assert!(matches!(
+      err,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("PRIMARY KEY column must use UUID type")
+    ));
+  }
+
+  #[test]
+  fn translate_create_table_accepts_uuid_primary_key() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let statement = parse_and_translate_statement(
+      "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);",
+      &resolver,
+    )
+    .expect("uuid primary key should be accepted");
+
+    match statement {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateTable(table)) => {
+        assert_eq!(table.primary_key, vec![0]);
+        assert_eq!(table.columns[0].data_type, EngineType::Uuid);
+      }
+      other => panic!("unexpected statement: {:?}", other),
+    }
   }
 
   #[test]

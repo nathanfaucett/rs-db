@@ -9,6 +9,10 @@ use futures::executor::block_on;
 
 type TestDb = EngineDatabase<InMemoryNamedBTree<db_engine::EngineKey, Vec<EngineValue>>>;
 
+fn uuid_value(id: u128) -> EngineValue {
+  EngineValue::Uuid(id.to_be_bytes())
+}
+
 fn make_test_db() -> TestDb {
   let store: InMemoryNamedBTree<db_engine::EngineKey, Vec<EngineValue>> = InMemoryNamedBTree::new();
   EngineDatabase::new(store)
@@ -33,10 +37,16 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     // Create two tables
     db.register_table(TableSchema {
       name: "t1".into(),
-      columns: vec![ColumnSchema {
-        name: "id".into(),
-        data_type: EngineType::Integer,
-      }],
+      columns: vec![
+        ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Uuid,
+        },
+        ColumnSchema {
+          name: "value".into(),
+          data_type: EngineType::Integer,
+        },
+      ],
       primary_key: vec![0],
     })
     .await
@@ -44,10 +54,16 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
 
     db.register_table(TableSchema {
       name: "t2".into(),
-      columns: vec![ColumnSchema {
-        name: "id".into(),
-        data_type: EngineType::Integer,
-      }],
+      columns: vec![
+        ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Uuid,
+        },
+        ColumnSchema {
+          name: "value".into(),
+          data_type: EngineType::Integer,
+        },
+      ],
       primary_key: vec![0],
     })
     .await
@@ -56,14 +72,14 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     // Insert a row in each table
     db.execute(EngineQuery::Insert {
       table: "t1".into(),
-      row: vec![EngineValue::Integer(1)],
+      row: vec![uuid_value(1), EngineValue::Integer(1)],
     })
     .await
     .expect("insert t1");
 
     db.execute(EngineQuery::Insert {
       table: "t2".into(),
-      row: vec![EngineValue::Integer(2)],
+      row: vec![uuid_value(2), EngineValue::Integer(2)],
     })
     .await
     .expect("insert t2");
@@ -74,10 +90,16 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
       .update_rows_with_sources(
         "t1",
         vec![UpdateAssignment {
-          column_index: 0,
+          column_index: 1,
           value: db_engine::UpdateValueExpr::Value(EngineValue::Integer(100)),
         }],
-        None,
+        Some(db_engine::QualifiedPredicate::Equals(
+          db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
+            table: "t1".into(),
+            column_index: 0,
+          }),
+          db_engine::QualifiedOperand::Value(uuid_value(1)),
+        )),
         vec![],
         vec![],
       )
@@ -88,10 +110,16 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
       .update_rows_with_sources(
         "t2",
         vec![UpdateAssignment {
-          column_index: 0,
+          column_index: 1,
           value: db_engine::UpdateValueExpr::Value(EngineValue::Integer(200)),
         }],
-        None,
+        Some(db_engine::QualifiedPredicate::Equals(
+          db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
+            table: "t2".into(),
+            column_index: 0,
+          }),
+          db_engine::QualifiedOperand::Value(uuid_value(2)),
+        )),
         vec![],
         vec![],
       )
@@ -104,11 +132,11 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     let r1 = db
       .execute(EngineQuery::select_simple(
         "t1".into(),
-        vec![0],
+        vec![1],
         Some(db_engine::QualifiedPredicate::Equals(
           db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
             table: "t1".into(),
-            column_index: 0,
+            column_index: 1,
           }),
           db_engine::QualifiedOperand::Value(EngineValue::Integer(1)),
         )),
@@ -121,11 +149,11 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     let r1_updated = db
       .execute(EngineQuery::select_simple(
         "t1".into(),
-        vec![0],
+        vec![1],
         Some(db_engine::QualifiedPredicate::Equals(
           db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
             table: "t1".into(),
-            column_index: 0,
+            column_index: 1,
           }),
           db_engine::QualifiedOperand::Value(EngineValue::Integer(100)),
         )),

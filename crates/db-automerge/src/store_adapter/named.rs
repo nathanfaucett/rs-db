@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 
 use async_stream::stream;
 use automerge::AutoCommit;
+use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,8 @@ use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
 };
 use db_types::codec::encode_engine_key_into_sink;
-use db_types::{EngineKey, EngineRow};
+use db_types::codec::{decode_engine_row, encode_engine_row_into_sink};
+use db_types::{EngineKey, EngineRow, EngineValue};
 
 use super::AutomergeEngineStore;
 use super::snapshot::{
@@ -37,11 +39,59 @@ fn set_in_named_snapshot(
   set_entry::<EngineSnapshotAdapter>(buf, &key, &row)
 }
 
+fn is_row_tree(tree: &str) -> bool {
+  tree.starts_with("t:")
+}
+
+fn key_uuid(key: &EngineKey) -> Result<Uuid, BTreeError> {
+  match key {
+    EngineKey::Scalar(EngineValue::Uuid(bytes)) => Ok(Uuid::from_bytes(*bytes)),
+    _ => Err(BTreeError::UnsupportedOperation),
+  }
+}
+
+fn encode_row_snapshot(row: &EngineRow) -> Vec<u8> {
+  let mut out = Vec::new();
+  encode_with_version(&mut out, |sink| encode_engine_row_into_sink(sink, row));
+  out
+}
+
+fn decode_row_snapshot(buf: &[u8]) -> Result<EngineRow, BTreeError> {
+  let mut cursor = db_core::Cursor::new(buf);
+  db_core::decode_version(&mut cursor).map_err(BTreeError::other)?;
+  decode_engine_row(&mut cursor).map_err(BTreeError::other)
+}
+
+fn row_key_from_doc_id(doc_id: Uuid) -> EngineKey {
+  EngineKey::Scalar(EngineValue::Uuid(*doc_id.as_bytes()))
+}
+
+fn doc_tree(doc: &AutoCommit) -> Option<String> {
+  match doc.get(&automerge::ROOT, "tree") {
+    Ok(Some((value, _))) => {
+      let text = value.to_string();
+      let cleaned = text
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(&text);
+      Some(cleaned.to_string())
+    }
+    _ => None,
+  }
+}
+
+fn set_doc_tree(mut doc: AutoCommit, tree: &str) -> Result<AutoCommit, BTreeError> {
+  doc
+    .put(&automerge::ROOT, "tree", tree)
+    .map_err(BTreeError::other)?;
+  Ok(doc)
+}
+
 /// Derive a UUID for a specific row in a named tree.
 /// Layout: first 8 bytes = SHA-256("named:", tree)[0..8]
 ///         last  8 bytes = SHA-256(encoded_key)[0..8]
 /// This keeps all rows for a given tree contiguous in UUID space.
-fn row_doc_id(tree: &str, key: &EngineKey) -> Uuid {
+fn hashed_doc_id(tree: &str, key: &EngineKey) -> Uuid {
   let mut hasher = Sha256::new();
   hasher.update(b"named:");
   hasher.update(tree.as_bytes());
@@ -72,6 +122,14 @@ fn tree_uuid_range(tree: &str) -> (Uuid, Uuid) {
   end_bytes[8..].fill(0xff);
 
   (Uuid::from_bytes(start_bytes), Uuid::from_bytes(end_bytes))
+}
+
+fn doc_id_for_tree_key(tree: &str, key: &EngineKey) -> Result<Uuid, BTreeError> {
+  if is_row_tree(tree) {
+    key_uuid(key)
+  } else {
+    Ok(hashed_doc_id(tree, key))
+  }
 }
 
 #[derive(Clone)]
@@ -110,14 +168,22 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = row_doc_id(tree, key);
+    let doc_id = doc_id_for_tree_key(tree, key)?;
     let Some(doc) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
     let Some(bytes) = snapshot_bytes(&doc)? else {
       return Ok(None);
     };
-    find_in_named_snapshot(&bytes, key)
+    if is_row_tree(tree) {
+      if bytes.is_empty() {
+        Ok(None)
+      } else {
+        decode_row_snapshot(&bytes).map(Some)
+      }
+    } else {
+      find_in_named_snapshot(&bytes, key)
+    }
   }
 
   async fn insert<'a>(
@@ -129,24 +195,39 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = row_doc_id(tree, &key);
+    let doc_id = doc_id_for_tree_key(tree, &key)?;
     let existing = self.inner.get(&doc_id).await?;
-    let existing_bytes = match &existing {
-      Some(doc) => snapshot_bytes(doc)?,
-      None => None,
+    let new_snapshot = if is_row_tree(tree) {
+      encode_row_snapshot(&value)
+    } else {
+      let existing_bytes = match &existing {
+        Some(doc) => snapshot_bytes(doc)?,
+        None => None,
+      };
+      set_in_named_snapshot(existing_bytes.as_deref(), key, value)?
     };
-    let new_snapshot = set_in_named_snapshot(existing_bytes.as_deref(), key, value)?;
-    let new_doc = if let Some(mut doc) = existing {
-      doc
+
+    let new_doc = if let Some(doc) = existing {
+      let mut updated = doc;
+      updated
         .put(
           &automerge::ROOT,
           "snapshot",
           encode_snapshot_base64(&new_snapshot),
         )
         .map_err(BTreeError::other)?;
-      doc
+      if is_row_tree(tree) {
+        set_doc_tree(updated, tree)?
+      } else {
+        updated
+      }
     } else {
-      snapshot_doc(&new_snapshot)?
+      let created = snapshot_doc(&new_snapshot)?;
+      if is_row_tree(tree) {
+        set_doc_tree(created, tree)?
+      } else {
+        created
+      }
     };
     self.inner.insert(doc_id, new_doc).await
   }
@@ -159,13 +240,21 @@ where
   where
     EngineKey: Ord,
   {
-    let doc_id = row_doc_id(tree, key);
+    let doc_id = doc_id_for_tree_key(tree, key)?;
     let Some(existing) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
     let bytes = snapshot_bytes(&existing)?;
     let removed = if let Some(ref b) = bytes {
-      find_in_named_snapshot(b, key)?
+      if is_row_tree(tree) {
+        if b.is_empty() {
+          None
+        } else {
+          Some(decode_row_snapshot(b)?)
+        }
+      } else {
+        find_in_named_snapshot(b, key)?
+      }
     } else {
       None
     };
@@ -176,6 +265,9 @@ where
       tombstone
         .put(&automerge::ROOT, "snapshot", encode_snapshot_base64(&[]))
         .map_err(BTreeError::other)?;
+      if is_row_tree(tree) {
+        tombstone = set_doc_tree(tombstone, tree)?;
+      }
       self.inner.insert(doc_id, tombstone).await?;
     }
     Ok(removed)
@@ -190,7 +282,13 @@ where
     EngineKey: Ord,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
   {
-    let (tree_start, tree_end) = tree_uuid_range(tree);
+    let row_tree = is_row_tree(tree);
+    let (tree_start, tree_end) = if row_tree {
+      (Uuid::from_u128(0), Uuid::from_u128(u128::MAX))
+    } else {
+      tree_uuid_range(tree)
+    };
+    let tree_name = tree.to_string();
     let inner = &self.inner;
     stream! {
       let doc_stream = inner.range(tree_start..=tree_end);
@@ -198,15 +296,30 @@ where
 
       let mut entries: alloc::vec::Vec<(EngineKey, EngineRow)> = alloc::vec::Vec::new();
       while let Some(item) = doc_stream.next().await {
-        let (_uuid, doc) = item?;
+        let (doc_id, doc) = item?;
+        if row_tree && doc_tree(&doc).as_deref() != Some(tree_name.as_str()) {
+          continue;
+        }
+
         let bytes = match snapshot_bytes(&doc) {
           Ok(Some(b)) => b,
           Ok(None) => continue,
           Err(e) => { yield Err(e); return; }
         };
-        match parse_named_snapshot(&bytes) {
-          Ok(pairs) => entries.extend(pairs),
-          Err(e) => { yield Err(e); return; }
+
+        if row_tree {
+          if bytes.is_empty() {
+            continue;
+          }
+          match decode_row_snapshot(&bytes) {
+            Ok(row) => entries.push((row_key_from_doc_id(doc_id), row)),
+            Err(e) => { yield Err(e); return; }
+          }
+        } else {
+          match parse_named_snapshot(&bytes) {
+            Ok(pairs) => entries.extend(pairs),
+            Err(e) => { yield Err(e); return; }
+          }
         }
       }
       entries.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -306,14 +419,22 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let doc_id = row_doc_id(&self.name, key.borrow());
+    let doc_id = doc_id_for_tree_key(&self.name, key.borrow())?;
     let Some(doc) = self.inner.inner.get(&doc_id).await? else {
       return Ok(None);
     };
     let Some(bytes) = snapshot_bytes(&doc)? else {
       return Ok(None);
     };
-    find_in_named_snapshot(&bytes, key.borrow())
+    if is_row_tree(&self.name) {
+      if bytes.is_empty() {
+        Ok(None)
+      } else {
+        decode_row_snapshot(&bytes).map(Some)
+      }
+    } else {
+      find_in_named_snapshot(&bytes, key.borrow())
+    }
   }
 
   async fn insert(&mut self, key: EngineKey, value: EngineRow) -> Result<(), BTreeError>

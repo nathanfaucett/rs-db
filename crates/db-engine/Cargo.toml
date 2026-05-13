@@ -39,3 +39,4 @@ db-in-memory = { path = "../db-in-memory", default-features = false, features = 
 db-redb = { path = "../db-redb", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 proptest = { version = "1.0", default-features = false, features = ["std"] }
+uuid = { version = "1.23", default-features = false, features = ["std"] }

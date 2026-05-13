@@ -6,6 +6,7 @@ use alloc::{
 
 use hashbrown::HashMap;
 use sqlparser::ast::{Expr as SqlExpr, Value as SqlValue};
+use uuid::Uuid;
 
 use super::TranslateError;
 
@@ -37,6 +38,27 @@ pub fn extract_identifier(expr: &SqlExpr) -> Result<(Option<String>, String), Tr
 /// Convert a sqlparser literal expression into an EngineValue.
 pub fn sql_value_to_engine_value(expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError> {
   match expr {
+    SqlExpr::Cast {
+      kind: sqlparser::ast::CastKind::DoubleColon,
+      expr,
+      data_type,
+      ..
+    } => match (&**expr, data_type) {
+      (SqlExpr::Value(value), sqlparser::ast::DataType::Uuid) => match &value.value {
+        SqlValue::SingleQuotedString(input) => {
+          let parsed = Uuid::parse_str(input).map_err(|e| {
+            TranslateError::UnsupportedFeature(format!("invalid UUID literal: {}", e))
+          })?;
+          Ok(db_engine::EngineValue::Uuid(*parsed.as_bytes()))
+        }
+        _ => Err(TranslateError::UnsupportedFeature(
+          "UUID cast requires a single-quoted string literal".into(),
+        )),
+      },
+      _ => Err(TranslateError::UnsupportedFeature(
+        "unsupported explicit cast expression".into(),
+      )),
+    },
     SqlExpr::Value(v) => match &v.value {
       SqlValue::Number(s, _) => {
         if s.contains('.') {

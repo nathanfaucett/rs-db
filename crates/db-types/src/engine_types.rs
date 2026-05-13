@@ -25,6 +25,7 @@ pub enum EngineType {
   Integer,
   Float,
   Text,
+  Uuid,
   Blob,
 }
 
@@ -38,6 +39,7 @@ pub enum EngineValue {
   Integer(i64),
   Float(f64),
   Text(String),
+  Uuid([u8; 16]),
   Blob(Vec<u8>),
   Null,
 }
@@ -55,6 +57,7 @@ impl PartialEq for EngineValue {
         }
       }
       (EngineValue::Text(left), EngineValue::Text(right)) => left == right,
+      (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left == right,
       (EngineValue::Blob(left), EngineValue::Blob(right)) => left == right,
       _ => false,
     }
@@ -88,8 +91,12 @@ impl Hash for EngineValue {
         state.write_u8(3);
         value.hash(state);
       }
-      EngineValue::Blob(value) => {
+      EngineValue::Uuid(value) => {
         state.write_u8(4);
+        value.hash(state);
+      }
+      EngineValue::Blob(value) => {
+        state.write_u8(5);
         value.hash(state);
       }
     }
@@ -133,14 +140,20 @@ impl Ord for EngineValue {
         compare_floats(*left, *right as f64)
       }
       (EngineValue::Text(left), EngineValue::Text(right)) => left.cmp(right),
+      (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left.cmp(right),
       (EngineValue::Blob(left), EngineValue::Blob(right)) => left.cmp(right),
       (EngineValue::Integer(_), EngineValue::Text(_)) => Ordering::Less,
+      (EngineValue::Integer(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Integer(_), EngineValue::Blob(_)) => Ordering::Less,
       (EngineValue::Float(_), EngineValue::Text(_)) => Ordering::Less,
+      (EngineValue::Float(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Float(_), EngineValue::Blob(_)) => Ordering::Less,
       (EngineValue::Text(_), EngineValue::Integer(_)) => Ordering::Greater,
       (EngineValue::Text(_), EngineValue::Float(_)) => Ordering::Greater,
+      (EngineValue::Text(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Text(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Uuid(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Uuid(_), _) => Ordering::Greater,
       (EngineValue::Blob(_), _) => Ordering::Greater,
     }
   }
@@ -152,6 +165,15 @@ impl fmt::Display for EngineValue {
       EngineValue::Integer(value) => write!(f, "{}", value),
       EngineValue::Float(value) => write!(f, "{}", value),
       EngineValue::Text(value) => write!(f, "{}", value),
+      EngineValue::Uuid(value) => {
+        for (i, byte) in value.iter().enumerate() {
+          if i == 4 || i == 6 || i == 8 || i == 10 {
+            write!(f, "-")?;
+          }
+          write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+      }
       EngineValue::Blob(value) => {
         write!(f, "0x")?;
         for byte in value {

@@ -23,6 +23,7 @@ pub fn encode_engine_type_into_sink<S: BufferSink>(sink: &mut S, value: &EngineT
     EngineType::Float => 1,
     EngineType::Text => 2,
     EngineType::Blob => 3,
+    EngineType::Uuid => 4,
   };
   sink.push_bytes(&[tag]);
 }
@@ -33,6 +34,7 @@ pub fn decode_engine_type(cursor: &mut Cursor<'_>) -> Result<EngineType, DecodeE
     1 => Ok(EngineType::Float),
     2 => Ok(EngineType::Text),
     3 => Ok(EngineType::Blob),
+    4 => Ok(EngineType::Uuid),
     _ => Err(DecodeError::Malformed),
   }
 }
@@ -56,6 +58,10 @@ pub fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &Engine
       sink.push_bytes(&[4]);
       encode_bytes_into_sink(sink, bytes);
     }
+    EngineValue::Uuid(bytes) => {
+      sink.push_bytes(&[5]);
+      sink.push_bytes(bytes);
+    }
   }
 }
 
@@ -66,6 +72,12 @@ pub fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, Decod
     2 => Ok(EngineValue::Float(f64::from_bits(cursor.read_u64()?))),
     3 => Ok(EngineValue::Text(decode_string(cursor)?)),
     4 => Ok(EngineValue::Blob(decode_bytes(cursor)?)),
+    5 => {
+      let bytes = cursor.read_exact(16)?;
+      let mut value = [0_u8; 16];
+      value.copy_from_slice(bytes);
+      Ok(EngineValue::Uuid(value))
+    }
     _ => Err(DecodeError::Malformed),
   }
 }
