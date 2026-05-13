@@ -33,7 +33,7 @@ pub enum EngineType {
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi), serde(untagged))]
 pub enum EngineValue {
   Integer(i64),
   Float(f64),
@@ -196,7 +196,7 @@ impl From<&[u8]> for EngineValue {
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi), serde(untagged))]
 pub enum EngineKey {
   Scalar(EngineValue),
   Tuple(Vec<EngineValue>),

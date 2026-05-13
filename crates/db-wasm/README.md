@@ -13,22 +13,25 @@ This runs `wasm-pack` and writes the generated package directly to `pkg/`.
 ## Imports
 
 ```ts
-import init from "db-wasm";
-import { BrowserDatabase, type StoreAdapter } from "db-wasm";
-import { translate_sql_to_query, translate_sql_to_statement } from "db-wasm";
+import init from "@aicacia/db-wasm";
+import { BrowserDatabase, type StoreAdapter } from "@aicacia/db-wasm";
+import {
+  translate_sql_to_query,
+  translate_sql_to_statement,
+} from "@aicacia/db-wasm";
 import type {
   EngineQuery,
   QualifiedPredicate,
   TableSchema,
   EngineValue,
-} from "db-wasm";
+} from "@aicacia/db-wasm";
 ```
 
 ## Minimal Usage
 
 ```ts
-import init from "db-wasm";
-import { BrowserDatabase } from "db-wasm";
+import init from "@aicacia/db-wasm";
+import { BrowserDatabase } from "@aicacia/db-wasm";
 
 await init();
 
@@ -48,7 +51,7 @@ console.log(result.rows);
 ## StoreAdapter
 
 ```ts
-import { BrowserDatabase, type StoreAdapter } from "db-wasm";
+import { BrowserDatabase, type StoreAdapter } from "@aicacia/db-wasm";
 
 const adapter: StoreAdapter = {
   async get(tree, key) {
