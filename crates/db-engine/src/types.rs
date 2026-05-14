@@ -1,4 +1,4 @@
-pub use db_types::{EngineKey, EngineRow, EngineType, EngineValue};
+pub use db_types::{EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};
 
 use db_core::BTreeError;
 use thiserror::Error;
@@ -20,7 +20,7 @@ pub enum EngineError {
   DuplicateIndex(String),
 
   #[error("duplicate primary key: {0:?}")]
-  DuplicatePrimaryKey(EngineKey),
+  DuplicatePrimaryKey(PrimaryKey),
 
   #[error("unique index violation: {0}")]
   UniqueIndexViolation(String),

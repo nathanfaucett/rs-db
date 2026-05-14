@@ -10,7 +10,7 @@ pub mod schema;
 pub mod storage_codec;
 pub mod store;
 
-pub use engine_types::{EngineKey, EngineRow, EngineType, EngineValue};
+pub use engine_types::{EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};
 pub use schema::{ColumnSchema, IndexSchema, TableSchema};
 pub use storage_codec::{EngineKeyCodec, EngineRowCodec};
 pub use store::{StoreKey, StoreValue};

@@ -1,6 +1,8 @@
 use futures::future::FutureExt;
 
-use crate::store_adapter::{EngineStore, collect_table_rows, lookup_index_rows};
+use crate::store_adapter::{
+  EngineStore, collect_table_rows, lookup_index_row_pks, materialize_rows_by_primary_keys,
+};
 use crate::{
   EngineError, IndexSchema, TableSchema, query::EngineQuery, query::EngineResult,
   query::QualifiedColumn, query::QualifiedPredicate, query::SelectOptions,
@@ -86,7 +88,8 @@ where
     if let Some(predicate) = &predicate
       && let Some(index) = self.catalog.find_index_for_predicate(table_name, predicate)
     {
-      let rows = lookup_index_rows(tx, table_name, &index, predicate).await?;
+      let row_pks = lookup_index_row_pks(tx, &index, predicate).await?;
+      let rows = materialize_rows_by_primary_keys(tx, table_name, row_pks).await?;
 
       if !rows.is_empty() {
         return Ok(EngineResult::new(

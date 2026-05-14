@@ -17,6 +17,7 @@ pub use query::{EngineQuery, EngineResult};
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{
   BackendCapability, EngineStore, EngineStoreTransaction, IndexStore, RowStore, SchemaStore,
-  TransactionContract, TransactionControl,
+  TransactionContract, TransactionControl, fetch_rows_by_primary_keys,
+  lookup_primary_keys_by_index_predicate,
 };
-pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue};
+pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};

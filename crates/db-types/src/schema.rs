@@ -14,7 +14,7 @@ use std::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-use crate::{EngineKey, EngineRow, EngineType, EngineValue};
+use crate::{EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};
 
 fn key_from_indices<F>(
   row: &EngineRow,
@@ -136,14 +136,23 @@ impl TableSchema {
     validate_uuid_primary_key(self)
   }
 
-  pub fn primary_key(&self, row: &EngineRow) -> Result<EngineKey, SchemaError> {
+  pub fn primary_key(&self, row: &EngineRow) -> Result<PrimaryKey, SchemaError> {
     validate_uuid_primary_key(self)?;
-    key_from_indices(row, &self.primary_key, |index| {
+    let pk_index = self.primary_key[0];
+    let value = row.get(pk_index).ok_or_else(|| {
       SchemaError::SchemaMismatch(format!(
         "primary key index {} is out of bounds for table {}",
-        index, self.name
+        pk_index, self.name
       ))
-    })
+    })?;
+
+    match value {
+      EngineValue::Uuid(bytes) => Ok(PrimaryKey::from(*bytes)),
+      _ => Err(SchemaError::TypeMismatch(format!(
+        "table {} primary key value must be UUID",
+        self.name
+      ))),
+    }
   }
 }
 

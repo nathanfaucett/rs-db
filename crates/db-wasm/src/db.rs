@@ -4,7 +4,7 @@ use db_in_memory::InMemoryNamedBTree;
 use wasm_bindgen::prelude::*;
 
 use crate::pluggable_store::PluggableBackendStore;
-use crate::store_adapter::{StoreAdapter, StoreAdapterCallbacks};
+use crate::store_adapter::{DatabaseEngineOptions, StoreAdapterCallbacks};
 
 fn to_js_error(message: impl core::fmt::Display) -> JsValue {
   js_sys::Error::new(&message.to_string()).into()
@@ -26,8 +26,10 @@ impl BrowserDatabase {
   }
 
   #[wasm_bindgen(js_name = openWithBackend)]
-  pub async fn open_with_backend(adapter: StoreAdapter) -> Result<BrowserDatabase, JsValue> {
-    let adapter_value: JsValue = adapter.into();
+  pub async fn open_with_backend(
+    options: DatabaseEngineOptions,
+  ) -> Result<BrowserDatabase, JsValue> {
+    let adapter_value: JsValue = options.into();
     let adapter = StoreAdapterCallbacks::try_from(adapter_value).map_err(to_js_error)?;
     let store = PluggableBackendStore::External(adapter);
     let inner = Database::open_with_store(store)

@@ -213,6 +213,57 @@ impl From<&[u8]> for EngineValue {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(
+  feature = "wasm",
+  tsify(into_wasm_abi, from_wasm_abi),
+  serde(transparent)
+)]
+pub struct PrimaryKey(pub [u8; 16]);
+
+impl PrimaryKey {
+  pub fn new(bytes: [u8; 16]) -> Self {
+    Self(bytes)
+  }
+
+  pub fn as_bytes(&self) -> &[u8; 16] {
+    &self.0
+  }
+
+  pub fn into_engine_key(self) -> EngineKey {
+    EngineKey::Scalar(EngineValue::Uuid(self.0))
+  }
+
+  pub fn from_engine_key(key: &EngineKey) -> Option<Self> {
+    match key {
+      EngineKey::Scalar(EngineValue::Uuid(bytes)) => Some(Self(*bytes)),
+      _ => None,
+    }
+  }
+}
+
+impl From<[u8; 16]> for PrimaryKey {
+  fn from(value: [u8; 16]) -> Self {
+    Self(value)
+  }
+}
+
+impl From<PrimaryKey> for [u8; 16] {
+  fn from(value: PrimaryKey) -> Self {
+    value.0
+  }
+}
+
+impl From<PrimaryKey> for EngineKey {
+  fn from(value: PrimaryKey) -> Self {
+    value.into_engine_key()
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
   feature = "wasm",

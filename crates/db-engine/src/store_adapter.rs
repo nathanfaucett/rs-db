@@ -1,6 +1,6 @@
 #![allow(clippy::manual_async_fn)]
 
-use crate::{EngineError, EngineKey, EngineRow, IndexSchema, TableSchema};
+use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
 use async_stream::stream;
 use core::future::Future;
 use db_core::{NamedTreeProvider, NamedTreeTransaction};
@@ -17,15 +17,21 @@ mod transaction;
 
 pub use backend_contract::{BackendCapability, TransactionContract};
 pub(crate) use helpers::{
-  collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_rows,
-  remove_index_entries, remove_table_rows,
+  collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_row_pks,
+  materialize_rows_by_primary_keys, remove_index_entries, remove_table_rows,
 };
+pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
 pub use transaction::{
   EngineStoreTransaction, IndexStore, RowStore, SchemaStore, TransactionControl,
 };
 
 fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
   EngineError::SchemaMismatch(error.to_string())
+}
+
+fn primary_key_from_engine_key(key: EngineKey) -> Result<PrimaryKey, EngineError> {
+  PrimaryKey::from_engine_key(&key)
+    .ok_or_else(|| EngineError::SchemaMismatch("row primary key must be UUID scalar".into()))
 }
 
 async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
@@ -81,12 +87,13 @@ where
   fn get_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
-    primary_key: &'a EngineKey,
+    primary_key: &'a PrimaryKey,
   ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
+      let storage_key: EngineKey = (*primary_key).into();
       self
         .inner
-        .get(&row_tree(table_name), primary_key)
+        .get(&row_tree(table_name), &storage_key)
         .await
         .map_err(EngineError::from)
     }
@@ -95,13 +102,14 @@ where
   fn insert_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
-    primary_key: EngineKey,
+    primary_key: PrimaryKey,
     row: EngineRow,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
+      let storage_key: EngineKey = primary_key.into();
       self
         .inner
-        .insert(&row_tree(table_name), primary_key, row)
+        .insert(&row_tree(table_name), storage_key, row)
         .await
         .map_err(EngineError::from)
     }
@@ -110,12 +118,13 @@ where
   fn remove_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
-    primary_key: &'a EngineKey,
+    primary_key: &'a PrimaryKey,
   ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
+      let storage_key: EngineKey = (*primary_key).into();
       self
         .inner
-        .remove(&row_tree(table_name), primary_key)
+        .remove(&row_tree(table_name), &storage_key)
         .await
         .map_err(EngineError::from)
     }
@@ -124,14 +133,16 @@ where
   fn range_table_rows<'a>(
     &'a self,
     table_name: &'a str,
-  ) -> impl Stream<Item = Result<(EngineKey, EngineRow), EngineError>> + 'a {
+  ) -> impl Stream<Item = Result<(PrimaryKey, EngineRow), EngineError>> + 'a {
     let tree = row_tree(table_name);
     let inner = &self.inner;
     stream! {
       let s = inner.range(&tree, ..);
       pin_mut!(s);
       while let Some(item) = s.next().await {
-        yield item.map_err(EngineError::from);
+        yield item
+          .map_err(EngineError::from)
+          .and_then(|(key, row)| primary_key_from_engine_key(key).map(|pk| (pk, row)));
       }
     }
   }
@@ -222,10 +233,11 @@ where
     &'a mut self,
     index: &'a IndexSchema,
     index_key: &'a EngineKey,
-    row_pk: &'a EngineKey,
+    row_pk: &'a PrimaryKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let composite = index.make_entry_key(index_key, row_pk);
+      let row_pk_key: EngineKey = (*row_pk).into();
+      let composite = index.make_entry_key(index_key, &row_pk_key);
       self
         .inner
         .insert(&index_tree(&index.name), composite, Vec::new())
@@ -238,10 +250,11 @@ where
     &'a mut self,
     index: &'a IndexSchema,
     index_key: &'a EngineKey,
-    row_pk: &'a EngineKey,
+    row_pk: &'a PrimaryKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let composite = index.make_entry_key(index_key, row_pk);
+      let row_pk_key: EngineKey = (*row_pk).into();
+      let composite = index.make_entry_key(index_key, &row_pk_key);
       self
         .inner
         .remove(&index_tree(&index.name), &composite)
@@ -254,16 +267,17 @@ where
   fn range_index_entries<'a>(
     &'a self,
     index: &'a IndexSchema,
-  ) -> impl Stream<Item = Result<(EngineKey, EngineKey), EngineError>> + 'a {
+  ) -> impl Stream<Item = Result<(EngineKey, PrimaryKey), EngineError>> + 'a {
     let tree = index_tree(&index.name);
     let inner = &self.inner;
     stream! {
       let s = inner.range(&tree, ..);
       pin_mut!(s);
       while let Some(item) = s.next().await {
-        yield item
-          .map(|(composite, _)| index.split_entry_key(&composite))
-          .map_err(EngineError::from);
+        yield item.map_err(EngineError::from).and_then(|(composite, _)| {
+          let (index_key, row_pk_key) = index.split_entry_key(&composite);
+          primary_key_from_engine_key(row_pk_key).map(|row_pk| (index_key, row_pk))
+        });
       }
     }
   }
@@ -304,7 +318,9 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{ColumnSchema, EngineKey, EngineType, EngineValue, IndexSchema, TableSchema};
+  use crate::{
+    ColumnSchema, EngineKey, EngineType, EngineValue, IndexSchema, PrimaryKey, TableSchema,
+  };
   use db_core::block_on;
   use db_in_memory::InMemoryNamedBTree;
 
@@ -353,15 +369,15 @@ mod tests {
   }
 
   #[test]
-  fn lookup_index_rows_returns_matching_rows() {
+  fn index_lookup_and_row_materialization_are_separate() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
       let mut tx = store.engine_transaction().await.expect("open tx");
 
       let row = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];
-      let primary_key = EngineKey::from_values(vec![EngineValue::Integer(1)]);
+      let primary_key = PrimaryKey::from([1_u8; 16]);
 
-      tx.insert_table_row("users", primary_key.clone(), row.clone())
+      tx.insert_table_row("users", primary_key, row.clone())
         .await
         .expect("insert row");
 
@@ -386,9 +402,12 @@ mod tests {
         }),
         crate::query::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
       );
-      let rows = lookup_index_rows(&mut tx2, "users", &index_schema, &predicate)
+      let row_pks = lookup_index_row_pks(&mut tx2, &index_schema, &predicate)
         .await
-        .expect("lookup");
+        .expect("lookup pks");
+      let rows = materialize_rows_by_primary_keys(&mut tx2, "users", row_pks)
+        .await
+        .expect("materialize rows");
 
       assert_eq!(rows, vec![row]);
     });

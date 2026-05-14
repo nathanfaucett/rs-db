@@ -10,7 +10,7 @@ use crate::store_adapter::{
   delete_row, find_conflicting_index_entry,
 };
 use crate::{
-  EngineError, EngineKey, EngineRow, EngineValue, IndexSchema, query::JoinClause,
+  EngineError, EngineRow, EngineValue, IndexSchema, PrimaryKey, query::JoinClause,
   query::QualifiedColumn, query::QualifiedPredicate, query::UpdateAssignment,
   query::UpdateValueExpr,
 };
@@ -20,7 +20,7 @@ async fn ensure_indexes_unique<TX>(
   tx: &mut TX,
   indexes: &[IndexSchema],
   row: &EngineRow,
-  row_pk: &EngineKey,
+  row_pk: &PrimaryKey,
 ) -> Result<(), EngineError>
 where
   TX: crate::store_adapter::EngineStoreTransaction,
@@ -41,7 +41,7 @@ async fn insert_all_index_entries<TX>(
   tx: &mut TX,
   indexes: &[IndexSchema],
   row: &EngineRow,
-  primary_key: &EngineKey,
+  primary_key: &PrimaryKey,
 ) -> Result<(), EngineError>
 where
   TX: crate::store_adapter::EngineStoreTransaction,
@@ -94,8 +94,7 @@ where
 
     ensure_indexes_unique(tx, &indexes, &row, &pk).await?;
 
-    tx.insert_table_row(table_name, pk.clone(), row.clone())
-      .await?;
+    tx.insert_table_row(table_name, pk, row.clone()).await?;
 
     insert_all_index_entries(tx, &indexes, &row, &pk).await?;
 
@@ -173,7 +172,7 @@ where
       delete_row(tx, table_name, &old_pk, &row, &indexes).await?;
       ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
 
-      tx.insert_table_row(table_name, new_pk.clone(), updated_row.clone())
+      tx.insert_table_row(table_name, new_pk, updated_row.clone())
         .await?;
 
       insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
@@ -370,7 +369,7 @@ where
     joins: &[JoinClause],
     from_tables: &[String],
     predicate: Option<&QualifiedPredicate>,
-  ) -> Result<Vec<(EngineKey, EngineRow, Option<JoinedRowState>)>, EngineError> {
+  ) -> Result<Vec<(PrimaryKey, EngineRow, Option<JoinedRowState>)>, EngineError> {
     let all_tables = collect_tables(table_name, from_tables, joins);
     let table_rows_map = collect_table_rows_map::<S>(tx, &all_tables).await?;
     let template = build_join_template(&all_tables);
@@ -387,8 +386,8 @@ where
       });
     }
 
-    let mut matched: HashMap<EngineKey, (EngineRow, JoinedRowState)> = HashMap::new();
-    let mut seen: HashSet<EngineKey> = HashSet::new();
+    let mut matched: HashMap<PrimaryKey, (EngineRow, JoinedRowState)> = HashMap::new();
+    let mut seen: HashSet<PrimaryKey> = HashSet::new();
 
     for partial in partial_results {
       let Some(Some(base_row)) = partial.get(table_name) else {
@@ -401,7 +400,7 @@ where
           "UPDATE JOIN matched target row more than once".into(),
         ));
       }
-      seen.insert(pk.clone());
+      seen.insert(pk);
       matched.insert(pk, (base_row.clone(), partial));
     }
 
