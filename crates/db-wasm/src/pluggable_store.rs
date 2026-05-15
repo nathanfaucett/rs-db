@@ -2,7 +2,7 @@ use async_stream::stream;
 use core::borrow::Borrow;
 use core::ops::RangeBounds;
 use db_core::{BTreeError, BTreeResult, NamedTreeProvider, NamedTreeTransaction};
-use db_engine::{EngineKey, EngineRow};
+use db_engine::EngineKey;
 use db_in_memory::{InMemoryNamedBTree, InMemoryNamedTransaction};
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -10,12 +10,12 @@ use crate::store_adapter::{StoreAdapterCallbacks, StoreAdapterTransaction, Store
 
 #[derive(Clone)]
 pub enum PluggableBackendStore {
-  InMemory(InMemoryNamedBTree<EngineKey, EngineRow>),
+  InMemory(InMemoryNamedBTree<EngineKey, Vec<u8>>),
   External(StoreAdapterCallbacks),
 }
 
 pub enum PluggableBackendTransaction {
-  InMemory(InMemoryNamedTransaction<EngineKey, EngineRow>),
+  InMemory(InMemoryNamedTransaction<EngineKey, Vec<u8>>),
   External(StoreAdapterTransaction),
 }
 
@@ -23,7 +23,7 @@ pub enum PluggableBackendTree {
   External(StoreAdapterTree),
 }
 
-impl NamedTreeProvider<EngineKey, EngineRow> for PluggableBackendStore {
+impl NamedTreeProvider<EngineKey, Vec<u8>> for PluggableBackendStore {
   type Tree = PluggableBackendTree;
   type Transaction = PluggableBackendTransaction;
 
@@ -57,12 +57,8 @@ impl NamedTreeProvider<EngineKey, EngineRow> for PluggableBackendStore {
   }
 }
 
-impl NamedTreeTransaction<EngineKey, EngineRow> for PluggableBackendTransaction {
-  async fn get<'a>(
-    &'a mut self,
-    tree: &'a str,
-    key: &'a EngineKey,
-  ) -> BTreeResult<Option<EngineRow>>
+impl NamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransaction {
+  async fn get<'a>(&'a mut self, tree: &'a str, key: &'a EngineKey) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
   {
@@ -76,7 +72,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for PluggableBackendTransaction 
     &'a mut self,
     tree: &'a str,
     key: EngineKey,
-    value: EngineRow,
+    value: Vec<u8>,
   ) -> BTreeResult<()>
   where
     EngineKey: Ord,
@@ -91,7 +87,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for PluggableBackendTransaction 
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> BTreeResult<Option<EngineRow>>
+  ) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
   {
@@ -105,7 +101,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for PluggableBackendTransaction 
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, EngineRow)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
   where
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
@@ -151,8 +147,8 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for PluggableBackendTransaction 
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, EngineRow> for PluggableBackendTree {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<EngineRow>>
+impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
+  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -162,7 +158,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for PluggableBackendTree {
     }
   }
 
-  async fn insert(&mut self, key: EngineKey, value: EngineRow) -> BTreeResult<()>
+  async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> BTreeResult<()>
   where
     EngineKey: Ord,
   {
@@ -171,7 +167,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for PluggableBackendTree {
     }
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<EngineRow>>
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -184,7 +180,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for PluggableBackendTree {
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, EngineRow)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
   where
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
@@ -203,7 +199,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for PluggableBackendTree {
   }
 }
 
-impl db_core::BTree<EngineKey, EngineRow> for PluggableBackendTree {
+impl db_core::BTree<EngineKey, Vec<u8>> for PluggableBackendTree {
   type Transaction = StoreAdapterTransaction;
 
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {

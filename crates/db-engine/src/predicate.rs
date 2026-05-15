@@ -4,6 +4,7 @@ use crate::{
   EngineKey, EngineRow, EngineValue, IndexSchema,
   query::{HavingPredicate, QualifiedColumn, QualifiedOperand, QualifiedPredicate, RefOrAgg},
 };
+use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
 
 pub trait RowContext {
   fn get_value(&self, table: &str, col_index: usize) -> Option<&EngineValue>;
@@ -231,8 +232,8 @@ impl QualifiedPredicate {
     let mut values = vec![None; index.column_indices.len()];
     self.fill_index_key_values(index, &mut values)?;
     if values.iter().all(Option::is_some) {
-      let values = values.into_iter().map(Option::unwrap).collect();
-      Some(EngineKey::from_values(values))
+      let values = values.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+      Some(<DefaultEncoding as KeyEncoding>::encode_values(&values))
     } else {
       None
     }

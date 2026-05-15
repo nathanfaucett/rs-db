@@ -4,36 +4,32 @@ use std::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use db_core::{KeyCodec, ValueCodec, decode_with_version, encode_version_into_sink};
+use db_core::{KeyCodec, ValueCodec};
 
 use crate::{
   EngineKey, EngineRow,
-  codec::{
-    decode_engine_key, decode_engine_row, encode_engine_key_into_sink, encode_engine_row_into_sink,
-  },
+  key_encoding::{DefaultEncoding, RowEncoding},
 };
 
-fn encode_versioned<T>(value: &T, encode: impl FnOnce(&mut Vec<u8>, &T)) -> Vec<u8> {
-  let mut out = Vec::new();
-  encode_version_into_sink(&mut out);
-  encode(&mut out, value);
-  out
-}
-
 fn encode_key_versioned(value: &EngineKey) -> Vec<u8> {
-  encode_versioned(value, encode_engine_key_into_sink)
+  // EngineKey bytes already use the canonical versioned format.
+  value.clone()
 }
 
 fn decode_key_versioned(data: &[u8]) -> Result<EngineKey, db_core::DecodeError> {
-  decode_with_version(data, decode_engine_key)
+  // EngineKey bytes are already stored in canonical versioned form.
+  Ok(data.to_vec())
 }
 
 fn decode_row_versioned(data: &[u8]) -> Result<EngineRow, db_core::DecodeError> {
-  decode_with_version(data, decode_engine_row)
+  // EngineRow bytes already use the canonical versioned row format.
+  <DefaultEncoding as RowEncoding>::decode_values(data)
+    .map_err(|_e| db_core::DecodeError::Malformed)
 }
 
 fn encode_row_versioned(value: &EngineRow) -> Vec<u8> {
-  encode_versioned(value, encode_engine_row_into_sink)
+  // RowEncoding already emits the canonical versioned row format.
+  <DefaultEncoding as RowEncoding>::encode_values(value)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -94,10 +90,11 @@ impl_engine_value_codec!(
 mod tests {
   use super::*;
   use crate::EngineValue;
+  use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 
   #[test]
   fn engine_key_round_trips() {
-    let value = EngineKey::from_values(vec![
+    let value = <DefaultEncoding as KeyEncoding>::encode_values(&[
       EngineValue::Integer(1),
       EngineValue::Text("Alice".into()),
     ]);
@@ -126,8 +123,8 @@ mod tests {
 
   #[test]
   fn key_compare_matches_engine_key_ordering() {
-    let left = EngineKey::from_values(vec![EngineValue::Integer(2)]);
-    let right = EngineKey::from_values(vec![EngineValue::Float(3.0)]);
+    let left = <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Integer(2)]);
+    let right = <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Float(3.0)]);
 
     let left_encoded = <EngineKeyCodec as ValueCodec<EngineKey>>::encode_to_vec(&left);
     let right_encoded = <EngineKeyCodec as ValueCodec<EngineKey>>::encode_to_vec(&right);

@@ -7,14 +7,14 @@ use db_engine::{
 use db_in_memory::InMemoryNamedBTree;
 use futures::executor::block_on;
 
-type TestDb = EngineDatabase<InMemoryNamedBTree<db_engine::EngineKey, Vec<EngineValue>>>;
+type TestDb = EngineDatabase<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>>;
 
 fn uuid_value(id: u128) -> EngineValue {
   EngineValue::Uuid(id.to_be_bytes())
 }
 
 fn make_test_db() -> TestDb {
-  let store: InMemoryNamedBTree<db_engine::EngineKey, Vec<EngineValue>> = InMemoryNamedBTree::new();
+  let store: InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
   EngineDatabase::new(store)
 }
 

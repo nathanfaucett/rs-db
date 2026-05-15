@@ -10,16 +10,16 @@ use std::vec::Vec;
 use db_automerge::{AutoCommit, AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "automerge")]
 use db_core::{BTree, BTreeExecutor, BTreeTransaction};
-use db_engine::{EngineDatabase, EngineQuery, EngineResult, IndexSchema, TableSchema};
 #[cfg(feature = "redb")]
-use db_engine::{EngineKey, EngineRow};
+use db_engine::EngineKey;
+use db_engine::{EngineDatabase, EngineQuery, EngineResult, IndexSchema, TableSchema};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::{REDBBTree, REDBNamedBTree};
 #[cfg(feature = "redb")]
-use db_types::{EngineKeyCodec, EngineRowCodec};
+use db_types::EngineKeyCodec;
 #[cfg(feature = "automerge")]
 use std::collections::BTreeMap;
 #[cfg(feature = "redb")]
@@ -224,10 +224,7 @@ impl Database<RedbEngineStore> {
     path: impl AsRef<Path>,
     _table_name: &'static str,
   ) -> Result<Self, DatabaseError> {
-    let store =
-      REDBNamedBTree::<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>::open_with_codecs(
-        path,
-      )
+    let store = REDBNamedBTree::<EngineKey, Vec<u8>, EngineKeyCodec>::open_with_codecs(path)
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let engine = EngineDatabase::new(store);
     Ok(Self { engine })

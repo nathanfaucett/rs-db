@@ -10,14 +10,14 @@ use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, Docu
 #[cfg(feature = "automerge")]
 use db_core::BufferSink;
 use db_core::NamedTreeProvider;
-use db_engine::{EngineDatabase, EngineKey, EngineRow, EngineValue};
+use db_engine::{EngineDatabase, EngineKey, EngineValue};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::{REDBBTree, REDBNamedBTree};
 #[cfg(feature = "redb")]
-use db_types::{EngineKeyCodec, EngineRowCodec};
+use db_types::EngineKeyCodec;
 
 /// Public facade error type.
 #[derive(Debug)]
@@ -44,9 +44,9 @@ impl From<db_engine::EngineError> for DatabaseError {
 /// Simple row type reusing EngineValue
 pub type Row = Vec<EngineValue>;
 
-pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, EngineRow>;
+pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, Vec<u8>>;
 #[cfg(feature = "redb")]
-pub type RedbEngineStore = REDBNamedBTree<EngineKey, EngineRow, EngineKeyCodec, EngineRowCodec>;
+pub type RedbEngineStore = REDBNamedBTree<EngineKey, Vec<u8>, EngineKeyCodec>;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 pub type RedbAutomergeStore = AutomergeEngineStore<
   REDBBTree<DocumentChangeKey, Vec<u8>, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec>,
@@ -63,12 +63,12 @@ pub struct AutomergeSyncMetrics {
 }
 
 pub trait FacadeStore:
-  Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
+  Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
 {
 }
 
 impl<T> FacadeStore for T where
-  T: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
+  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
 {
 }
 

@@ -11,7 +11,8 @@ use db_core::{
   encode_with_version,
 };
 
-use crate::engine_types::{EngineKey, EngineRow, EngineType, EngineValue};
+use crate::engine_types::{EngineType, EngineValue};
+use crate::key_encoding::{DefaultEncoding, RowEncoding};
 use crate::schema::{ColumnSchema, IndexSchema, TableSchema};
 use crate::store::{StoreKey, StoreValue};
 
@@ -94,43 +95,8 @@ where
   Ok(out)
 }
 
-pub fn encode_engine_row_into_sink<S: BufferSink>(sink: &mut S, row: &EngineRow) {
-  encode_len_into_sink(sink, row.len());
-  for value in row {
-    encode_engine_value_into_sink(sink, value);
-  }
-}
-
-pub fn decode_engine_row(cursor: &mut Cursor<'_>) -> Result<EngineRow, DecodeError> {
-  decode_vec(cursor, decode_engine_value)
-}
-
-pub fn encode_engine_key_into_sink<S: BufferSink>(sink: &mut S, value: &EngineKey) {
-  match value {
-    EngineKey::Scalar(scalar) => {
-      sink.push_bytes(&[0]);
-      encode_engine_value_into_sink(sink, scalar);
-    }
-    EngineKey::Tuple(values) => {
-      sink.push_bytes(&[1]);
-      encode_len_into_sink(sink, values.len());
-      for value in values {
-        encode_engine_value_into_sink(sink, value);
-      }
-    }
-  }
-}
-
-pub fn decode_engine_key(cursor: &mut Cursor<'_>) -> Result<EngineKey, DecodeError> {
-  match cursor.read_u8()? {
-    0 => Ok(EngineKey::Scalar(decode_engine_value(cursor)?)),
-    1 => {
-      let values = decode_vec(cursor, decode_engine_value)?;
-      Ok(EngineKey::Tuple(values))
-    }
-    _ => Err(DecodeError::Malformed),
-  }
-}
+// EngineRow and EngineKey are now encoded bytes; encoding/decoding moved to key_encoding.rs
+// These legacy functions are no longer used.
 
 // Schema codec ---------------------------------------------------------
 
@@ -202,7 +168,7 @@ pub fn encode_store_key_into_sink<S: BufferSink>(sink: &mut S, value: &StoreKey)
     } => {
       sink.push_bytes(&[0]);
       encode_string_into_sink(sink, table_name);
-      encode_engine_key_into_sink(sink, primary_key);
+      encode_bytes_into_sink(sink, primary_key);
     }
     StoreKey::IndexEntry {
       index_name,
@@ -211,8 +177,8 @@ pub fn encode_store_key_into_sink<S: BufferSink>(sink: &mut S, value: &StoreKey)
     } => {
       sink.push_bytes(&[1]);
       encode_string_into_sink(sink, index_name);
-      encode_engine_key_into_sink(sink, index_key);
-      encode_engine_key_into_sink(sink, row_pk);
+      encode_bytes_into_sink(sink, index_key);
+      encode_bytes_into_sink(sink, row_pk);
     }
     StoreKey::TableSchema { table_name } => {
       sink.push_bytes(&[2]);
@@ -229,7 +195,9 @@ pub fn encode_store_value_into_sink<S: BufferSink>(sink: &mut S, value: &StoreVa
   match value {
     StoreValue::Row(row) => {
       sink.push_bytes(&[0]);
-      encode_engine_row_into_sink(sink, row);
+      // EngineRow is Vec<EngineValue>; encode to bytes
+      let encoded = DefaultEncoding::encode_values(row);
+      encode_bytes_into_sink(sink, &encoded);
     }
     StoreValue::IndexEntry => sink.push_bytes(&[1]),
     StoreValue::TableSchema(schema) => {
@@ -248,12 +216,12 @@ pub fn decode_store_key(cursor: &mut Cursor<'_>) -> Result<StoreKey, DecodeError
   match cursor.read_u8()? {
     0 => Ok(StoreKey::table_row(
       decode_string(cursor)?,
-      decode_engine_key(cursor)?,
+      decode_bytes(cursor)?, // EngineKey is now bytes
     )),
     1 => Ok(StoreKey::index_entry(
       decode_string(cursor)?,
-      decode_engine_key(cursor)?,
-      decode_engine_key(cursor)?,
+      decode_bytes(cursor)?, // EngineKey is now bytes
+      decode_bytes(cursor)?, // EngineKey is now bytes
     )),
     2 => Ok(StoreKey::table_schema(decode_string(cursor)?)),
     3 => Ok(StoreKey::index_schema(decode_string(cursor)?)),
@@ -263,7 +231,12 @@ pub fn decode_store_key(cursor: &mut Cursor<'_>) -> Result<StoreKey, DecodeError
 
 pub fn decode_store_value(cursor: &mut Cursor<'_>) -> Result<StoreValue, DecodeError> {
   match cursor.read_u8()? {
-    0 => Ok(StoreValue::Row(decode_engine_row(cursor)?)),
+    0 => {
+      // EngineRow is Vec<EngineValue>; decode from bytes
+      let bytes = decode_bytes(cursor)?;
+      let row = DefaultEncoding::decode_values(&bytes).map_err(|_e| DecodeError::Malformed)?;
+      Ok(StoreValue::Row(row))
+    }
     1 => Ok(StoreValue::IndexEntry),
     2 => Ok(StoreValue::TableSchema(decode_table_schema(cursor)?)),
     3 => Ok(StoreValue::IndexSchema(decode_index_schema(cursor)?)),

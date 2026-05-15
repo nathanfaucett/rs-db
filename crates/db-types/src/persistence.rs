@@ -16,6 +16,7 @@ use crate::codec::{
   encode_table_schema_into_sink,
 };
 use crate::engine_types::{EngineKey, EngineRow, EngineValue};
+use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 use crate::schema::{IndexSchema, TableSchema};
 use crate::store::{StoreKey, StoreValue};
 
@@ -50,7 +51,7 @@ fn prefixed_tree(prefix: &str, name: &str) -> String {
 }
 
 fn schema_entry_key(name: impl Into<String>) -> EngineKey {
-  EngineKey::Scalar(EngineValue::Text(name.into()))
+  DefaultEncoding::encode_values(&[EngineValue::Text(name.into())])
 }
 
 /// Prefix used for row trees: `"t:{table_name}"`.
@@ -157,8 +158,8 @@ where
 {
   let start = StoreKey::index_entry(
     String::from(index_name),
-    EngineKey::Scalar(EngineValue::Null),
-    EngineKey::Scalar(EngineValue::Null),
+    DefaultEncoding::encode_values(&[EngineValue::Null]),
+    DefaultEncoding::encode_values(&[EngineValue::Null]),
   );
   tx.range(start..).take_while(move |res| {
     futures::future::ready(match res {
@@ -234,17 +235,20 @@ where
 mod tests {
   use super::*;
   use crate::engine_types::EngineType;
+  use crate::key_encoding::{DefaultEncoding, KeyEncoding};
   use crate::schema::ColumnSchema;
 
   #[test]
   fn schema_entry_keys_use_text_scalars() {
     assert_eq!(
       table_schema_entry_key("users"),
-      EngineKey::Scalar(EngineValue::Text("users".into()))
+      <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text("users".into())])
     );
     assert_eq!(
       index_schema_entry_key("users_name_idx"),
-      EngineKey::Scalar(EngineValue::Text("users_name_idx".into()))
+      <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text(
+        "users_name_idx".into(),
+      )])
     );
   }
 

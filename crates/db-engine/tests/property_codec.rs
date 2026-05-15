@@ -2,6 +2,7 @@ use db_core::KeyCodec;
 use proptest::prelude::*;
 
 use db_engine::{EngineKey, EngineValue};
+use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
 use db_types::{EngineKeyCodec, EngineRowCodec};
 
 /// Use the fully-qualified trait methods for encoding/decoding to avoid
@@ -30,8 +31,8 @@ proptest! {
 
   #[test]
   fn engine_key_ordering(a in engine_value_strategy(), b in engine_value_strategy()) {
-    let left_key = EngineKey::from_values(vec![a.clone()]);
-    let right_key = EngineKey::from_values(vec![b.clone()]);
+    let left_key = <DefaultEncoding as KeyEncoding>::encode_values(&[a.clone()]);
+    let right_key = <DefaultEncoding as KeyEncoding>::encode_values(&[b.clone()]);
 
     let left_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&left_key);
     let right_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&right_key);

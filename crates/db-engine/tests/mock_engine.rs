@@ -7,14 +7,14 @@ use db_engine::{
 };
 use db_in_memory::InMemoryNamedBTree;
 
-type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<EngineValue>>>;
+type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<u8>>>;
 
 fn uuid_value(id: u128) -> EngineValue {
   EngineValue::Uuid(id.to_be_bytes())
 }
 
 fn make_db_with_items() -> TestDb {
-  let store: InMemoryNamedBTree<EngineKey, Vec<EngineValue>> = InMemoryNamedBTree::new();
+  let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
   let mut db = EngineDatabase::new(store);
   block_on(async {
     db.register_table(TableSchema {

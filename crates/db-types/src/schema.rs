@@ -14,22 +14,24 @@ use std::vec::Vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-use crate::{EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};
+use crate::{
+  EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey,
+  key_encoding::{DefaultEncoding, KeyEncoding},
+};
 
-fn key_from_indices<F>(
-  row: &EngineRow,
+/// Extract values from a semantic row at specified column indices.
+fn extract_values_from_semantic_row<F>(
+  row: &[EngineValue],
   indices: &[usize],
   error: F,
-) -> Result<EngineKey, SchemaError>
+) -> Result<Vec<EngineValue>, SchemaError>
 where
   F: Fn(usize) -> SchemaError,
 {
-  let values = indices
+  indices
     .iter()
     .map(|index| row.get(*index).cloned().ok_or_else(|| error(*index)))
-    .collect::<Result<Vec<_>, _>>()?;
-
-  Ok(EngineKey::from_values(values))
+    .collect::<Result<Vec<_>, _>>()
 }
 
 /// Errors returned by schema-level validation in the `db-types` crate.
@@ -197,36 +199,52 @@ impl IndexSchema {
   }
 
   pub fn key_for(&self, row: &EngineRow) -> Result<EngineKey, SchemaError> {
-    key_from_indices(row, &self.column_indices, |index| {
+    // Extract values at index column indices
+    let key_values = extract_values_from_semantic_row(row, &self.column_indices, |index| {
       SchemaError::SchemaMismatch(format!("index column index {} is out of bounds", index))
-    })
+    })?;
+
+    // Encode as key
+    Ok(<DefaultEncoding as KeyEncoding>::encode_values(&key_values))
   }
 
   /// Build a composite storage key from an index key and a row primary key.
-  /// The composite key concatenates the index key values followed by the
-  /// primary key values, enabling ordered range scans over one index entry
-  /// set.
+  /// The composite key concatenates the index key bytes followed by the
+  /// primary key bytes, enabling ordered range scans over one index entry set.
   pub fn make_entry_key(&self, index_key: &EngineKey, row_pk: &EngineKey) -> EngineKey {
-    let n = self.column_indices.len();
-    let mut values = Vec::with_capacity(n + row_pk.values().len());
-    values.extend_from_slice(index_key.values());
-    values.extend_from_slice(row_pk.values());
-    EngineKey::from_values(values)
+    let mut values = <DefaultEncoding as KeyEncoding>::decode_values(index_key)
+      .expect("index key must be canonically encoded");
+    values.extend(
+      <DefaultEncoding as KeyEncoding>::decode_values(row_pk)
+        .expect("row primary key must be canonically encoded"),
+    );
+    <DefaultEncoding as KeyEncoding>::encode_values(&values)
   }
 
   /// Split a composite entry key back into `(index_key, row_pk)`.
-  pub fn split_entry_key(&self, composite: &EngineKey) -> (EngineKey, EngineKey) {
-    let values = composite.values();
+  /// This requires decoding to find the semantic boundary between index and row PK values.
+  pub fn split_entry_key(
+    &self,
+    composite: &EngineKey,
+  ) -> Result<(EngineKey, EngineKey), SchemaError> {
+    // Decode to semantic values
+    let values = <DefaultEncoding as KeyEncoding>::decode_values(composite)
+      .map_err(|e| SchemaError::SchemaMismatch(format!("composite key decode error: {}", e)))?;
+
     let n = self.column_indices.len().min(values.len());
-    let index_key = EngineKey::from_values(values[..n].to_vec());
-    let row_pk = EngineKey::from_values(values[n..].to_vec());
-    (index_key, row_pk)
+
+    // Re-encode each part
+    let index_key = <DefaultEncoding as KeyEncoding>::encode_values(&values[..n]);
+    let row_pk = <DefaultEncoding as KeyEncoding>::encode_values(&values[n..]);
+
+    Ok((index_key, row_pk))
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 
   fn sample_table() -> TableSchema {
     TableSchema {
@@ -332,7 +350,7 @@ mod tests {
     let key = index.key_for(&row).expect("key");
     assert_eq!(
       key,
-      EngineKey::from_values(vec![EngineValue::Text("hi".into())])
+      <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text("hi".into())])
     );
   }
 }

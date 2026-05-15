@@ -9,13 +9,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
-use db_core::encode_with_version;
 use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
 };
-use db_types::codec::encode_engine_key_into_sink;
-use db_types::codec::{decode_engine_row, encode_engine_row_into_sink};
-use db_types::{EngineKey, EngineRow, EngineValue};
+use db_types::{
+  EngineKey, EngineValue,
+  key_encoding::{DefaultEncoding, KeyEncoding},
+};
 
 use super::AutomergeEngineStore;
 use super::snapshot::{
@@ -23,18 +23,18 @@ use super::snapshot::{
   set_entry, snapshot_bytes, snapshot_doc,
 };
 
-fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, EngineRow)>, BTreeError> {
+fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, Vec<u8>)>, BTreeError> {
   parse_entries::<EngineSnapshotAdapter>(buf)
 }
 
-fn find_in_named_snapshot(buf: &[u8], needle: &EngineKey) -> Result<Option<EngineRow>, BTreeError> {
+fn find_in_named_snapshot(buf: &[u8], needle: &EngineKey) -> Result<Option<Vec<u8>>, BTreeError> {
   find_entry::<EngineSnapshotAdapter>(buf, needle)
 }
 
 fn set_in_named_snapshot(
   buf: Option<&[u8]>,
   key: EngineKey,
-  row: EngineRow,
+  row: Vec<u8>,
 ) -> Result<Vec<u8>, BTreeError> {
   set_entry::<EngineSnapshotAdapter>(buf, &key, &row)
 }
@@ -44,26 +44,31 @@ fn is_row_tree(tree: &str) -> bool {
 }
 
 fn key_uuid(key: &EngineKey) -> Result<Uuid, BTreeError> {
-  match key {
-    EngineKey::Scalar(EngineValue::Uuid(bytes)) => Ok(Uuid::from_bytes(*bytes)),
+  // Decode the bytes to get the UUID value
+  let values = <DefaultEncoding as KeyEncoding>::decode_values(key)
+    .map_err(|_| BTreeError::UnsupportedOperation)?;
+
+  if values.len() != 1 {
+    return Err(BTreeError::UnsupportedOperation);
+  }
+
+  match &values[0] {
+    EngineValue::Uuid(bytes) => Ok(Uuid::from_bytes(*bytes)),
     _ => Err(BTreeError::UnsupportedOperation),
   }
 }
 
-fn encode_row_snapshot(row: &EngineRow) -> Vec<u8> {
-  let mut out = Vec::new();
-  encode_with_version(&mut out, |sink| encode_engine_row_into_sink(sink, row));
-  out
+fn encode_row_snapshot(row: &[u8]) -> Vec<u8> {
+  row.to_vec()
 }
 
-fn decode_row_snapshot(buf: &[u8]) -> Result<EngineRow, BTreeError> {
-  let mut cursor = db_core::Cursor::new(buf);
-  db_core::decode_version(&mut cursor).map_err(BTreeError::other)?;
-  decode_engine_row(&mut cursor).map_err(BTreeError::other)
+fn decode_row_snapshot(buf: &[u8]) -> Result<Vec<u8>, BTreeError> {
+  Ok(buf.to_vec())
 }
 
 fn row_key_from_doc_id(doc_id: Uuid) -> EngineKey {
-  EngineKey::Scalar(EngineValue::Uuid(*doc_id.as_bytes()))
+  // Encode the UUID as a single-value key
+  <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Uuid(*doc_id.as_bytes())])
 }
 
 fn doc_tree(doc: &AutoCommit) -> Option<String> {
@@ -97,9 +102,8 @@ fn hashed_doc_id(tree: &str, key: &EngineKey) -> Uuid {
   hasher.update(tree.as_bytes());
   let tree_digest = hasher.finalize_reset();
 
-  let mut key_buf: Vec<u8> = Vec::new();
-  encode_with_version(&mut key_buf, |sink| encode_engine_key_into_sink(sink, key));
-  hasher.update(&key_buf);
+  // Just hash the key bytes directly (they're already encoded)
+  hasher.update(key);
   let key_digest = hasher.finalize();
 
   let mut bytes = [0u8; 16];
@@ -156,7 +160,7 @@ where
   inner: <AutomergeBTree<B> as BTree<Uuid, AutoCommit>>::Transaction,
 }
 
-impl<B> NamedTreeTransaction<EngineKey, EngineRow> for AutomergeNamedTransaction<B>
+impl<B> NamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeNamedTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
@@ -164,7 +168,7 @@ where
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> Result<Option<EngineRow>, BTreeError>
+  ) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
   {
@@ -190,7 +194,7 @@ where
     &'a mut self,
     tree: &'a str,
     key: EngineKey,
-    value: EngineRow,
+    value: Vec<u8>,
   ) -> Result<(), BTreeError>
   where
     EngineKey: Ord,
@@ -236,7 +240,7 @@ where
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> Result<Option<EngineRow>, BTreeError>
+  ) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
   {
@@ -277,7 +281,7 @@ where
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl futures::Stream<Item = Result<(EngineKey, EngineRow), BTreeError>> + Send + 'a
+  ) -> impl futures::Stream<Item = Result<(EngineKey, Vec<u8>), BTreeError>> + Send + 'a
   where
     EngineKey: Ord,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
@@ -294,7 +298,7 @@ where
       let doc_stream = inner.range(tree_start..=tree_end);
       pin_mut!(doc_stream);
 
-      let mut entries: alloc::vec::Vec<(EngineKey, EngineRow)> = alloc::vec::Vec::new();
+      let mut entries: alloc::vec::Vec<(EngineKey, Vec<u8>)> = alloc::vec::Vec::new();
       while let Some(item) = doc_stream.next().await {
         let (doc_id, doc) = item?;
         if row_tree && doc_tree(&doc).as_deref() != Some(tree_name.as_str()) {
@@ -340,11 +344,11 @@ where
   }
 }
 
-impl<B> BTreeExecutor<EngineKey, EngineRow> for AutomergeNamedTree<B>
+impl<B> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeNamedTree<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<EngineRow>, BTreeError>
+  async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -353,7 +357,7 @@ where
     tx.get(&self.name, key.borrow()).await
   }
 
-  async fn insert(&mut self, key: EngineKey, value: EngineRow) -> Result<(), BTreeError>
+  async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
   where
     EngineKey: Ord,
   {
@@ -362,7 +366,7 @@ where
     tx.commit().await
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<EngineRow>, BTreeError>
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -376,7 +380,7 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl futures::Stream<Item = Result<(EngineKey, EngineRow), BTreeError>> + Send + 'a
+  ) -> impl futures::Stream<Item = Result<(EngineKey, Vec<u8>), BTreeError>> + Send + 'a
   where
     EngineKey: Ord + Clone,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
@@ -397,7 +401,7 @@ where
   }
 }
 
-impl<B> BTreeTransaction<EngineKey, EngineRow> for AutomergeNamedTreeTransaction<B>
+impl<B> BTreeTransaction<EngineKey, Vec<u8>> for AutomergeNamedTreeTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
@@ -410,11 +414,11 @@ where
   }
 }
 
-impl<B> BTreeExecutor<EngineKey, EngineRow> for AutomergeNamedTreeTransaction<B>
+impl<B> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeNamedTreeTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<EngineRow>, BTreeError>
+  async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -437,14 +441,14 @@ where
     }
   }
 
-  async fn insert(&mut self, key: EngineKey, value: EngineRow) -> Result<(), BTreeError>
+  async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
   where
     EngineKey: Ord,
   {
     self.inner.insert(&self.name, key, value).await
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<EngineRow>, BTreeError>
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord + Clone,
     Q: Borrow<EngineKey> + Send + 'a,
@@ -455,7 +459,7 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl futures::Stream<Item = Result<(EngineKey, EngineRow), BTreeError>> + Send + 'a
+  ) -> impl futures::Stream<Item = Result<(EngineKey, Vec<u8>), BTreeError>> + Send + 'a
   where
     EngineKey: Ord + Clone,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
@@ -464,7 +468,7 @@ where
   }
 }
 
-impl<B> BTree<EngineKey, EngineRow> for AutomergeNamedTree<B>
+impl<B> BTree<EngineKey, Vec<u8>> for AutomergeNamedTree<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
@@ -478,7 +482,7 @@ where
   }
 }
 
-impl<B> NamedTreeProvider<EngineKey, EngineRow> for AutomergeEngineStore<B>
+impl<B> NamedTreeProvider<EngineKey, Vec<u8>> for AutomergeEngineStore<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {

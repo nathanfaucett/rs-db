@@ -3,8 +3,8 @@ mod tests {
   use db::Database;
   use db_core::NamedTreeProvider;
   use db_engine::{
-    EngineKey, EngineQuery, EngineRow, EngineValue, QualifiedColumn, QualifiedOperand,
-    QualifiedPredicate, UpdateAssignment,
+    EngineKey, EngineQuery, EngineValue, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
+    UpdateAssignment,
   };
   use futures::executor::block_on;
 
@@ -57,10 +57,10 @@ mod tests {
     ]
   }
 
-  trait SyncStore: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static {}
+  trait SyncStore: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static {}
 
   impl<T> SyncStore for T where
-    T: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static
+    T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
   {
   }
 

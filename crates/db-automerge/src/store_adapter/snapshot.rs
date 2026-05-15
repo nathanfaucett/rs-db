@@ -1,12 +1,9 @@
 use automerge::AutoCommit;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use db_core::{BTreeError, Cursor, DecodeError, encode_with_version};
-use db_types::codec::{
-  decode_engine_key, decode_engine_row, decode_store_key, decode_store_value,
-  encode_engine_key_into_sink, encode_engine_row_into_sink, encode_store_key, encode_store_value,
-};
-use db_types::{EngineKey, EngineRow, StoreKey, StoreValue};
+use db_core::{BTreeError, Cursor, DecodeError, decode_bytes, encode_bytes_into_sink};
+use db_types::codec::{decode_store_key, decode_store_value, encode_store_key, encode_store_value};
+use db_types::{EngineKey, StoreKey, StoreValue};
 
 use base64::{Engine as _, engine::general_purpose};
 
@@ -31,14 +28,6 @@ fn decode_snapshot_value<T>(
   decode: impl FnOnce(&mut Cursor<'_>) -> Result<T, DecodeError>,
 ) -> Result<T, BTreeError> {
   decode(cursor).map_err(BTreeError::other)
-}
-
-fn encode_versioned_snapshot_value<T>(
-  buffer: &mut Vec<u8>,
-  value: &T,
-  encode: impl FnOnce(&mut Vec<u8>, &T),
-) {
-  encode_with_version(buffer, |sink| encode(sink, value));
 }
 
 impl SnapshotAdapter for StoreSnapshotAdapter {
@@ -66,22 +55,22 @@ pub(crate) struct EngineSnapshotAdapter;
 
 impl SnapshotAdapter for EngineSnapshotAdapter {
   type Key = EngineKey;
-  type Value = EngineRow;
+  type Value = Vec<u8>;
 
   fn decode_key(cursor: &mut Cursor<'_>) -> Result<Self::Key, BTreeError> {
-    decode_snapshot_value(cursor, decode_engine_key)
+    decode_bytes(cursor).map_err(BTreeError::other)
   }
 
   fn decode_value(cursor: &mut Cursor<'_>) -> Result<Self::Value, BTreeError> {
-    decode_snapshot_value(cursor, decode_engine_row)
+    decode_bytes(cursor).map_err(BTreeError::other)
   }
 
   fn encode_key(buffer: &mut Vec<u8>, key: &Self::Key) {
-    encode_versioned_snapshot_value(buffer, key, encode_engine_key_into_sink);
+    db_core::encode_with_version(buffer, |sink| encode_bytes_into_sink(sink, key));
   }
 
   fn encode_value(buffer: &mut Vec<u8>, value: &Self::Value) {
-    encode_versioned_snapshot_value(buffer, value, encode_engine_row_into_sink);
+    db_core::encode_with_version(buffer, |sink| encode_bytes_into_sink(sink, value));
   }
 }
 
@@ -242,13 +231,19 @@ pub(crate) fn snapshot_doc(snapshot: &[u8]) -> Result<AutoCommit, BTreeError> {
 mod tests {
   use super::*;
   use db_types::EngineValue;
+  use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
+
+  fn key(values: Vec<EngineValue>) -> EngineKey {
+    <DefaultEncoding as KeyEncoding>::encode_values(&values)
+  }
+
+  fn row(values: Vec<EngineValue>) -> Vec<u8> {
+    <DefaultEncoding as RowEncoding>::encode_values(&values)
+  }
 
   #[test]
   fn store_snapshot_roundtrip_and_remove() {
-    let key = StoreKey::table_row(
-      "users".to_string(),
-      EngineKey::from_values(vec![EngineValue::Integer(1)]),
-    );
+    let key = StoreKey::table_row("users".to_string(), key(vec![EngineValue::Integer(1)]));
     let value = StoreValue::Row(vec![EngineValue::Text("alice".to_string())]);
 
     let bytes = set_entry::<StoreSnapshotAdapter>(None, &key, &value).expect("set");
@@ -265,9 +260,9 @@ mod tests {
 
   #[test]
   fn engine_snapshot_updates_existing_key() {
-    let key = EngineKey::from_values(vec![EngineValue::Integer(7)]);
-    let value1 = vec![EngineValue::Text("first".to_string())];
-    let value2 = vec![EngineValue::Text("second".to_string())];
+    let key = key(vec![EngineValue::Integer(7)]);
+    let value1 = row(vec![EngineValue::Text("first".to_string())]);
+    let value2 = row(vec![EngineValue::Text("second".to_string())]);
 
     let first = set_entry::<EngineSnapshotAdapter>(None, &key, &value1).expect("first");
     let second = set_entry::<EngineSnapshotAdapter>(Some(&first), &key, &value2).expect("second");

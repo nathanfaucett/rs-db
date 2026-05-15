@@ -4,6 +4,7 @@ use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSch
 use async_stream::stream;
 use core::future::Future;
 use db_core::{NamedTreeProvider, NamedTreeTransaction};
+use db_types::key_encoding::{DefaultEncoding, RowEncoding};
 use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
   encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
@@ -29,22 +30,46 @@ fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
   EngineError::SchemaMismatch(error.to_string())
 }
 
+fn encode_row_bytes(row: &EngineRow) -> Vec<u8> {
+  <DefaultEncoding as RowEncoding>::encode_values(row)
+}
+
+fn decode_row_bytes(bytes: &[u8]) -> Result<EngineRow, EngineError> {
+  <DefaultEncoding as RowEncoding>::decode_values(bytes)
+    .map_err(|error| EngineError::SchemaMismatch(format!("row decode error: {}", error)))
+}
+
 fn primary_key_from_engine_key(key: EngineKey) -> Result<PrimaryKey, EngineError> {
-  PrimaryKey::from_engine_key(&key)
-    .ok_or_else(|| EngineError::SchemaMismatch("row primary key must be UUID scalar".into()))
+  use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
+
+  let values = <DefaultEncoding as KeyEncoding>::decode_values(&key)
+    .map_err(|e| EngineError::SchemaMismatch(format!("decode key error: {}", e)))?;
+
+  if values.len() != 1 {
+    return Err(EngineError::SchemaMismatch(
+      "row primary key must be single UUID value".into(),
+    ));
+  }
+
+  match &values[0] {
+    db_types::EngineValue::Uuid(bytes) => Ok(PrimaryKey::new(*bytes)),
+    _ => Err(EngineError::SchemaMismatch(
+      "row primary key must be UUID".into(),
+    )),
+  }
 }
 
 async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow>,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   let stream = tx.range(tree_name, ..);
   pin_mut!(stream);
 
   let mut rows = Vec::new();
   while let Some(item) = stream.next().await {
-    let (_key, row) = item.map_err(EngineError::from)?;
-    rows.push(row);
+    let (_key, row_bytes) = item.map_err(EngineError::from)?;
+    rows.push(decode_row_bytes(&row_bytes)?);
   }
   Ok(rows)
 }
@@ -63,17 +88,17 @@ pub trait EngineStore: Clone + Send + Sync + 'static {
 }
 
 /// Engine transaction that routes operations to named trees via a
-/// `NamedTreeTransaction<EngineKey, EngineRow>`.
+/// `NamedTreeTransaction<EngineKey, Vec<u8>>`.
 pub struct NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow>,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   inner: T,
 }
 
 impl<T> NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow>,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   pub fn new(inner: T) -> Self {
     Self { inner }
@@ -82,7 +107,7 @@ where
 
 impl<T> RowStore for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn get_table_row<'a>(
     &'a mut self,
@@ -90,12 +115,13 @@ where
     primary_key: &'a PrimaryKey,
   ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
-      let storage_key: EngineKey = (*primary_key).into();
+      let storage_key = primary_key.to_engine_key();
       self
         .inner
         .get(&row_tree(table_name), &storage_key)
         .await
         .map_err(EngineError::from)
+        .and_then(|row| row.map(|bytes| decode_row_bytes(&bytes)).transpose())
     }
   }
 
@@ -106,10 +132,11 @@ where
     row: EngineRow,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let storage_key: EngineKey = primary_key.into();
+      let storage_key = primary_key.to_engine_key();
+      let row_bytes = encode_row_bytes(&row);
       self
         .inner
-        .insert(&row_tree(table_name), storage_key, row)
+        .insert(&row_tree(table_name), storage_key, row_bytes)
         .await
         .map_err(EngineError::from)
     }
@@ -121,12 +148,13 @@ where
     primary_key: &'a PrimaryKey,
   ) -> impl Future<Output = Result<Option<EngineRow>, EngineError>> + 'a {
     async move {
-      let storage_key: EngineKey = (*primary_key).into();
+      let storage_key = primary_key.to_engine_key();
       self
         .inner
         .remove(&row_tree(table_name), &storage_key)
         .await
         .map_err(EngineError::from)
+        .and_then(|row| row.map(|bytes| decode_row_bytes(&bytes)).transpose())
     }
   }
 
@@ -142,7 +170,10 @@ where
       while let Some(item) = s.next().await {
         yield item
           .map_err(EngineError::from)
-          .and_then(|(key, row)| primary_key_from_engine_key(key).map(|pk| (pk, row)));
+          .and_then(|(key, row_bytes)| {
+            let row = decode_row_bytes(&row_bytes)?;
+            primary_key_from_engine_key(key).map(|pk| (pk, row))
+          });
       }
     }
   }
@@ -150,7 +181,7 @@ where
 
 impl<T> SchemaStore for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn insert_table_schema<'a>(
     &'a mut self,
@@ -158,7 +189,7 @@ where
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
       let key = table_schema_entry_key(schema.name.clone());
-      let value = encode_table_schema(&schema);
+      let value = encode_row_bytes(&encode_table_schema(&schema));
       self
         .inner
         .insert(TABLE_SCHEMA_TREE, key, value)
@@ -188,7 +219,7 @@ where
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
       let key = index_schema_entry_key(schema.name.clone());
-      let value = encode_index_schema(&schema);
+      let value = encode_row_bytes(&encode_index_schema(&schema));
       self
         .inner
         .insert(INDEX_SCHEMA_TREE, key, value)
@@ -227,7 +258,7 @@ where
 
 impl<T> IndexStore for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn insert_index_entry<'a>(
     &'a mut self,
@@ -236,7 +267,7 @@ where
     row_pk: &'a PrimaryKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let row_pk_key: EngineKey = (*row_pk).into();
+      let row_pk_key = row_pk.to_engine_key();
       let composite = index.make_entry_key(index_key, &row_pk_key);
       self
         .inner
@@ -253,7 +284,7 @@ where
     row_pk: &'a PrimaryKey,
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
-      let row_pk_key: EngineKey = (*row_pk).into();
+      let row_pk_key = row_pk.to_engine_key();
       let composite = index.make_entry_key(index_key, &row_pk_key);
       self
         .inner
@@ -275,8 +306,11 @@ where
       pin_mut!(s);
       while let Some(item) = s.next().await {
         yield item.map_err(EngineError::from).and_then(|(composite, _)| {
-          let (index_key, row_pk_key) = index.split_entry_key(&composite);
-          primary_key_from_engine_key(row_pk_key).map(|row_pk| (index_key, row_pk))
+          index.split_entry_key(&composite)
+            .map_err(|_e| EngineError::SchemaMismatch("failed to split entry key".into()))
+            .and_then(|(index_key, row_pk_key)| {
+              primary_key_from_engine_key(row_pk_key).map(|row_pk| (index_key, row_pk))
+            })
         });
       }
     }
@@ -285,7 +319,7 @@ where
 
 impl<T> TransactionControl for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, EngineRow> + 'static,
+  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn commit(self) -> impl Future<Output = Result<(), EngineError>> {
     async move { self.inner.commit().await.map_err(EngineError::from) }
@@ -300,7 +334,7 @@ where
 /// engine store.
 impl<T> EngineStore for T
 where
-  T: Clone + NamedTreeProvider<EngineKey, EngineRow> + Send + Sync + 'static,
+  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static,
 {
   type Transaction = NamedTreeEngineTransaction<T::Transaction>;
 
@@ -344,7 +378,7 @@ mod tests {
   #[test]
   fn load_catalog_returns_table_and_index_schemas() {
     block_on(async {
-      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
       let mut tx = store.engine_transaction().await.expect("open tx");
 
       let table_schema = sample_table_schema();
@@ -371,7 +405,7 @@ mod tests {
   #[test]
   fn index_lookup_and_row_materialization_are_separate() {
     block_on(async {
-      let store: InMemoryNamedBTree<EngineKey, EngineRow> = InMemoryNamedBTree::new();
+      let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
       let mut tx = store.engine_transaction().await.expect("open tx");
 
       let row = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];

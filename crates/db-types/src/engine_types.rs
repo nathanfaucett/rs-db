@@ -233,17 +233,6 @@ impl PrimaryKey {
   pub fn as_bytes(&self) -> &[u8; 16] {
     &self.0
   }
-
-  pub fn into_engine_key(self) -> EngineKey {
-    EngineKey::Scalar(EngineValue::Uuid(self.0))
-  }
-
-  pub fn from_engine_key(key: &EngineKey) -> Option<Self> {
-    match key {
-      EngineKey::Scalar(EngineValue::Uuid(bytes)) => Some(Self(*bytes)),
-      _ => None,
-    }
-  }
 }
 
 impl From<[u8; 16]> for PrimaryKey {
@@ -258,50 +247,16 @@ impl From<PrimaryKey> for [u8; 16] {
   }
 }
 
-impl From<PrimaryKey> for EngineKey {
-  fn from(value: PrimaryKey) -> Self {
-    value.into_engine_key()
+impl PrimaryKey {
+  /// Encode a PrimaryKey to an EngineKey (bytes).
+  pub fn to_engine_key(self) -> EngineKey {
+    use crate::key_encoding::{DefaultEncoding, KeyEncoding};
+    <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Uuid(self.0)])
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi), serde(untagged))]
-pub enum EngineKey {
-  Scalar(EngineValue),
-  Tuple(Vec<EngineValue>),
-}
+/// Encoded storage key (orderable bytes where byte-order matches semantic order).
+pub type EngineKey = Vec<u8>;
 
-impl From<EngineValue> for EngineKey {
-  fn from(value: EngineValue) -> Self {
-    EngineKey::Scalar(value)
-  }
-}
-
-impl From<Vec<EngineValue>> for EngineKey {
-  fn from(values: Vec<EngineValue>) -> Self {
-    if values.len() == 1 {
-      EngineKey::Scalar(values.into_iter().next().expect("expected one value"))
-    } else {
-      EngineKey::Tuple(values)
-    }
-  }
-}
-
-impl EngineKey {
-  pub fn from_values(values: Vec<EngineValue>) -> Self {
-    values.into()
-  }
-
-  pub fn values(&self) -> &[EngineValue] {
-    match self {
-      EngineKey::Scalar(value) => core::slice::from_ref(value),
-      EngineKey::Tuple(values) => values,
-    }
-  }
-}
-
+/// Semantic row data (vector of typed values). Will be encoded to bytes at storage boundary.
 pub type EngineRow = Vec<EngineValue>;

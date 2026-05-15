@@ -2,7 +2,8 @@ use core::fmt;
 use core::future;
 use core::ops::{Bound, RangeBounds};
 use db_core::{BTreeError, BTreeResult, NamedTreeProvider, NamedTreeTransaction, block_on};
-use db_engine::{EngineKey, EngineRow, PrimaryKey};
+use db_engine::{EngineKey, PrimaryKey};
+use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use db_types::persistence::decode_index_schema_row;
 use futures::Stream;
 use js_sys::{Function, Promise, Reflect};
@@ -32,7 +33,7 @@ export interface PrimaryKeyRangeRequest {
 
 export type PrimaryKeyEntry = {
   primaryKey: PrimaryKey;
-  row: EngineValue[];
+  row: number[];
 };
 
 export type IndexEntry = {
@@ -62,21 +63,19 @@ export interface StoreAdapterRangeRequest {
 
 export type StoreAdapterEntry = {
   key: EngineKey;
-  value: EngineValue[];
+  value: number[];
 };
 
 export type StoreAdapterCommitOp =
-  | { op: "insert"; tree: string; key: EngineKey; value: EngineValue[] }
+  | { op: "insert"; tree: string; key: EngineKey; value: number[] }
   | { op: "remove"; tree: string; key: EngineKey };
-
-export type EngineRow = EngineValue[];
 
 export interface DatabaseEngineOptions {
   primaryKeyStore?: PrimaryKeyStore;
   indexStore?: IndexStore;
-  get?(tree: string, key: EngineKey): Promise<EngineValue[] | null | undefined>;
-  insert?(tree: string, key: EngineKey, value: EngineValue[]): Promise<void>;
-  remove?(tree: string, key: EngineKey): Promise<EngineValue[] | null | undefined>;
+  get?(tree: string, key: EngineKey): Promise<number[] | null | undefined>;
+  insert?(tree: string, key: EngineKey, value: number[]): Promise<void>;
+  remove?(tree: string, key: EngineKey): Promise<number[] | null | undefined>;
   range?(tree: string, range: StoreAdapterRangeRequest): Promise<StoreAdapterEntry[]>;
   commit?(ops: StoreAdapterCommitOp[]): Promise<void>;
   rollback?(): Promise<void>;
@@ -116,7 +115,7 @@ fn serde_error(message: impl fmt::Display) -> BTreeError {
   BTreeError::other(StoreAdapterError(message.to_string()))
 }
 
-fn to_js<T: Serialize>(value: &T) -> BTreeResult<JsValue> {
+fn to_js<T: Serialize + ?Sized>(value: &T) -> BTreeResult<JsValue> {
   serde_wasm_bindgen::to_value(value).map_err(serde_error)
 }
 
@@ -271,7 +270,7 @@ enum PendingOp {
   Insert {
     tree: String,
     key: EngineKey,
-    value: EngineRow,
+    value: Vec<u8>,
   },
   Remove {
     tree: String,
@@ -282,7 +281,7 @@ enum PendingOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeyValuePair {
   key: EngineKey,
-  value: EngineRow,
+  value: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,8 +321,12 @@ impl StoreAdapterCallbacks {
   }
 
   fn primary_key_from_engine_key(&self, key: &EngineKey) -> BTreeResult<PrimaryKey> {
-    PrimaryKey::from_engine_key(key)
-      .ok_or_else(|| serde_error("row primary key must be UUID scalar"))
+    let values = <DefaultEncoding as KeyEncoding>::decode_values(key)
+      .map_err(|e| serde_error(format!("decode key error: {e}")))?;
+    match values.as_slice() {
+      [db_engine::EngineValue::Uuid(bytes)] => Ok(PrimaryKey::new(*bytes)),
+      _ => Err(serde_error("row primary key must be UUID scalar")),
+    }
   }
 
   fn split_composite_index_key(
@@ -339,30 +342,33 @@ impl StoreAdapterCallbacks {
       .copied()
       .ok_or_else(|| serde_error(format!("missing index schema width for {index_name}")))?;
 
-    let values = composite.values();
+    let values = <DefaultEncoding as KeyEncoding>::decode_values(composite)
+      .map_err(|e| serde_error(format!("decode composite key error: {e}")))?;
     if values.len() < width + 1 {
       return Err(serde_error("malformed composite index key"));
     }
 
-    let index_key = EngineKey::from_values(values[..width].to_vec());
-    let row_pk_key = EngineKey::from_values(values[width..].to_vec());
-    let row_pk = PrimaryKey::from_engine_key(&row_pk_key)
-      .ok_or_else(|| serde_error("index entry row primary key must be UUID scalar"))?;
+    let index_key = <DefaultEncoding as KeyEncoding>::encode_values(&values[..width]);
+    let row_pk_key = <DefaultEncoding as KeyEncoding>::encode_values(&values[width..]);
+    let row_pk = self.primary_key_from_engine_key(&row_pk_key)?;
     Ok((index_key, row_pk))
   }
 
   fn compose_composite_index_key(&self, index_key: &EngineKey, row_pk: PrimaryKey) -> EngineKey {
-    let mut values = index_key.values().to_vec();
+    let mut values = <DefaultEncoding as KeyEncoding>::decode_values(index_key).unwrap_or_default();
     values.push(db_engine::EngineValue::Uuid(*row_pk.as_bytes()));
-    EngineKey::from_values(values)
+    <DefaultEncoding as KeyEncoding>::encode_values(&values)
   }
 
-  fn maybe_update_index_schema_widths(&self, tree: &str, key: &EngineKey, row: &EngineRow) {
+  fn maybe_update_index_schema_widths(&self, tree: &str, key: &EngineKey, row: &[u8]) {
     if tree != "sys:index_schemas" {
       return;
     }
-    if let (EngineKey::Scalar(db_engine::EngineValue::Text(index_name)), Ok(schema)) =
-      (key, decode_index_schema_row(row))
+    let decoded_key = <DefaultEncoding as KeyEncoding>::decode_values(key);
+    let decoded_row = <DefaultEncoding as RowEncoding>::decode_values(row);
+    if let (Ok([db_engine::EngineValue::Text(index_name)]), Ok(row_values)) =
+      (decoded_key.as_deref(), decoded_row.as_deref())
+      && let Ok(schema) = decode_index_schema_row(row_values)
       && let Ok(mut guard) = self.index_key_widths.lock()
     {
       guard.insert(index_name.clone(), schema.column_indices.len());
@@ -373,14 +379,15 @@ impl StoreAdapterCallbacks {
     if tree != "sys:index_schemas" {
       return;
     }
-    if let EngineKey::Scalar(db_engine::EngineValue::Text(index_name)) = key
+    if let Ok([db_engine::EngineValue::Text(index_name)]) =
+      <DefaultEncoding as KeyEncoding>::decode_values(key).as_deref()
       && let Ok(mut guard) = self.index_key_widths.lock()
     {
       let _ = guard.remove(index_name);
     }
   }
 
-  fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<EngineRow>> {
+  fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
     if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_get) {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
@@ -406,7 +413,7 @@ impl StoreAdapterCallbacks {
     from_js(value)
   }
 
-  fn callback_insert(&self, tree: &str, key: &EngineKey, row: &EngineRow) -> BTreeResult<()> {
+  fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
     if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_put) {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
@@ -439,7 +446,7 @@ impl StoreAdapterCallbacks {
     Ok(())
   }
 
-  fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<EngineRow>> {
+  fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
     if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_delete) {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
@@ -477,7 +484,7 @@ impl StoreAdapterCallbacks {
     from_js(value)
   }
 
-  fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, EngineRow)>>
+  fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
   where
     R: RangeBounds<EngineKey>,
   {
@@ -486,7 +493,7 @@ impl StoreAdapterCallbacks {
         start: match range.start_bound() {
           Bound::Included(key) | Bound::Excluded(key) => {
             let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk.into_engine_key())
+            Some(pk.to_engine_key())
           }
           Bound::Unbounded => None,
         },
@@ -494,7 +501,7 @@ impl StoreAdapterCallbacks {
         end: match range.end_bound() {
           Bound::Included(key) | Bound::Excluded(key) => {
             let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk.into_engine_key())
+            Some(pk.to_engine_key())
           }
           Bound::Unbounded => None,
         },
@@ -504,7 +511,7 @@ impl StoreAdapterCallbacks {
       #[derive(Deserialize)]
       struct PrimaryKeyEntry {
         primary_key: PrimaryKey,
-        row: EngineRow,
+        row: Vec<u8>,
       }
 
       let table_js = JsValue::from_str(table);
@@ -514,7 +521,7 @@ impl StoreAdapterCallbacks {
       return Ok(
         rows
           .into_iter()
-          .map(|entry| (entry.primary_key.into_engine_key(), entry.row))
+          .map(|entry| (entry.primary_key.to_engine_key(), entry.row))
           .collect(),
       );
     }
@@ -564,7 +571,7 @@ impl StoreAdapterCallbacks {
       .ok_or_else(|| serde_error("missing range callback for legacy tree adapter"))?;
     let value = call2(range_fn, &tree_js, &req_js)?;
     let rows: Vec<KeyValuePair> = from_js(value)?;
-    let out: Vec<(EngineKey, EngineRow)> = rows
+    let out: Vec<(EngineKey, Vec<u8>)> = rows
       .into_iter()
       .map(|entry| (entry.key, entry.value))
       .collect();
@@ -579,7 +586,7 @@ impl StoreAdapterCallbacks {
   }
 }
 
-impl NamedTreeProvider<EngineKey, EngineRow> for StoreAdapterCallbacks {
+impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   type Tree = StoreAdapterTree;
   type Transaction = StoreAdapterTransaction;
 
@@ -608,7 +615,7 @@ impl NamedTreeProvider<EngineKey, EngineRow> for StoreAdapterCallbacks {
 }
 
 impl StoreAdapterTransaction {
-  fn pending_lookup(&self, tree: &str, key: &EngineKey) -> Option<Option<EngineRow>> {
+  fn pending_lookup(&self, tree: &str, key: &EngineKey) -> Option<Option<Vec<u8>>> {
     for op in self.pending_ops.iter().rev() {
       match op {
         PendingOp::Insert {
@@ -628,12 +635,12 @@ impl StoreAdapterTransaction {
   }
 }
 
-impl NamedTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
+impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a>(
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
   {
@@ -654,7 +661,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
     &'a mut self,
     tree: &'a str,
     key: EngineKey,
-    value: EngineRow,
+    value: Vec<u8>,
   ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
   where
     EngineKey: Ord,
@@ -671,7 +678,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
   {
@@ -699,7 +706,7 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, EngineRow)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
   where
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
@@ -785,11 +792,11 @@ impl NamedTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTree {
+impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
   fn get<'a, Q>(
     &'a self,
     key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
@@ -804,7 +811,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTree {
   fn insert<'a>(
     &'a mut self,
     key: EngineKey,
-    value: EngineRow,
+    value: Vec<u8>,
   ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
   where
     EngineKey: Ord,
@@ -819,7 +826,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTree {
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
@@ -834,7 +841,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTree {
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, EngineRow)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
   where
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
@@ -857,11 +864,11 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTree {
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTransaction {
+impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a, Q>(
     &'a self,
     _key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
@@ -872,7 +879,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTransaction {
   fn insert<'a>(
     &'a mut self,
     _key: EngineKey,
-    _value: EngineRow,
+    _value: Vec<u8>,
   ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
   where
     EngineKey: Ord,
@@ -883,7 +890,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTransaction {
   fn remove<'a, Q>(
     &'a mut self,
     _key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<EngineRow>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
   where
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
@@ -894,7 +901,7 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTransaction {
   fn range<'a, R>(
     &'a self,
     _range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, EngineRow)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
   where
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
@@ -903,23 +910,23 @@ impl db_core::BTreeExecutor<EngineKey, EngineRow> for StoreAdapterTransaction {
   }
 }
 
-impl db_core::BTreeTransaction<EngineKey, EngineRow> for StoreAdapterTransaction {
+impl db_core::BTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
   where
     Self: Sized,
   {
-    <Self as NamedTreeTransaction<EngineKey, EngineRow>>::commit(self)
+    <Self as NamedTreeTransaction<EngineKey, Vec<u8>>>::commit(self)
   }
 
   fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
   where
     Self: Sized,
   {
-    <Self as NamedTreeTransaction<EngineKey, EngineRow>>::rollback(self)
+    <Self as NamedTreeTransaction<EngineKey, Vec<u8>>>::rollback(self)
   }
 }
 
-impl db_core::BTree<EngineKey, EngineRow> for StoreAdapterTree {
+impl db_core::BTree<EngineKey, Vec<u8>> for StoreAdapterTree {
   type Transaction = StoreAdapterTransaction;
 
   fn transaction<'a>(

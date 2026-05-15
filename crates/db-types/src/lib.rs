@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod engine_types;
+pub mod key_encoding;
 pub mod persistence;
 pub mod schema;
 pub mod storage_codec;

@@ -5,6 +5,7 @@ use crate::{
   predicate::{GroupRowContext, eval_having_predicate},
   query::{Aggregate, HavingPredicate, OrderBy, QualifiedColumn, SortDirection},
 };
+use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
 
 pub type PartialRow = HashMap<String, Option<EngineRow>>;
 
@@ -178,7 +179,7 @@ impl Aggregator {
         }
       }
 
-      let key = EngineKey::from_values(key_vals);
+      let key = <DefaultEncoding as KeyEncoding>::encode_values(&key_vals);
       let entry = groups
         .entry(key)
         .or_insert_with(|| aggregates.iter().map(AggState::new_for).collect());
@@ -200,8 +201,10 @@ impl Aggregator {
     }
 
     let mut out_rows: Vec<EngineRow> = Vec::with_capacity(groups.len());
-    for (key, agg_states) in groups {
-      let mut row: EngineRow = key.values().to_vec();
+    for (key_bytes, agg_states) in groups {
+      let key_vals = <DefaultEncoding as KeyEncoding>::decode_values(&key_bytes)
+        .map_err(|e| EngineError::SchemaMismatch(format!("decode group key: {}", e)))?;
+      let mut row: EngineRow = key_vals;
       for st in agg_states {
         row.push(st.finish());
       }

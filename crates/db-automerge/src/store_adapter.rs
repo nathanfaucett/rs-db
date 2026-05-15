@@ -4,14 +4,12 @@ use async_lock::RwLock;
 use async_stream::stream;
 use automerge::AutoCommit;
 use automerge::transaction::Transactable;
-use db_core::encode_with_version;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
-use db_types::codec::encode_engine_key_into_sink;
 use db_types::{StoreKey, StoreValue};
 
 mod named;
@@ -62,11 +60,7 @@ fn doc_id_for_key(key: &StoreKey) -> Uuid {
       let mut hasher = Sha256::new();
       hasher.update(b"table:row:");
       hasher.update(table_name.as_bytes());
-      let mut key_buf: Vec<u8> = Vec::new();
-      encode_with_version(&mut key_buf, |sink| {
-        encode_engine_key_into_sink(sink, primary_key)
-      });
-      hasher.update(&key_buf);
+      hasher.update(primary_key); // EngineKey is already bytes
       let digest = hasher.finalize();
       Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
     }
@@ -78,16 +72,8 @@ fn doc_id_for_key(key: &StoreKey) -> Uuid {
       let mut hasher = Sha256::new();
       hasher.update(b"index:entry:");
       hasher.update(index_name.as_bytes());
-      let mut key_buf: Vec<u8> = Vec::new();
-      encode_with_version(&mut key_buf, |sink| {
-        encode_engine_key_into_sink(sink, index_key)
-      });
-      hasher.update(&key_buf);
-      let mut pk_buf: Vec<u8> = Vec::new();
-      encode_with_version(&mut pk_buf, |sink| {
-        encode_engine_key_into_sink(sink, row_pk)
-      });
-      hasher.update(&pk_buf);
+      hasher.update(index_key); // EngineKey is already bytes
+      hasher.update(row_pk); // EngineKey is already bytes
       let digest = hasher.finalize();
       Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
     }
@@ -438,10 +424,19 @@ mod tests {
   use super::*;
   use db_core::{NamedTreeProvider, NamedTreeTransaction, block_on};
   use db_in_memory::InMemoryBTree;
+  use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
   use db_types::{EngineKey, EngineValue};
 
   fn store() -> AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>> {
     AutomergeEngineStore::new_with_backend(InMemoryBTree::new())
+  }
+
+  fn key(values: Vec<EngineValue>) -> EngineKey {
+    <DefaultEncoding as KeyEncoding>::encode_values(&values)
+  }
+
+  fn row(values: Vec<EngineValue>) -> Vec<u8> {
+    <DefaultEncoding as RowEncoding>::encode_values(&values)
   }
 
   #[test]
@@ -449,26 +444,29 @@ mod tests {
     block_on(async {
       let store = store();
       let mut tx = store.begin_transaction().await.expect("begin");
-      let key = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let row = vec![EngineValue::Text("first".into())];
+      let key = key(vec![EngineValue::Integer(1)]);
+      let row_bytes = row(vec![EngineValue::Text("first".into())]);
 
-      tx.insert("first", key.clone(), row.clone())
+      tx.insert("first", key.clone(), row_bytes.clone())
         .await
         .expect("insert first");
       tx.insert(
         "second",
         key.clone(),
-        vec![EngineValue::Text("second".into())],
+        row(vec![EngineValue::Text("second".into())]),
       )
       .await
       .expect("insert second");
       tx.commit().await.expect("commit");
 
       let mut read = store.begin_transaction().await.expect("read");
-      assert_eq!(read.get("first", &key).await.expect("get first"), Some(row));
+      assert_eq!(
+        read.get("first", &key).await.expect("get first"),
+        Some(row_bytes)
+      );
       assert_eq!(
         read.get("second", &key).await.expect("get second"),
-        Some(vec![EngineValue::Text("second".into())])
+        Some(row(vec![EngineValue::Text("second".into())]))
       );
     });
   }
@@ -477,10 +475,10 @@ mod tests {
     block_on(async {
       let store = store();
       let mut tx = store.begin_transaction().await.expect("begin");
-      let key1 = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let row1 = vec![EngineValue::Text("alice".into())];
-      let key2 = EngineKey::from_values(vec![EngineValue::Integer(2)]);
-      let row2 = vec![EngineValue::Text("bob".into())];
+      let key1 = key(vec![EngineValue::Integer(1)]);
+      let row1 = row(vec![EngineValue::Text("alice".into())]);
+      let key2 = key(vec![EngineValue::Integer(2)]);
+      let row2 = row(vec![EngineValue::Text("bob".into())]);
 
       tx.insert("users", key1.clone(), row1.clone())
         .await
@@ -512,10 +510,10 @@ mod tests {
     block_on(async {
       let store = store();
 
-      let key1 = EngineKey::from_values(vec![EngineValue::Integer(1)]);
-      let row1 = vec![EngineValue::Text("alice".into())];
-      let key2 = EngineKey::from_values(vec![EngineValue::Integer(2)]);
-      let row2 = vec![EngineValue::Text("bob".into())];
+      let key1 = key(vec![EngineValue::Integer(1)]);
+      let row1 = row(vec![EngineValue::Text("alice".into())]);
+      let key2 = key(vec![EngineValue::Integer(2)]);
+      let row2 = row(vec![EngineValue::Text("bob".into())]);
 
       {
         let mut tx = store.begin_transaction().await.expect("begin tx1");
@@ -550,8 +548,8 @@ mod tests {
       let store = store();
 
       // First schema
-      let key1 = EngineKey::from_values(vec![EngineValue::Text("users".into())]);
-      let val1 = vec![EngineValue::Blob(b"users_schema_bytes".to_vec())];
+      let key1 = key(vec![EngineValue::Text("users".into())]);
+      let val1 = row(vec![EngineValue::Blob(b"users_schema_bytes".to_vec())]);
 
       {
         let mut tx = store.begin_transaction().await.expect("tx1");
