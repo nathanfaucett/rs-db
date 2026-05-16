@@ -208,3 +208,10 @@ const db = await BrowserDatabase.openWithBackend(options);
 - Schema operations are transaction-bound and mandatory.
 - `commit()` and `rollback()` are mandatory.
 - There are no legacy tree callbacks and no non-transactional fallback paths.
+
+### EngineKey Ordering Contract
+
+- `EngineKey` values are opaque encoded bytes.
+- Compare `EngineKey` values using bytewise lexicographic ordering.
+- Do not decode, normalize, or reinterpret `EngineKey` bytes in adapter code.
+- `rangeIndex` must apply bounds and return results in ascending bytewise key order.

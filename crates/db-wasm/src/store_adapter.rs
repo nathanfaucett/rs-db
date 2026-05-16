@@ -26,6 +26,14 @@ export type PrimaryKeyTuple = [
 
 export type PrimaryKey = Uint8Array | PrimaryKeyTuple;
 
+/**
+ * Opaque encoded key bytes.
+ *
+ * Ordering is bytewise lexicographic and is already made semantic by the Rust
+ * key encoder. Adapters must not reinterpret these bytes.
+ */
+export type EngineKey = Uint8Array;
+
 export interface PrimaryKeyRangeRequest {
   start?: PrimaryKey;
   startInclusive: boolean;
@@ -34,8 +42,10 @@ export interface PrimaryKeyRangeRequest {
 }
 
 export interface IndexRangeRequest {
+  /** Lower bound in EngineKey byte order. */
   start?: EngineKey;
   startInclusive: boolean;
+  /** Upper bound in EngineKey byte order. */
   end?: EngineKey;
   endInclusive: boolean;
 }
@@ -69,6 +79,10 @@ export interface DatabaseTransaction {
   rangeRows(table: string, range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]>;
   addIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
   removeIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
+  /**
+   * Returns index entries sorted by ascending EngineKey byte order.
+   * Apply start/end bounds using bytewise lexicographic comparison.
+   */
   rangeIndex(index: string, range: IndexRangeRequest): Promise<IndexEntry[]>;
   getTableSchema(table: string): Promise<RowBytes | null | undefined>;
   putTableSchema(table: string, row: RowBytes): Promise<void>;
