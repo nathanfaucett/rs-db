@@ -7,7 +7,7 @@ use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use db_types::persistence::decode_index_schema_row;
 use futures::Stream;
 use js_sys::{Function, Promise, Reflect};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,12 +17,14 @@ use wasm_bindgen_futures::JsFuture;
 
 #[wasm_bindgen(typescript_custom_section)]
 const STORE_ADAPTER_TS: &str = r#"
-export type PrimaryKey = [
+export type PrimaryKeyTuple = [
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
 ];
+
+export type PrimaryKey = Uint8Array | PrimaryKeyTuple;
 
 export interface PrimaryKeyRangeRequest {
   start?: PrimaryKey;
@@ -38,7 +40,7 @@ export interface IndexRangeRequest {
   endInclusive: boolean;
 }
 
-export type RowBytes = number[];
+export type RowBytes = Uint8Array;
 
 export type PrimaryKeyEntry = {
   primaryKey: PrimaryKey;
@@ -114,7 +116,9 @@ fn serde_error(message: impl fmt::Display) -> BTreeError {
 }
 
 fn to_js<T: Serialize + ?Sized>(value: &T) -> BTreeResult<JsValue> {
-  serde_wasm_bindgen::to_value(value).map_err(serde_error)
+  value
+    .serialize(&serde_wasm_bindgen::Serializer::new().serialize_bytes_as_arrays(false))
+    .map_err(serde_error)
 }
 
 fn from_js<T: DeserializeOwned>(value: JsValue) -> BTreeResult<T> {
@@ -209,8 +213,10 @@ impl BackendTransaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrimaryKeyRangeRequest {
+  #[serde(deserialize_with = "deserialize_optional_primary_key")]
   start: Option<PrimaryKey>,
   start_inclusive: bool,
+  #[serde(deserialize_with = "deserialize_optional_primary_key")]
   end: Option<PrimaryKey>,
   end_inclusive: bool,
 }
@@ -227,6 +233,7 @@ struct IndexRangeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrimaryKeyEntry {
+  #[serde(deserialize_with = "deserialize_primary_key")]
   primary_key: PrimaryKey,
   row: Vec<u8>,
 }
@@ -235,7 +242,102 @@ struct PrimaryKeyEntry {
 #[serde(rename_all = "camelCase")]
 struct IndexEntry {
   index_key: EngineKey,
+  #[serde(deserialize_with = "deserialize_primary_key")]
   row_primary_key: PrimaryKey,
+}
+
+fn pk_from_bytes<E: serde::de::Error>(bytes: &[u8]) -> Result<PrimaryKey, E> {
+  let array: [u8; 16] = bytes
+    .try_into()
+    .map_err(|_| E::custom("primary key must be exactly 16 bytes"))?;
+  Ok(PrimaryKey::new(array))
+}
+
+fn deserialize_primary_key<'de, D>(deserializer: D) -> Result<PrimaryKey, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  struct PrimaryKeyVisitor;
+
+  impl<'de> Visitor<'de> for PrimaryKeyVisitor {
+    type Value = PrimaryKey;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("a 16-byte primary key as Uint8Array or 16-number array")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+      E: serde::de::Error,
+    {
+      pk_from_bytes(v)
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+      E: serde::de::Error,
+    {
+      pk_from_bytes(&v)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+      A: SeqAccess<'de>,
+    {
+      let mut out = [0u8; 16];
+      for (index, slot) in out.iter_mut().enumerate() {
+        *slot = seq.next_element::<u8>()?.ok_or_else(|| {
+          serde::de::Error::custom(format!("primary key missing byte at index {index}"))
+        })?;
+      }
+      if seq.next_element::<u8>()?.is_some() {
+        return Err(serde::de::Error::custom(
+          "primary key must be exactly 16 bytes",
+        ));
+      }
+      Ok(PrimaryKey::new(out))
+    }
+  }
+
+  deserializer.deserialize_any(PrimaryKeyVisitor)
+}
+
+fn deserialize_optional_primary_key<'de, D>(deserializer: D) -> Result<Option<PrimaryKey>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  struct OptionalPrimaryKeyVisitor;
+
+  impl<'de> Visitor<'de> for OptionalPrimaryKeyVisitor {
+    type Value = Option<PrimaryKey>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("an optional primary key")
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+      E: serde::de::Error,
+    {
+      Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+      E: serde::de::Error,
+    {
+      Ok(None)
+    }
+
+    fn visit_some<D2>(self, deserializer: D2) -> Result<Self::Value, D2::Error>
+    where
+      D2: serde::Deserializer<'de>,
+    {
+      deserialize_primary_key(deserializer).map(Some)
+    }
+  }
+
+  deserializer.deserialize_option(OptionalPrimaryKeyVisitor)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

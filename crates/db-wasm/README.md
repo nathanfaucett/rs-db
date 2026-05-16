@@ -74,6 +74,7 @@ import {
 } from "@aicacia/db-wasm";
 
 const primaryKeyToString = (primaryKey: PrimaryKey): string => primaryKey.join(":");
+const copyBytes = (bytes: RowBytes): RowBytes => new Uint8Array(bytes);
 
 class InMemoryTx implements DatabaseTransaction {
   constructor(
@@ -84,7 +85,8 @@ class InMemoryTx implements DatabaseTransaction {
   ) {}
 
   async getRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | undefined> {
-    return this.rowsByTable.get(table)?.get(primaryKeyToString(primaryKey));
+    const row = this.rowsByTable.get(table)?.get(primaryKeyToString(primaryKey));
+    return row ? copyBytes(row) : undefined;
   }
 
   async putRow(table: string, primaryKey: PrimaryKey, row: RowBytes): Promise<void> {
@@ -93,7 +95,7 @@ class InMemoryTx implements DatabaseTransaction {
       tableRows = new Map<string, RowBytes>();
       this.rowsByTable.set(table, tableRows);
     }
-    tableRows.set(primaryKeyToString(primaryKey), row);
+    tableRows.set(primaryKeyToString(primaryKey), copyBytes(row));
   }
 
   async deleteRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | undefined> {
@@ -101,7 +103,7 @@ class InMemoryTx implements DatabaseTransaction {
     const encodedPk = primaryKeyToString(primaryKey);
     const previous = tableRows?.get(encodedPk);
     tableRows?.delete(encodedPk);
-    return previous;
+    return previous ? copyBytes(previous) : undefined;
   }
 
   async rangeRows(table: string, _range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]> {
@@ -111,7 +113,7 @@ class InMemoryTx implements DatabaseTransaction {
     }
     return Array.from(tableRows.entries()).map(([encodedPk, row]) => ({
       primaryKey: encodedPk.split(":").map((part) => Number.parseInt(part, 10)) as PrimaryKey,
-      row,
+      row: copyBytes(row),
     }));
   }
 
@@ -138,39 +140,47 @@ class InMemoryTx implements DatabaseTransaction {
   }
 
   async getTableSchema(table: string): Promise<RowBytes | undefined> {
-    return this.tableSchemas.get(table);
+    const row = this.tableSchemas.get(table);
+    return row ? copyBytes(row) : undefined;
   }
 
   async putTableSchema(table: string, row: RowBytes): Promise<void> {
-    this.tableSchemas.set(table, row);
+    this.tableSchemas.set(table, copyBytes(row));
   }
 
   async deleteTableSchema(table: string): Promise<RowBytes | undefined> {
     const previous = this.tableSchemas.get(table);
     this.tableSchemas.delete(table);
-    return previous;
+    return previous ? copyBytes(previous) : undefined;
   }
 
   async rangeTableSchemas(): Promise<Array<{ table: string; row: RowBytes }>> {
-    return Array.from(this.tableSchemas.entries()).map(([table, row]) => ({ table, row }));
+    return Array.from(this.tableSchemas.entries()).map(([table, row]) => ({
+      table,
+      row: copyBytes(row),
+    }));
   }
 
   async getIndexSchema(index: string): Promise<RowBytes | undefined> {
-    return this.indexSchemas.get(index);
+    const row = this.indexSchemas.get(index);
+    return row ? copyBytes(row) : undefined;
   }
 
   async putIndexSchema(index: string, row: RowBytes): Promise<void> {
-    this.indexSchemas.set(index, row);
+    this.indexSchemas.set(index, copyBytes(row));
   }
 
   async deleteIndexSchema(index: string): Promise<RowBytes | undefined> {
     const previous = this.indexSchemas.get(index);
     this.indexSchemas.delete(index);
-    return previous;
+    return previous ? copyBytes(previous) : undefined;
   }
 
   async rangeIndexSchemas(): Promise<Array<{ index: string; row: RowBytes }>> {
-    return Array.from(this.indexSchemas.entries()).map(([index, row]) => ({ index, row }));
+    return Array.from(this.indexSchemas.entries()).map(([index, row]) => ({
+      index,
+      row: copyBytes(row),
+    }));
   }
 
   async commit(): Promise<void> {}
