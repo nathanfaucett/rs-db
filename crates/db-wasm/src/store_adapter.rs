@@ -31,9 +31,18 @@ export interface PrimaryKeyRangeRequest {
   endInclusive: boolean;
 }
 
+export interface IndexRangeRequest {
+  start?: EngineKey;
+  startInclusive: boolean;
+  end?: EngineKey;
+  endInclusive: boolean;
+}
+
+export type RowBytes = number[];
+
 export type PrimaryKeyEntry = {
   primaryKey: PrimaryKey;
-  row: number[];
+  row: RowBytes;
 };
 
 export type IndexEntry = {
@@ -41,48 +50,39 @@ export type IndexEntry = {
   rowPrimaryKey: PrimaryKey;
 };
 
-export interface PrimaryKeyStore {
-  get(table: string, primaryKey: PrimaryKey): Promise<EngineValue[] | null | undefined>;
-  put(table: string, primaryKey: PrimaryKey, row: EngineValue[]): Promise<void>;
-  delete(table: string, primaryKey: PrimaryKey): Promise<EngineValue[] | null | undefined>;
-  range(table: string, range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]>;
-}
-
-export interface IndexStore {
-  add(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
-  remove(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
-  range(index: string): Promise<IndexEntry[]>;
-}
-
-export interface StoreAdapterRangeRequest {
-  start?: EngineKey;
-  startInclusive: boolean;
-  end?: EngineKey;
-  endInclusive: boolean;
-}
-
-export type StoreAdapterEntry = {
-  key: EngineKey;
-  value: number[];
+export type TableSchemaEntry = {
+  table: string;
+  row: RowBytes;
 };
 
-export type StoreAdapterCommitOp =
-  | { op: "insert"; tree: string; key: EngineKey; value: number[] }
-  | { op: "remove"; tree: string; key: EngineKey };
+export type IndexSchemaEntry = {
+  index: string;
+  row: RowBytes;
+};
 
-export interface DatabaseEngineOptions {
-  primaryKeyStore?: PrimaryKeyStore;
-  indexStore?: IndexStore;
-  get?(tree: string, key: EngineKey): Promise<number[] | null | undefined>;
-  insert?(tree: string, key: EngineKey, value: number[]): Promise<void>;
-  remove?(tree: string, key: EngineKey): Promise<number[] | null | undefined>;
-  range?(tree: string, range: StoreAdapterRangeRequest): Promise<StoreAdapterEntry[]>;
-  commit?(ops: StoreAdapterCommitOp[]): Promise<void>;
-  rollback?(): Promise<void>;
+export interface DatabaseTransaction {
+  getRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined>;
+  putRow(table: string, primaryKey: PrimaryKey, row: RowBytes): Promise<void>;
+  deleteRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined>;
+  rangeRows(table: string, range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]>;
+  addIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
+  removeIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
+  rangeIndex(index: string, range: IndexRangeRequest): Promise<IndexEntry[]>;
+  getTableSchema(table: string): Promise<RowBytes | null | undefined>;
+  putTableSchema(table: string, row: RowBytes): Promise<void>;
+  deleteTableSchema(table: string): Promise<RowBytes | null | undefined>;
+  rangeTableSchemas(): Promise<TableSchemaEntry[]>;
+  getIndexSchema(index: string): Promise<RowBytes | null | undefined>;
+  putIndexSchema(index: string, row: RowBytes): Promise<void>;
+  deleteIndexSchema(index: string): Promise<RowBytes | null | undefined>;
+  rangeIndexSchemas(): Promise<IndexSchemaEntry[]>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
 }
 
-// Backward-compatible alias.
-export type StoreAdapter = DatabaseEngineOptions;
+export interface DatabaseEngineOptions {
+  beginTransaction(): Promise<DatabaseTransaction>;
+}
 "#;
 
 #[wasm_bindgen]
@@ -90,8 +90,6 @@ extern "C" {
   #[wasm_bindgen(typescript_type = "DatabaseEngineOptions")]
   pub type DatabaseEngineOptions;
 }
-
-pub type StoreAdapter = DatabaseEngineOptions;
 
 #[derive(Debug)]
 struct StoreAdapterError(String);
@@ -128,63 +126,130 @@ fn resolve_js(value: JsValue) -> BTreeResult<JsValue> {
   block_on(JsFuture::from(promise)).map_err(js_error)
 }
 
-fn call0(function: &Function) -> BTreeResult<JsValue> {
-  let value = function.call0(&JsValue::NULL).map_err(js_error)?;
+fn call_method0(function: &Function, this: &JsValue) -> BTreeResult<JsValue> {
+  let value = function.call0(this).map_err(js_error)?;
   resolve_js(value)
 }
 
-fn call1(function: &Function, arg0: &JsValue) -> BTreeResult<JsValue> {
-  let value = function.call1(&JsValue::NULL, arg0).map_err(js_error)?;
+fn call_method1(function: &Function, this: &JsValue, arg0: &JsValue) -> BTreeResult<JsValue> {
+  let value = function.call1(this, arg0).map_err(js_error)?;
   resolve_js(value)
 }
 
-fn call2(function: &Function, arg0: &JsValue, arg1: &JsValue) -> BTreeResult<JsValue> {
-  let value = function
-    .call2(&JsValue::NULL, arg0, arg1)
-    .map_err(js_error)?;
-  resolve_js(value)
-}
-
-fn call3(
+fn call_method2(
   function: &Function,
+  this: &JsValue,
+  arg0: &JsValue,
+  arg1: &JsValue,
+) -> BTreeResult<JsValue> {
+  let value = function.call2(this, arg0, arg1).map_err(js_error)?;
+  resolve_js(value)
+}
+
+fn call_method3(
+  function: &Function,
+  this: &JsValue,
   arg0: &JsValue,
   arg1: &JsValue,
   arg2: &JsValue,
 ) -> BTreeResult<JsValue> {
-  let value = function
-    .call3(&JsValue::NULL, arg0, arg1, arg2)
-    .map_err(js_error)?;
+  let value = function.call3(this, arg0, arg1, arg2).map_err(js_error)?;
   resolve_js(value)
 }
 
-fn load_optional_function(adapter: &JsValue, name: &str) -> Result<Option<Function>, String> {
+fn load_required_function(adapter: &JsValue, name: &str) -> Result<Function, String> {
   let key = JsValue::from_str(name);
   let value =
     Reflect::get(adapter, &key).map_err(|_| format!("invalid adapter property: {name}"))?;
   if value.is_null() || value.is_undefined() {
-    return Ok(None);
+    return Err(format!("missing required adapter function: {name}"));
   }
   value
     .dyn_into::<Function>()
-    .map(Some)
     .map_err(|_| format!("adapter property is not a function: {name}"))
 }
 
 #[derive(Clone)]
 struct CallbackRegistry {
-  get: Option<Function>,
-  insert: Option<Function>,
-  remove: Option<Function>,
-  range: Option<Function>,
-  commit: Option<Function>,
-  rollback: Option<Function>,
-  pk_get: Option<Function>,
-  pk_put: Option<Function>,
-  pk_delete: Option<Function>,
-  pk_range: Option<Function>,
-  idx_add: Option<Function>,
-  idx_remove: Option<Function>,
-  idx_range: Option<Function>,
+  adapter: JsValue,
+  begin_transaction: Function,
+}
+
+struct BackendTransaction {
+  value: JsValue,
+  get_row: Function,
+  put_row: Function,
+  delete_row: Function,
+  range_rows: Function,
+  add_index: Function,
+  remove_index: Function,
+  range_index: Function,
+  get_table_schema: Function,
+  put_table_schema: Function,
+  delete_table_schema: Function,
+  range_table_schemas: Function,
+  get_index_schema: Function,
+  put_index_schema: Function,
+  delete_index_schema: Function,
+  range_index_schemas: Function,
+  commit: Function,
+  rollback: Function,
+}
+
+impl BackendTransaction {
+  fn commit(self) -> BTreeResult<()> {
+    call_method0(&self.commit, &self.value).map(|_| ())
+  }
+
+  fn rollback(self) -> BTreeResult<()> {
+    call_method0(&self.rollback, &self.value).map(|_| ())
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrimaryKeyRangeRequest {
+  start: Option<PrimaryKey>,
+  start_inclusive: bool,
+  end: Option<PrimaryKey>,
+  end_inclusive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexRangeRequest {
+  start: Option<EngineKey>,
+  start_inclusive: bool,
+  end: Option<EngineKey>,
+  end_inclusive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrimaryKeyEntry {
+  primary_key: PrimaryKey,
+  row: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexEntry {
+  index_key: EngineKey,
+  row_primary_key: PrimaryKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TableSchemaEntry {
+  table: String,
+  row: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexSchemaEntry {
+  index: String,
+  row: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -197,52 +262,10 @@ impl TryFrom<JsValue> for StoreAdapterCallbacks {
   type Error = String;
 
   fn try_from(value: JsValue) -> Result<Self, Self::Error> {
-    let primary_key_store = Reflect::get(&value, &JsValue::from_str("primaryKeyStore")).ok();
-    let index_store = Reflect::get(&value, &JsValue::from_str("indexStore")).ok();
-
-    let (pk_get, pk_put, pk_delete, pk_range) = if let Some(store) = primary_key_store {
-      (
-        load_optional_function(&store, "get")?,
-        load_optional_function(&store, "put")?,
-        load_optional_function(&store, "delete")?,
-        load_optional_function(&store, "range")?,
-      )
-    } else {
-      (None, None, None, None)
-    };
-
-    let (idx_add, idx_remove, idx_range) = if let Some(store) = index_store {
-      (
-        load_optional_function(&store, "add")?,
-        load_optional_function(&store, "remove")?,
-        load_optional_function(&store, "range")?,
-      )
-    } else {
-      (None, None, None)
-    };
-
     let callbacks = CallbackRegistry {
-      get: load_optional_function(&value, "get")?,
-      insert: load_optional_function(&value, "insert")?,
-      remove: load_optional_function(&value, "remove")?,
-      range: load_optional_function(&value, "range")?,
-      commit: load_optional_function(&value, "commit")?,
-      rollback: load_optional_function(&value, "rollback")?,
-      pk_get,
-      pk_put,
-      pk_delete,
-      pk_range,
-      idx_add,
-      idx_remove,
-      idx_range,
+      begin_transaction: load_required_function(&value, "beginTransaction")?,
+      adapter: value,
     };
-
-    if callbacks.get.is_none() && callbacks.pk_get.is_none() {
-      return Err(
-        "store adapter must provide either get(tree,key) or primaryKeyStore.get(table,primaryKey)"
-          .into(),
-      );
-    }
 
     Ok(Self {
       callbacks,
@@ -253,44 +276,17 @@ impl TryFrom<JsValue> for StoreAdapterCallbacks {
 
 #[derive(Clone)]
 pub struct StoreAdapterTree {
-  callbacks: CallbackRegistry,
-  index_key_widths: Arc<Mutex<HashMap<String, usize>>>,
+  adapter: StoreAdapterCallbacks,
   tree: String,
 }
 
 pub struct StoreAdapterTransaction {
-  callbacks: CallbackRegistry,
-  index_key_widths: Arc<Mutex<HashMap<String, usize>>>,
-  pending_ops: Vec<PendingOp>,
+  adapter: StoreAdapterCallbacks,
+  backend_tx: BackendTransaction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum PendingOp {
-  Insert {
-    tree: String,
-    key: EngineKey,
-    value: Vec<u8>,
-  },
-  Remove {
-    tree: String,
-    key: EngineKey,
-  },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct KeyValuePair {
-  key: EngineKey,
-  value: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RangeRequest {
-  start: Option<EngineKey>,
-  start_inclusive: bool,
-  end: Option<EngineKey>,
-  end_inclusive: bool,
-}
+const TABLE_SCHEMAS_TREE: &str = "sys:table_schemas";
+const INDEX_SCHEMAS_TREE: &str = "sys:index_schemas";
 
 fn key_in_range<R>(key: &EngineKey, range: &R) -> bool
 where
@@ -313,11 +309,33 @@ where
 
 impl StoreAdapterCallbacks {
   fn row_table_name<'a>(&self, tree: &'a str) -> Option<&'a str> {
-    tree.strip_prefix("t:")
+    if self.index_name(tree).is_some() {
+      None
+    } else {
+      Some(tree.strip_prefix("t:").unwrap_or(tree))
+    }
   }
 
   fn index_name<'a>(&self, tree: &'a str) -> Option<&'a str> {
     tree.strip_prefix("i:")
+  }
+
+  fn table_schema_name_from_engine_key(&self, key: &EngineKey) -> BTreeResult<String> {
+    let values = <DefaultEncoding as KeyEncoding>::decode_values(key)
+      .map_err(|e| serde_error(format!("decode key error: {e}")))?;
+    match values.as_slice() {
+      [db_engine::EngineValue::Text(name)] => Ok(name.clone()),
+      _ => Err(serde_error("table schema key must be text scalar")),
+    }
+  }
+
+  fn index_schema_name_from_engine_key(&self, key: &EngineKey) -> BTreeResult<String> {
+    let values = <DefaultEncoding as KeyEncoding>::decode_values(key)
+      .map_err(|e| serde_error(format!("decode key error: {e}")))?;
+    match values.as_slice() {
+      [db_engine::EngineValue::Text(name)] => Ok(name.clone()),
+      _ => Err(serde_error("index schema key must be text scalar")),
+    }
   }
 
   fn primary_key_from_engine_key(&self, key: &EngineKey) -> BTreeResult<PrimaryKey> {
@@ -387,113 +405,281 @@ impl StoreAdapterCallbacks {
     }
   }
 
-  fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
-    if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_get) {
-      let table_js = JsValue::from_str(table);
-      let pk = self.primary_key_from_engine_key(key)?;
-      let pk_js = to_js(&pk)?;
-      let value = call2(callback, &table_js, &pk_js)?;
+  fn begin_backend_transaction(&self) -> BTreeResult<BackendTransaction> {
+    let value = call_method0(&self.callbacks.begin_transaction, &self.callbacks.adapter)?;
+
+    if value.is_null() || value.is_undefined() {
+      return Err(serde_error("beginTransaction returned null or undefined"));
+    }
+
+    Ok(BackendTransaction {
+      get_row: load_required_function(&value, "getRow").map_err(serde_error)?,
+      put_row: load_required_function(&value, "putRow").map_err(serde_error)?,
+      delete_row: load_required_function(&value, "deleteRow").map_err(serde_error)?,
+      range_rows: load_required_function(&value, "rangeRows").map_err(serde_error)?,
+      add_index: load_required_function(&value, "addIndex").map_err(serde_error)?,
+      remove_index: load_required_function(&value, "removeIndex").map_err(serde_error)?,
+      range_index: load_required_function(&value, "rangeIndex").map_err(serde_error)?,
+      get_table_schema: load_required_function(&value, "getTableSchema").map_err(serde_error)?,
+      put_table_schema: load_required_function(&value, "putTableSchema").map_err(serde_error)?,
+      delete_table_schema: load_required_function(&value, "deleteTableSchema")
+        .map_err(serde_error)?,
+      range_table_schemas: load_required_function(&value, "rangeTableSchemas")
+        .map_err(serde_error)?,
+      get_index_schema: load_required_function(&value, "getIndexSchema").map_err(serde_error)?,
+      put_index_schema: load_required_function(&value, "putIndexSchema").map_err(serde_error)?,
+      delete_index_schema: load_required_function(&value, "deleteIndexSchema")
+        .map_err(serde_error)?,
+      range_index_schemas: load_required_function(&value, "rangeIndexSchemas")
+        .map_err(serde_error)?,
+      commit: load_required_function(&value, "commit").map_err(serde_error)?,
+      rollback: load_required_function(&value, "rollback").map_err(serde_error)?,
+      value,
+    })
+  }
+
+  fn with_ephemeral_tx<T, F>(&self, commit_on_success: bool, op: F) -> BTreeResult<T>
+  where
+    F: FnOnce(&StoreAdapterCallbacks, &BackendTransaction) -> BTreeResult<T>,
+  {
+    let tx = self.begin_backend_transaction()?;
+    match op(self, &tx) {
+      Ok(value) => {
+        if commit_on_success {
+          tx.commit()?;
+        } else {
+          tx.rollback()?;
+        }
+        Ok(value)
+      }
+      Err(err) => {
+        let _ = tx.rollback();
+        Err(err)
+      }
+    }
+  }
+
+  fn tx_get(
+    &self,
+    tx: &BackendTransaction,
+    tree: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    if tree == TABLE_SCHEMAS_TREE {
+      let table = self.table_schema_name_from_engine_key(key)?;
+      let table_js = JsValue::from_str(&table);
+      let value = call_method1(&tx.get_table_schema, &tx.value, &table_js)?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
       return from_js(value);
     }
 
-    let tree_js = JsValue::from_str(tree);
-    let key_js = to_js(key)?;
-    let get = self
-      .callbacks
-      .get
-      .as_ref()
-      .ok_or_else(|| serde_error("missing get callback for legacy tree adapter"))?;
-    let value = call2(get, &tree_js, &key_js)?;
-    if value.is_null() || value.is_undefined() {
-      return Ok(None);
+    if tree == INDEX_SCHEMAS_TREE {
+      let index = self.index_schema_name_from_engine_key(key)?;
+      let index_js = JsValue::from_str(&index);
+      let value = call_method1(&tx.get_index_schema, &tx.value, &index_js)?;
+      if value.is_null() || value.is_undefined() {
+        return Ok(None);
+      }
+      return from_js(value);
     }
-    from_js(value)
-  }
 
-  fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
-    if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_put) {
+    if let Some(table) = self.row_table_name(tree) {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
+      let value = call_method2(&tx.get_row, &tx.value, &table_js, &pk_js)?;
+      if value.is_null() || value.is_undefined() {
+        return Ok(None);
+      }
+      return from_js(value);
+    }
+
+    if let Some(index_name) = self.index_name(tree) {
+      let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
+      let request = IndexRangeRequest {
+        start: Some(index_key.clone()),
+        start_inclusive: true,
+        end: Some(index_key),
+        end_inclusive: true,
+      };
+      let index_js = JsValue::from_str(index_name);
+      let req_js = to_js(&request)?;
+      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js)?;
+      let entries: Vec<IndexEntry> = from_js(value)?;
+      let found = entries
+        .into_iter()
+        .any(|entry| entry.row_primary_key == row_pk);
+      return Ok(found.then(Vec::new));
+    }
+
+    Err(serde_error(format!("unsupported tree name: {tree}")))
+  }
+
+  fn tx_insert(
+    &self,
+    tx: &BackendTransaction,
+    tree: &str,
+    key: &EngineKey,
+    row: &[u8],
+  ) -> BTreeResult<()> {
+    if tree == TABLE_SCHEMAS_TREE {
+      let table = self.table_schema_name_from_engine_key(key)?;
+      let table_js = JsValue::from_str(&table);
       let row_js = to_js(row)?;
-      let _ = call3(callback, &table_js, &pk_js, &row_js)?;
+      let _ = call_method2(&tx.put_table_schema, &tx.value, &table_js, &row_js)?;
+      return Ok(());
+    }
+
+    if tree == INDEX_SCHEMAS_TREE {
+      let index = self.index_schema_name_from_engine_key(key)?;
+      let index_js = JsValue::from_str(&index);
+      let row_js = to_js(row)?;
+      let _ = call_method2(&tx.put_index_schema, &tx.value, &index_js, &row_js)?;
       self.maybe_update_index_schema_widths(tree, key, row);
       return Ok(());
     }
 
-    if let (Some(index_name), Some(callback)) = (self.index_name(tree), &self.callbacks.idx_add) {
+    if let Some(table) = self.row_table_name(tree) {
+      let table_js = JsValue::from_str(table);
+      let pk = self.primary_key_from_engine_key(key)?;
+      let pk_js = to_js(&pk)?;
+      let row_js = to_js(row)?;
+      let _ = call_method3(&tx.put_row, &tx.value, &table_js, &pk_js, &row_js)?;
+      self.maybe_update_index_schema_widths(tree, key, row);
+      return Ok(());
+    }
+
+    if let Some(index_name) = self.index_name(tree) {
       let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
       let index_js = JsValue::from_str(index_name);
       let index_key_js = to_js(&index_key)?;
       let row_pk_js = to_js(&row_pk)?;
-      let _ = call3(callback, &index_js, &index_key_js, &row_pk_js)?;
+      let _ = call_method3(
+        &tx.add_index,
+        &tx.value,
+        &index_js,
+        &index_key_js,
+        &row_pk_js,
+      )?;
       return Ok(());
     }
 
-    let tree_js = JsValue::from_str(tree);
-    let key_js = to_js(key)?;
-    let row_js = to_js(row)?;
-    let insert = self
-      .callbacks
-      .insert
-      .as_ref()
-      .ok_or_else(|| serde_error("missing insert callback for legacy tree adapter"))?;
-    let _ = call3(insert, &tree_js, &key_js, &row_js)?;
-    self.maybe_update_index_schema_widths(tree, key, row);
-    Ok(())
+    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
-    if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_delete) {
-      let table_js = JsValue::from_str(table);
-      let pk = self.primary_key_from_engine_key(key)?;
-      let pk_js = to_js(&pk)?;
-      let value = call2(callback, &table_js, &pk_js)?;
+  fn tx_remove(
+    &self,
+    tx: &BackendTransaction,
+    tree: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    if tree == TABLE_SCHEMAS_TREE {
+      let table = self.table_schema_name_from_engine_key(key)?;
+      let table_js = JsValue::from_str(&table);
+      let value = call_method1(&tx.delete_table_schema, &tx.value, &table_js)?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
       return from_js(value);
     }
 
-    if let (Some(index_name), Some(callback)) = (self.index_name(tree), &self.callbacks.idx_remove)
-    {
+    if tree == INDEX_SCHEMAS_TREE {
+      let index = self.index_schema_name_from_engine_key(key)?;
+      let index_js = JsValue::from_str(&index);
+      let value = call_method1(&tx.delete_index_schema, &tx.value, &index_js)?;
+      self.maybe_remove_index_schema_width(tree, key);
+      if value.is_null() || value.is_undefined() {
+        return Ok(None);
+      }
+      return from_js(value);
+    }
+
+    if let Some(table) = self.row_table_name(tree) {
+      let table_js = JsValue::from_str(table);
+      let pk = self.primary_key_from_engine_key(key)?;
+      let pk_js = to_js(&pk)?;
+      let value = call_method2(&tx.delete_row, &tx.value, &table_js, &pk_js)?;
+      if value.is_null() || value.is_undefined() {
+        self.maybe_remove_index_schema_width(tree, key);
+        return Ok(None);
+      }
+      self.maybe_remove_index_schema_width(tree, key);
+      return from_js(value);
+    }
+
+    if let Some(index_name) = self.index_name(tree) {
       let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
       let index_js = JsValue::from_str(index_name);
       let index_key_js = to_js(&index_key)?;
       let row_pk_js = to_js(&row_pk)?;
-      let _ = call3(callback, &index_js, &index_key_js, &row_pk_js)?;
+      let _ = call_method3(
+        &tx.remove_index,
+        &tx.value,
+        &index_js,
+        &index_key_js,
+        &row_pk_js,
+      )?;
       return Ok(None);
     }
 
-    let tree_js = JsValue::from_str(tree);
-    let key_js = to_js(key)?;
-    let remove = self
-      .callbacks
-      .remove
-      .as_ref()
-      .ok_or_else(|| serde_error("missing remove callback for legacy tree adapter"))?;
-    let value = call2(remove, &tree_js, &key_js)?;
-    if value.is_null() || value.is_undefined() {
-      self.maybe_remove_index_schema_width(tree, key);
-      return Ok(None);
-    }
-    self.maybe_remove_index_schema_width(tree, key);
-    from_js(value)
+    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
+  fn tx_range<R>(
+    &self,
+    tx: &BackendTransaction,
+    tree: &str,
+    range: &R,
+  ) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
   where
     R: RangeBounds<EngineKey>,
   {
-    if let (Some(table), Some(callback)) = (self.row_table_name(tree), &self.callbacks.pk_range) {
-      let request = RangeRequest {
+    if tree == TABLE_SCHEMAS_TREE {
+      let value = call_method0(&tx.range_table_schemas, &tx.value)?;
+      let entries: Vec<TableSchemaEntry> = from_js(value)?;
+      return Ok(
+        entries
+          .into_iter()
+          .map(|entry| {
+            (
+              <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
+                entry.table,
+              )]),
+              entry.row,
+            )
+          })
+          .collect(),
+      );
+    }
+
+    if tree == INDEX_SCHEMAS_TREE {
+      let value = call_method0(&tx.range_index_schemas, &tx.value)?;
+      let entries: Vec<IndexSchemaEntry> = from_js(value)?;
+      let out = entries
+        .into_iter()
+        .map(|entry| {
+          (
+            <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
+              entry.index,
+            )]),
+            entry.row,
+          )
+        })
+        .collect::<Vec<_>>();
+      for (key, row) in &out {
+        self.maybe_update_index_schema_widths(tree, key, row);
+      }
+      return Ok(out);
+    }
+
+    if let Some(table) = self.row_table_name(tree) {
+      let request = PrimaryKeyRangeRequest {
         start: match range.start_bound() {
           Bound::Included(key) | Bound::Excluded(key) => {
             let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk.to_engine_key())
+            Some(pk)
           }
           Bound::Unbounded => None,
         },
@@ -501,40 +687,54 @@ impl StoreAdapterCallbacks {
         end: match range.end_bound() {
           Bound::Included(key) | Bound::Excluded(key) => {
             let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk.to_engine_key())
+            Some(pk)
           }
           Bound::Unbounded => None,
         },
         end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
       };
 
-      #[derive(Deserialize)]
-      struct PrimaryKeyEntry {
-        primary_key: PrimaryKey,
-        row: Vec<u8>,
-      }
-
       let table_js = JsValue::from_str(table);
       let req_js = to_js(&request)?;
-      let value = call2(callback, &table_js, &req_js)?;
+      let value = call_method2(&tx.range_rows, &tx.value, &table_js, &req_js)?;
       let rows: Vec<PrimaryKeyEntry> = from_js(value)?;
-      return Ok(
-        rows
-          .into_iter()
-          .map(|entry| (entry.primary_key.to_engine_key(), entry.row))
-          .collect(),
-      );
-    }
+      let out = rows
+        .into_iter()
+        .map(|entry| (entry.primary_key.to_engine_key(), entry.row))
+        .collect::<Vec<_>>();
 
-    if let (Some(index_name), Some(callback)) = (self.index_name(tree), &self.callbacks.idx_range) {
-      #[derive(Deserialize)]
-      struct IndexEntry {
-        index_key: EngineKey,
-        row_primary_key: PrimaryKey,
+      if tree == INDEX_SCHEMAS_TREE {
+        for (key, row) in &out {
+          self.maybe_update_index_schema_widths(tree, key, row);
+        }
       }
 
+      return Ok(out);
+    }
+
+    if let Some(index_name) = self.index_name(tree) {
+      let request = IndexRangeRequest {
+        start: match range.start_bound() {
+          Bound::Included(key) | Bound::Excluded(key) => self
+            .split_composite_index_key(index_name, key)
+            .ok()
+            .map(|(index_key, _)| index_key),
+          Bound::Unbounded => None,
+        },
+        start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+        end: match range.end_bound() {
+          Bound::Included(key) | Bound::Excluded(key) => self
+            .split_composite_index_key(index_name, key)
+            .ok()
+            .map(|(index_key, _)| index_key),
+          Bound::Unbounded => None,
+        },
+        end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+      };
+
       let index_js = JsValue::from_str(index_name);
-      let value = call1(callback, &index_js)?;
+      let req_js = to_js(&request)?;
+      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js)?;
       let entries: Vec<IndexEntry> = from_js(value)?;
       return Ok(
         entries
@@ -549,40 +749,26 @@ impl StoreAdapterCallbacks {
       );
     }
 
-    let request = RangeRequest {
-      start: match range.start_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => Some(key.clone()),
-        Bound::Unbounded => None,
-      },
-      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-      end: match range.end_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => Some(key.clone()),
-        Bound::Unbounded => None,
-      },
-      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-    };
+    Err(serde_error(format!("unsupported tree name: {tree}")))
+  }
 
-    let tree_js = JsValue::from_str(tree);
-    let req_js = to_js(&request)?;
-    let range_fn = self
-      .callbacks
-      .range
-      .as_ref()
-      .ok_or_else(|| serde_error("missing range callback for legacy tree adapter"))?;
-    let value = call2(range_fn, &tree_js, &req_js)?;
-    let rows: Vec<KeyValuePair> = from_js(value)?;
-    let out: Vec<(EngineKey, Vec<u8>)> = rows
-      .into_iter()
-      .map(|entry| (entry.key, entry.value))
-      .collect();
+  fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    self.with_ephemeral_tx(false, |adapter, tx| adapter.tx_get(tx, tree, key))
+  }
 
-    if tree == "sys:index_schemas" {
-      for (key, row) in &out {
-        self.maybe_update_index_schema_widths(tree, key, row);
-      }
-    }
+  fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
+    self.with_ephemeral_tx(true, |adapter, tx| adapter.tx_insert(tx, tree, key, row))
+  }
 
-    Ok(out)
+  fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    self.with_ephemeral_tx(true, |adapter, tx| adapter.tx_remove(tx, tree, key))
+  }
+
+  fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
+  where
+    R: RangeBounds<EngineKey>,
+  {
+    self.with_ephemeral_tx(false, |adapter, tx| adapter.tx_range(tx, tree, range))
   }
 }
 
@@ -595,8 +781,7 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
     name: &str,
   ) -> impl core::future::Future<Output = BTreeResult<Self::Tree>> + Send + '_ {
     let tree = StoreAdapterTree {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
+      adapter: self.clone(),
       tree: name.to_string(),
     };
     future::ready(Ok(tree))
@@ -605,33 +790,13 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   fn begin_transaction(
     &self,
   ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + Send + '_ {
-    let tx = StoreAdapterTransaction {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-      pending_ops: Vec::new(),
-    };
-    future::ready(Ok(tx))
-  }
-}
-
-impl StoreAdapterTransaction {
-  fn pending_lookup(&self, tree: &str, key: &EngineKey) -> Option<Option<Vec<u8>>> {
-    for op in self.pending_ops.iter().rev() {
-      match op {
-        PendingOp::Insert {
-          tree: op_tree,
-          key: op_key,
-          value,
-        } if op_tree == tree && op_key == key => return Some(Some(value.clone())),
-        PendingOp::Remove {
-          tree: op_tree,
-          key: op_key,
-        } if op_tree == tree && op_key == key => return Some(None),
-        _ => {}
-      }
+    async move {
+      let backend_tx = self.begin_backend_transaction()?;
+      Ok(StoreAdapterTransaction {
+        adapter: self.clone(),
+        backend_tx,
+      })
     }
-
-    None
   }
 }
 
@@ -644,17 +809,7 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   where
     EngineKey: Ord,
   {
-    let value = if let Some(value) = self.pending_lookup(tree, key) {
-      Ok(value)
-    } else {
-      let adapter = StoreAdapterCallbacks {
-        callbacks: self.callbacks.clone(),
-        index_key_widths: self.index_key_widths.clone(),
-      };
-      adapter.callback_get(tree, key)
-    };
-
-    future::ready(value)
+    future::ready(self.adapter.tx_get(&self.backend_tx, tree, key))
   }
 
   fn insert<'a>(
@@ -666,12 +821,7 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   where
     EngineKey: Ord,
   {
-    self.pending_ops.push(PendingOp::Insert {
-      tree: tree.to_string(),
-      key,
-      value,
-    });
-    future::ready(Ok(()))
+    future::ready(self.adapter.tx_insert(&self.backend_tx, tree, &key, &value))
   }
 
   fn remove<'a>(
@@ -682,24 +832,7 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   where
     EngineKey: Ord,
   {
-    let existing = if let Some(value) = self.pending_lookup(tree, key) {
-      Ok(value)
-    } else {
-      let adapter = StoreAdapterCallbacks {
-        callbacks: self.callbacks.clone(),
-        index_key_widths: self.index_key_widths.clone(),
-      };
-      adapter.callback_get(tree, key)
-    };
-
-    let out = existing.inspect(|_| {
-      self.pending_ops.push(PendingOp::Remove {
-        tree: tree.to_string(),
-        key: key.clone(),
-      });
-    });
-
-    future::ready(out)
+    future::ready(self.adapter.tx_remove(&self.backend_tx, tree, key))
   }
 
   fn range<'a, R>(
@@ -711,84 +844,32 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-    let rows = adapter.callback_range(tree, &range).map(|callback_rows| {
-      let mut map = std::collections::BTreeMap::new();
-
-      for (key, value) in callback_rows {
-        if key_in_range(&key, &range) {
-          map.insert(key, value);
-        }
-      }
-
-      for op in &self.pending_ops {
-        match op {
-          PendingOp::Insert {
-            tree: op_tree,
-            key,
-            value,
-          } if op_tree == tree && key_in_range(key, &range) => {
-            map.insert(key.clone(), value.clone());
-          }
-          PendingOp::Remove { tree: op_tree, key }
-            if op_tree == tree && key_in_range(key, &range) =>
-          {
-            let _ = map.remove(key);
-          }
-          _ => {}
-        }
-      }
-
-      map.into_iter().map(Ok).collect::<Vec<_>>()
-    });
-
-    futures::stream::iter(rows.unwrap_or_else(|err| vec![Err(err)]))
+    let rows = self
+      .adapter
+      .tx_range(&self.backend_tx, tree, &range)
+      .map(|pairs| {
+        pairs
+          .into_iter()
+          .filter(|(key, _)| key_in_range(key, &range))
+          .map(Ok)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_else(|err| vec![Err(err)]);
+    futures::stream::iter(rows)
   }
 
   fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
   where
     Self: Sized,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-
-    let out = if let Some(commit) = &self.callbacks.commit {
-      to_js(&self.pending_ops).and_then(|ops_js| {
-        let _ = call1(commit, &ops_js)?;
-        Ok(())
-      })
-    } else {
-      let mut result = Ok(());
-      for op in &self.pending_ops {
-        result = result.and_then(|_| match op {
-          PendingOp::Insert { tree, key, value } => adapter.callback_insert(tree, key, value),
-          PendingOp::Remove { tree, key } => adapter.callback_remove(tree, key).map(|_| ()),
-        });
-        if result.is_err() {
-          break;
-        }
-      }
-      result
-    };
-
-    future::ready(out)
+    future::ready(self.backend_tx.commit())
   }
 
   fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
   where
     Self: Sized,
   {
-    let out = if let Some(rollback) = &self.callbacks.rollback {
-      call0(rollback).map(|_| ())
-    } else {
-      Ok(())
-    };
-    future::ready(out)
+    future::ready(self.backend_tx.rollback())
   }
 }
 
@@ -801,11 +882,7 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-    future::ready(adapter.callback_get(&self.tree, key.borrow()))
+    future::ready(self.adapter.callback_get(&self.tree, key.borrow()))
   }
 
   fn insert<'a>(
@@ -816,11 +893,7 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
   where
     EngineKey: Ord,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-    future::ready(adapter.callback_insert(&self.tree, &key, &value))
+    future::ready(self.adapter.callback_insert(&self.tree, &key, &value))
   }
 
   fn remove<'a, Q>(
@@ -831,11 +904,7 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
     EngineKey: Ord,
     Q: core::borrow::Borrow<EngineKey> + Send + 'a,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-    future::ready(adapter.callback_remove(&self.tree, key.borrow()))
+    future::ready(self.adapter.callback_remove(&self.tree, key.borrow()))
   }
 
   fn range<'a, R>(
@@ -846,11 +915,8 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
     EngineKey: Ord,
     R: RangeBounds<EngineKey> + Send + 'a,
   {
-    let adapter = StoreAdapterCallbacks {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-    };
-    let rows = adapter
+    let rows = self
+      .adapter
       .callback_range(&self.tree, &range)
       .map(|pairs| {
         pairs
@@ -932,11 +998,12 @@ impl db_core::BTree<EngineKey, Vec<u8>> for StoreAdapterTree {
   fn transaction<'a>(
     &'a self,
   ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + Send + 'a {
-    let tx = StoreAdapterTransaction {
-      callbacks: self.callbacks.clone(),
-      index_key_widths: self.index_key_widths.clone(),
-      pending_ops: Vec::new(),
-    };
-    future::ready(Ok(tx))
+    async move {
+      let backend_tx = self.adapter.begin_backend_transaction()?;
+      Ok(StoreAdapterTransaction {
+        adapter: self.adapter.clone(),
+        backend_tx,
+      })
+    }
   }
 }

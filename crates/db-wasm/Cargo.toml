@@ -10,7 +10,7 @@ wasm-opt = false
 [lib]
 name = "db_wasm"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
@@ -41,3 +41,6 @@ db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, fea
 db-types = { path = "../db-types", default-features = false, features = [
   "wasm",
 ] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

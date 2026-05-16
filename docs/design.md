@@ -2,21 +2,21 @@
 
 ### Overview
 
-We are building a modular, async-first database foundation centered on a transactional store abstraction. The core contract is a base `BTree` store that exposes ordered key/value reads directly and requires all mutation activity to occur through a transaction object.
+We are building a modular, async-first database foundation centered on a strict ACID transaction boundary. The backend contract is transaction-first: every read/write/index/catalog operation executes through a transaction object, and every transaction must support `commit` and `rollback`.
 
-- `BTree<K, V>` is the base store trait for ordered lookup and range queries.
-- `BTreeTransaction<K, V>` is the write-bound object used for inserts, deletes, range scans, and atomic commit/rollback.
-- `TableBTree` and `IndexBTree` are higher-level adapters that use transactions to update rows and indexes together.
+- Backends expose one entrypoint: `begin_transaction()`.
+- The returned transaction object exposes row operations, index operations, schema operations, and lifecycle control.
+- `commit()` and `rollback()` are required; there are no non-transactional mutation paths.
 
-This approach makes it possible to coordinate row and index changes in one atomic unit while keeping direct reads lightweight.
+This approach guarantees that row and index changes can be coordinated atomically in one unit and removes ambiguity from optional or fallback write paths.
 
 ### Goals
 
-- Center the design on a single transactional store trait.
+- Enforce one strict ACID backend boundary.
 - Make mutation semantics explicit: all writes must use a transaction object.
+- Require lifecycle control (`commit`/`rollback`) for every backend implementation.
 - Support pluggable async backends for both tables/indexes and durable storage.
 - Keep adapter logic backend-agnostic and async-compatible.
-- Allow the same adapter code to work over memory or durable store implementations.
 - Enable batched multi-row updates via transaction objects in higher-level APIs.
 
 ### Key Concepts
@@ -29,17 +29,11 @@ This approach makes it possible to coordinate row and index changes in one atomi
 
 ### Core Store Abstraction
 
-The central contract is a generic `BTree<K, V>` trait describing an async ordered map with transaction creation.
+The central contract is transaction-first. A core store implementation should provide one entrypoint to create a transaction object, and that transaction object is the only place where row/index/schema operations are defined.
 
-A core store implementation should provide:
+Implementation note: internal storage engines may still use `BTree<K, V>`-style abstractions, but that is an internal detail rather than the public backend boundary.
 
-- async `get(key) -> Option<value>`
-- async `range(range) -> Stream<(key, value)>`
-- async `begin_transaction() -> Transaction`
-
-Mutation operations are not provided directly on `BTree`. They are available only through the transaction object returned by `begin_transaction()`.
-
-Example API:
+Example internal API:
 
 ```rust
 pub trait BTree<K, V>: Send + Sync {
@@ -62,7 +56,7 @@ pub trait BTree<K, V>: Send + Sync {
 
 ### Transaction Abstraction
 
-A transaction object is the only permitted mutation entrypoint. It should support:
+A transaction object is the required entrypoint for all backend operations. It should support:
 
 - `get(key) -> Option<value>`
 - `insert(key, value) -> Result<(), StoreError>`
@@ -126,12 +120,21 @@ Responsibilities:
 
 ### Adapter and Store Interactions
 
-Adapters and stores share a single transactional interface.
+Adapters and stores share a single transactional interface with required lifecycle control.
 
 - `BTree` is the base store trait.
 - `BTreeTransaction` is the mutation object returned by the store.
 - `TableBTree` and `IndexBTree` are semantic adapters that never mutate outside a transaction.
 - Higher-level APIs can create a transaction, apply multiple row and index updates, and commit atomically.
+
+### ACID Contract Requirements
+
+- **Atomicity**: backend-visible changes become durable only on successful `commit`.
+- **Consistency**: row and index updates must stay in sync across a transaction boundary.
+- **Isolation**: uncommitted writes must not leak outside the transaction context.
+- **Durability**: successful `commit` must survive backend durability guarantees.
+
+Backends that cannot provide these guarantees are not valid implementations of the store boundary.
 
 ### Implementation Scope
 

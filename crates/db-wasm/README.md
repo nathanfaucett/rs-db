@@ -16,13 +16,13 @@ This runs `wasm-pack` and writes the generated package directly to `pkg/`.
 import init from "@aicacia/db-wasm";
 import { BrowserDatabase, type DatabaseEngineOptions } from "@aicacia/db-wasm";
 import {
+  type DatabaseTransaction,
   type EngineKey,
-  type EngineRow,
-  type IndexStore,
+  type IndexRangeRequest,
   type PrimaryKeyEntry,
   type PrimaryKey,
   type PrimaryKeyRangeRequest,
-  type PrimaryKeyStore,
+  type RowBytes,
   translate_sql_to_query,
   translate_sql_to_statement,
 } from "@aicacia/db-wasm";
@@ -57,68 +57,71 @@ console.log(result.rows);
 
 ## StoreAdapter
 
+`DatabaseEngineOptions` now requires a single ACID boundary: `beginTransaction()` must return a transaction object with row, index, commit, and rollback methods.
+
 ```ts
 import {
   BrowserDatabase,
   type DatabaseEngineOptions,
+  type DatabaseTransaction,
   type EngineKey,
-  type EngineRow,
   type IndexEntry,
-  type IndexStore,
+  type IndexRangeRequest,
   type PrimaryKey,
   type PrimaryKeyEntry,
   type PrimaryKeyRangeRequest,
-  type PrimaryKeyStore,
+  type RowBytes,
 } from "@aicacia/db-wasm";
 
 const primaryKeyToString = (primaryKey: PrimaryKey): string => primaryKey.join(":");
 
-class InMemoryPrimaryKeyStore implements PrimaryKeyStore {
-  private readonly rowsByTable = new Map<string, Map<string, EngineRow>>();
+class InMemoryTx implements DatabaseTransaction {
+  constructor(
+    private readonly rowsByTable: Map<string, Map<string, RowBytes>>,
+    private readonly entriesByIndex: Map<string, IndexEntry[]>,
+    private readonly tableSchemas: Map<string, RowBytes>,
+    private readonly indexSchemas: Map<string, RowBytes>,
+  ) {}
 
-  async get(table: string, primaryKey: PrimaryKey): Promise<EngineRow | undefined> {
+  async getRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | undefined> {
     return this.rowsByTable.get(table)?.get(primaryKeyToString(primaryKey));
   }
 
-  async put(table: string, primaryKey: PrimaryKey, row: EngineRow): Promise<void> {
+  async putRow(table: string, primaryKey: PrimaryKey, row: RowBytes): Promise<void> {
     let tableRows = this.rowsByTable.get(table);
     if (!tableRows) {
-      tableRows = new Map<string, EngineRow>();
+      tableRows = new Map<string, RowBytes>();
       this.rowsByTable.set(table, tableRows);
     }
     tableRows.set(primaryKeyToString(primaryKey), row);
   }
 
-  async delete(table: string, primaryKey: PrimaryKey): Promise<EngineRow | undefined> {
+  async deleteRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | undefined> {
     const tableRows = this.rowsByTable.get(table);
-    const key = primaryKeyToString(primaryKey);
-    const previous = tableRows?.get(key);
-    tableRows?.delete(key);
+    const encodedPk = primaryKeyToString(primaryKey);
+    const previous = tableRows?.get(encodedPk);
+    tableRows?.delete(encodedPk);
     return previous;
   }
 
-  async range(table: string, _range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]> {
+  async rangeRows(table: string, _range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]> {
     const tableRows = this.rowsByTable.get(table);
     if (!tableRows) {
       return [];
     }
-    return Array.from(tableRows.entries()).map(([encodedPrimaryKey, row]) => ({
-      primaryKey: encodedPrimaryKey.split(":").map((part) => Number.parseInt(part, 10)) as PrimaryKey,
+    return Array.from(tableRows.entries()).map(([encodedPk, row]) => ({
+      primaryKey: encodedPk.split(":").map((part) => Number.parseInt(part, 10)) as PrimaryKey,
       row,
     }));
   }
-}
 
-class InMemoryIndexStore implements IndexStore {
-  private readonly entriesByIndex = new Map<string, IndexEntry[]>();
-
-  async add(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> {
+  async addIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> {
     const entries = this.entriesByIndex.get(index) ?? [];
     entries.push({ indexKey, rowPrimaryKey });
     this.entriesByIndex.set(index, entries);
   }
 
-  async remove(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> {
+  async removeIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> {
     const entries = this.entriesByIndex.get(index) ?? [];
     this.entriesByIndex.set(
       index,
@@ -130,27 +133,68 @@ class InMemoryIndexStore implements IndexStore {
     );
   }
 
-  async range(index: string): Promise<IndexEntry[]> {
+  async rangeIndex(index: string, _range: IndexRangeRequest): Promise<IndexEntry[]> {
     return this.entriesByIndex.get(index) ?? [];
   }
+
+  async getTableSchema(table: string): Promise<RowBytes | undefined> {
+    return this.tableSchemas.get(table);
+  }
+
+  async putTableSchema(table: string, row: RowBytes): Promise<void> {
+    this.tableSchemas.set(table, row);
+  }
+
+  async deleteTableSchema(table: string): Promise<RowBytes | undefined> {
+    const previous = this.tableSchemas.get(table);
+    this.tableSchemas.delete(table);
+    return previous;
+  }
+
+  async rangeTableSchemas(): Promise<Array<{ table: string; row: RowBytes }>> {
+    return Array.from(this.tableSchemas.entries()).map(([table, row]) => ({ table, row }));
+  }
+
+  async getIndexSchema(index: string): Promise<RowBytes | undefined> {
+    return this.indexSchemas.get(index);
+  }
+
+  async putIndexSchema(index: string, row: RowBytes): Promise<void> {
+    this.indexSchemas.set(index, row);
+  }
+
+  async deleteIndexSchema(index: string): Promise<RowBytes | undefined> {
+    const previous = this.indexSchemas.get(index);
+    this.indexSchemas.delete(index);
+    return previous;
+  }
+
+  async rangeIndexSchemas(): Promise<Array<{ index: string; row: RowBytes }>> {
+    return Array.from(this.indexSchemas.entries()).map(([index, row]) => ({ index, row }));
+  }
+
+  async commit(): Promise<void> {}
+
+  async rollback(): Promise<void> {}
 }
 
+const rowsByTable = new Map<string, Map<string, RowBytes>>();
+const entriesByIndex = new Map<string, IndexEntry[]>();
+const tableSchemas = new Map<string, RowBytes>();
+const indexSchemas = new Map<string, RowBytes>();
+
 const options: DatabaseEngineOptions = {
-  primaryKeyStore: new InMemoryPrimaryKeyStore(),
-  indexStore: new InMemoryIndexStore(),
+  async beginTransaction() {
+    return new InMemoryTx(rowsByTable, entriesByIndex, tableSchemas, indexSchemas);
+  },
 };
 
 const db = await BrowserDatabase.openWithBackend(options);
 ```
 
-### Recommended Adapter Shape
+### Required Guarantees
 
-- Use `primaryKeyStore` for table row identity and row payload operations.
-- Use `indexStore` for secondary index maintenance and lookups.
-- Keep index keys as `EngineKey` (scalar for single-column indexes, tuple for composite indexes).
-
-Use class-based stores as shown above for clearer ownership, testability, and strong typing.
-
-### Legacy Compatibility
-
-`DatabaseEngineOptions` still supports legacy tree-based callbacks (`get/insert/remove/range`) for backends that already implement them.
+- All adapter methods execute through a transaction object returned by `beginTransaction()`.
+- Schema operations are transaction-bound and mandatory.
+- `commit()` and `rollback()` are mandatory.
+- There are no legacy tree callbacks and no non-transactional fallback paths.
