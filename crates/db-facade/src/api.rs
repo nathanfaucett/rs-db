@@ -12,7 +12,10 @@ use db_automerge::{AutoCommit, AutomergeEngineStore, AutomergeEntry, DocumentCha
 use db_core::{BTree, BTreeExecutor, BTreeTransaction};
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
-use db_engine::{EngineDatabase, EngineQuery, EngineResult, IndexSchema, TableSchema};
+use db_engine::{
+  EngineDatabase, EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, SyncScope,
+  TableSchema,
+};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
@@ -320,6 +323,48 @@ where
         Err(e)
       }
     }
+  }
+
+  /// Subscribe to a query with optional scope.
+  pub async fn subscribe(
+    &self,
+    query: EngineQuery,
+    subscriber: std::sync::Arc<dyn Subscriber>,
+    scope: Option<SyncScope>,
+  ) -> Result<SubscriptionId, DatabaseError> {
+    let scope = scope.unwrap_or_default();
+    self
+      .engine
+      .subscribe(query, &scope, subscriber)
+      .await
+      .map_err(Into::into)
+  }
+
+  /// Subscribe to a query (unrestricted).
+  pub async fn subscribe_unrestricted(
+    &self,
+    query: EngineQuery,
+    subscriber: std::sync::Arc<dyn Subscriber>,
+  ) -> Result<SubscriptionId, DatabaseError> {
+    self.subscribe(query, subscriber, None).await
+  }
+
+  /// Unsubscribe from a subscription.
+  pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), DatabaseError> {
+    self.engine.unsubscribe(id).await.map_err(Into::into)
+  }
+
+  /// Execute a query with scope.
+  pub async fn execute_with_scope(
+    &self,
+    query: EngineQuery,
+    scope: &SyncScope,
+  ) -> Result<EngineResult, DatabaseError> {
+    self
+      .engine
+      .execute_with_scope(query, scope)
+      .await
+      .map_err(Into::into)
   }
 }
 

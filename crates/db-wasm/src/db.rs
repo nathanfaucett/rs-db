@@ -1,6 +1,7 @@
-use db_engine::{EngineQuery, EngineResult, IndexSchema, TableSchema};
+use db_engine::{EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, TableSchema};
 use db_facade::Database;
 use db_in_memory::InMemoryNamedBTree;
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use crate::pluggable_store::PluggableBackendStore;
@@ -81,5 +82,38 @@ impl BrowserDatabase {
     predicate: Option<db_engine::QualifiedPredicate>,
   ) -> EngineQuery {
     EngineQuery::select_simple(table, projection, predicate)
+  }
+
+  #[wasm_bindgen(js_name = subscribe)]
+  pub async fn subscribe(
+    &self,
+    query: EngineQuery,
+    callback: js_sys::Function,
+  ) -> Result<SubscriptionId, JsValue> {
+    let callback = WasmSubscriber { callback };
+    let sub_id = self
+      .inner
+      .subscribe(query, Arc::new(callback), None)
+      .await
+      .map_err(to_js_error)?;
+    Ok(sub_id)
+  }
+
+  #[wasm_bindgen(js_name = unsubscribe)]
+  pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), JsValue> {
+    self.inner.unsubscribe(id).await.map_err(to_js_error)
+  }
+}
+
+/// WASM subscriber wrapper that bridges Rust callbacks to JS functions
+struct WasmSubscriber {
+  callback: js_sys::Function,
+}
+
+impl Subscriber for WasmSubscriber {
+  fn on_results(&self, results: EngineResult) {
+    let this = JsValue::null();
+    let results_js: JsValue = results.into();
+    let _ = self.callback.call1(&this, &results_js);
   }
 }

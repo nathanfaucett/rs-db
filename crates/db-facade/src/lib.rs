@@ -12,3 +12,6 @@ pub use types::RedbEngineStore;
 #[cfg(feature = "automerge")]
 pub use types::{AutomergeSyncMetrics, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec};
 pub use types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
+
+// Re-export subscription types from db_engine for convenience
+pub use db_engine::{Subscriber, SubscriptionId, SyncScope};
