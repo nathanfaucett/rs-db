@@ -14,26 +14,33 @@ use super::select_orchestrator::{
   SelectStageOutput, execute_select_pipeline, finalize_grouped_result,
 };
 use super::transaction_lifecycle::TransactionLifecycle;
+use crate::ChangeListenerRegistry;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) struct EngineKernel<S> {
   store: S,
   catalog: EngineCatalog,
+  change_listener_registry: Arc<ChangeListenerRegistry>,
 }
 
 impl<S> EngineKernel<S>
 where
   S: EngineStore,
 {
-  pub(crate) fn new(store: S) -> Self {
+  pub(crate) fn new(store: S, change_listener_registry: Arc<ChangeListenerRegistry>) -> Self {
     Self {
       store,
       catalog: EngineCatalog::new(),
+      change_listener_registry,
     }
   }
 
-  pub(crate) async fn open(store: S) -> Result<Self, EngineError> {
-    let mut kernel = Self::new(store);
+  pub(crate) async fn open(
+    store: S,
+    change_listener_registry: Arc<ChangeListenerRegistry>,
+  ) -> Result<Self, EngineError> {
+    let mut kernel = Self::new(store, change_listener_registry);
     kernel.load_schema().await?;
     Ok(kernel)
   }
@@ -71,6 +78,7 @@ where
       store: &self.store,
       catalog: &self.catalog,
       lifecycle: TransactionLifecycle::new(),
+      change_listener_registry: self.change_listener_registry.clone(),
     }
   }
 

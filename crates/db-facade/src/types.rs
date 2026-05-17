@@ -77,7 +77,7 @@ pub struct Database<S>
 where
   S: FacadeStore,
 {
-  pub(crate) engine: EngineDatabase<S>,
+  pub engine: EngineDatabase<S>,
 }
 
 /// Transaction wrapper delegating to EngineTransaction.

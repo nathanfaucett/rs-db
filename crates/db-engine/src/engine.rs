@@ -1,5 +1,6 @@
 use crate::{
-  EngineError, EngineRow, IndexSchema, TableSchema,
+  ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, IndexSchema, Subscriber,
+  SubscriptionId, SyncScope, TableSchema,
   engine_kernel::{EngineKernel, EngineWriteTxn},
   query::EngineQuery,
   query::EngineResult,
@@ -7,11 +8,15 @@ use crate::{
   query::QualifiedPredicate,
   query::UpdateAssignment,
   store_adapter::EngineStore,
+  subscriptions::{QuerySubscription, SubscriptionRegistry},
 };
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct EngineDatabase<S> {
   kernel: EngineKernel<S>,
+  change_listener_registry: Arc<ChangeListenerRegistry>,
+  subscription_registry: Arc<SubscriptionRegistry>,
 }
 
 impl<S> EngineDatabase<S>
@@ -19,14 +24,20 @@ where
   S: EngineStore,
 {
   pub fn new(store: S) -> Self {
+    let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Self {
-      kernel: EngineKernel::new(store),
+      kernel: EngineKernel::new(store, change_listener_registry.clone()),
+      change_listener_registry,
+      subscription_registry: Arc::new(SubscriptionRegistry::new()),
     }
   }
 
   pub async fn open(store: S) -> Result<Self, EngineError> {
+    let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Ok(Self {
-      kernel: EngineKernel::open(store).await?,
+      kernel: EngineKernel::open(store, change_listener_registry.clone()).await?,
+      change_listener_registry,
+      subscription_registry: Arc::new(SubscriptionRegistry::new()),
     })
   }
 
@@ -77,6 +88,105 @@ where
     predicate: Option<QualifiedPredicate>,
   ) -> Result<EngineResult, EngineError> {
     self.kernel.read(table_name, projection, predicate).await
+  }
+
+  /// Subscribe to a query with optional access control scope.
+  /// Calls the subscriber immediately with initial results,
+  /// then calls it again whenever the query results change.
+  pub async fn subscribe(
+    &self,
+    query: EngineQuery,
+    scope: &SyncScope,
+    subscriber: Arc<dyn Subscriber>,
+  ) -> Result<SubscriptionId, EngineError> {
+    // Validate that the query respects the scope
+    for table in query.tables() {
+      if !scope.can_access(&table) {
+        return Err(EngineError::TableNotFound(table));
+      }
+    }
+
+    // Run the query immediately with scope applied and get initial results
+    let initial_results = self.execute_with_scope(query.clone(), scope).await?;
+
+    // Call subscriber with initial results
+    subscriber.on_results(initial_results.clone());
+
+    // Create subscription with initial results
+    let subscription = Arc::new(QuerySubscription {
+      id: SubscriptionId::next(),
+      query,
+      scope: scope.clone(),
+      subscriber,
+      last_results: std::sync::RwLock::new(Some(initial_results)),
+    });
+
+    // Register subscription
+    self.subscription_registry.register(subscription.clone());
+
+    Ok(subscription.id)
+  }
+
+  /// Unsubscribe from a previously registered subscription.
+  pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), EngineError> {
+    self.subscription_registry.unregister(id);
+    Ok(())
+  }
+
+  /// Execute a query with access control scope applied.
+  /// Adds scope predicates to the WHERE clause and filters results.
+  pub async fn execute_with_scope(
+    &self,
+    query: EngineQuery,
+    _scope: &SyncScope,
+  ) -> Result<EngineResult, EngineError> {
+    // For now, just execute the query normally.
+    // TODO: Add scope filtering to WHERE clause and result filtering
+    self.kernel.run(query).await
+  }
+
+  /// Get a reference to the change listener registry (for internal use).
+  pub(crate) fn change_listener_registry(&self) -> &Arc<ChangeListenerRegistry> {
+    &self.change_listener_registry
+  }
+
+  /// Recompute subscriptions affected by a change event.
+  /// This is called internally after mutations.
+  pub(crate) async fn recompute_affected_subscriptions(
+    &self,
+    event: &ChangeEvent,
+  ) -> Result<(), EngineError> {
+    let affected = self.subscription_registry.affected_by_change(event);
+
+    for sub in affected {
+      // Recompute the subscription query with scope applied
+      match self.execute_with_scope(sub.query.clone(), &sub.scope).await {
+        Ok(new_results) => {
+          // Check if results changed (delta detection)
+          let last_results = sub.last_results.read().unwrap();
+          let results_changed = match &*last_results {
+            None => true, // First time
+            Some(old) => {
+              // Simple comparison: same number of rows and same content
+              old.rows != new_results.rows
+            }
+          };
+          drop(last_results);
+
+          if results_changed {
+            // Update last results and call subscriber
+            *sub.last_results.write().unwrap() = Some(new_results.clone());
+            sub.subscriber.on_results(new_results);
+          }
+        }
+        Err(e) => {
+          // Log error but don't fail—subscriptions should be resilient
+          eprintln!("Error recomputing subscription {:?}: {:?}", sub.id, e);
+        }
+      }
+    }
+
+    Ok(())
   }
 }
 

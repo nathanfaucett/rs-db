@@ -10,11 +10,12 @@ use crate::store_adapter::{
   delete_row, find_conflicting_index_entry,
 };
 use crate::{
-  EngineError, EngineRow, EngineValue, IndexSchema, PrimaryKey, query::JoinClause,
-  query::QualifiedColumn, query::QualifiedPredicate, query::UpdateAssignment,
-  query::UpdateValueExpr,
+  ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, EngineValue, IndexSchema,
+  PrimaryKey, query::JoinClause, query::QualifiedColumn, query::QualifiedPredicate,
+  query::UpdateAssignment, query::UpdateValueExpr,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 async fn ensure_indexes_unique<TX>(
   tx: &mut TX,
@@ -63,6 +64,7 @@ where
   pub(crate) store: &'db S,
   pub(crate) catalog: &'db EngineCatalog,
   pub(crate) lifecycle: TransactionLifecycle<S::Transaction>,
+  pub(crate) change_listener_registry: Arc<ChangeListenerRegistry>,
 }
 
 impl<'db, S> EngineWriteTxn<'db, S>
@@ -86,6 +88,7 @@ where
     table.validate_row(&row)?;
     let pk = table.primary_key(&row)?;
     let indexes = self.catalog.indexes_for_table(table_name);
+    let listener_registry = self.change_listener_registry.clone();
 
     let tx = self.transaction().await?;
     if tx.get_table_row(table_name, &pk).await?.is_some() {
@@ -98,6 +101,13 @@ where
 
     insert_all_index_entries(tx, &indexes, &row, &pk).await?;
 
+    // Emit change event
+    listener_registry.emit(ChangeEvent::RowInserted {
+      table: table_name.to_string(),
+      pk,
+      row,
+    });
+
     Ok(())
   }
 
@@ -109,6 +119,7 @@ where
   ) -> Result<Vec<EngineRow>, EngineError> {
     self.catalog.table(table_name)?;
     let indexes = self.catalog.indexes_for_table(table_name);
+    let listener_registry = self.change_listener_registry.clone();
     let tx = self.transaction().await?;
     let rows = collect_table_rows(tx, table_name, predicate).await?;
     let mut returning_rows: Vec<EngineRow> = Vec::new();
@@ -118,6 +129,13 @@ where
         returning_rows.push(Self::project_returning_row(table_name, &row, projection)?);
       }
       delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
+
+      // Emit change event
+      listener_registry.emit(ChangeEvent::RowDeleted {
+        table: table_name.to_string(),
+        pk: primary_key,
+        row,
+      });
     }
 
     Ok(returning_rows)
@@ -138,6 +156,7 @@ where
     }
 
     let indexes = self.catalog.indexes_for_table(table_name);
+    let listener_registry = self.change_listener_registry.clone();
     let tx = self.transaction().await?;
 
     let rows = if joins.is_empty() && from_tables.is_empty() {
@@ -159,9 +178,9 @@ where
     };
 
     let mut returning_rows: Vec<EngineRow> = Vec::new();
-    for (old_pk, row, joined_state) in rows {
+    for (old_pk, old_row, joined_state) in rows {
       let updated_row =
-        Self::apply_assignments(&row, &assignments, table_name, joined_state.as_ref())?;
+        Self::apply_assignments(&old_row, &assignments, table_name, joined_state.as_ref())?;
       table.validate_row(&updated_row)?;
       let new_pk = table.primary_key(&updated_row)?;
 
@@ -169,13 +188,21 @@ where
         return Err(EngineError::DuplicatePrimaryKey(new_pk));
       }
 
-      delete_row(tx, table_name, &old_pk, &row, &indexes).await?;
+      delete_row(tx, table_name, &old_pk, &old_row, &indexes).await?;
       ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
 
       tx.insert_table_row(table_name, new_pk, updated_row.clone())
         .await?;
 
       insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
+
+      // Emit change event
+      listener_registry.emit(ChangeEvent::RowUpdated {
+        table: table_name.to_string(),
+        pk: new_pk,
+        old_row,
+        new_row: updated_row.clone(),
+      });
 
       if let Some(projection) = returning.as_ref() {
         returning_rows.push(Self::project_returning_row(

@@ -278,6 +278,27 @@ impl EngineQuery {
       options: Box::new(SelectOptions::default()),
     }
   }
+
+  /// Get all tables referenced by this query.
+  pub fn tables(&self) -> Vec<String> {
+    match self {
+      EngineQuery::Select { table, options, .. } => {
+        let mut tables = vec![table.clone()];
+        for join in &options.joins {
+          if !tables.contains(&join.left_table) {
+            tables.push(join.left_table.clone());
+          }
+          if !tables.contains(&join.right_table) {
+            tables.push(join.right_table.clone());
+          }
+        }
+        tables
+      }
+      EngineQuery::Insert { table, .. }
+      | EngineQuery::Update { table, .. }
+      | EngineQuery::Delete { table, .. } => vec![table.clone()],
+    }
+  }
 }
 
 #[cfg(test)]
