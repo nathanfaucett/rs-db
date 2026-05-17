@@ -5,6 +5,7 @@ use std::sync::RwLock;
 /// A change event emitted when data in the engine mutates.
 /// Subscribers listen to these events and recompute affected queries.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ChangeEvent {
   /// A row was inserted into a table.
   RowInserted {
@@ -77,6 +78,7 @@ impl ChangeListenerRegistry {
   }
 
   /// Register a change listener.
+  #[allow(dead_code)]
   pub(crate) fn register(&self, listener: Arc<dyn ChangeListener>) {
     let mut listeners = self.listeners.write().unwrap();
     listeners.push(listener);
@@ -91,6 +93,7 @@ impl ChangeListenerRegistry {
   }
 
   /// Clear all listeners.
+  #[allow(dead_code)]
   pub(crate) fn clear(&self) {
     let mut listeners = self.listeners.write().unwrap();
     listeners.clear();

@@ -48,13 +48,6 @@ impl std::fmt::Debug for QuerySubscription {
 }
 
 impl QuerySubscription {
-  /// Check if this subscription is affected by a change event.
-  pub(crate) fn is_affected_by(&self, event: &ChangeEvent) -> bool {
-    let table = event.table();
-    // Check if the query references this table
-    self.query.tables().contains(&table.to_string())
-  }
-
   /// Check if the change event is visible to this subscription's scope.
   pub(crate) fn matches_scope(&self, event: &ChangeEvent) -> bool {
     self.scope.matches(event)
@@ -126,31 +119,9 @@ impl SubscriptionRegistry {
     }
   }
 
-  /// Update the last results for a subscription.
-  pub(crate) fn update_last_results(&self, id: SubscriptionId, results: EngineResult) {
+  pub(crate) fn get_subscription(&self, id: SubscriptionId) -> Option<Arc<QuerySubscription>> {
     let subs = self.subscriptions.read().unwrap();
-    if let Some(sub) = subs.get(&id) {
-      *sub.last_results.write().unwrap() = Some(results);
-    }
-  }
-
-  /// Get the last results for a subscription.
-  pub(crate) fn get_last_results(&self, id: SubscriptionId) -> Option<EngineResult> {
-    let subs = self.subscriptions.read().unwrap();
-    if let Some(sub) = subs.get(&id) {
-      sub.last_results.read().unwrap().clone()
-    } else {
-      None
-    }
-  }
-
-  /// Clear all subscriptions.
-  pub(crate) fn clear(&self) {
-    let mut subs = self.subscriptions.write().unwrap();
-    subs.clear();
-
-    let mut table_map = self.table_to_subscriptions.write().unwrap();
-    table_map.clear();
+    subs.get(&id).cloned()
   }
 
   /// Collect all subscriptions affected by a change event.

@@ -65,6 +65,7 @@ where
   pub(crate) catalog: &'db EngineCatalog,
   pub(crate) lifecycle: TransactionLifecycle<S::Transaction>,
   pub(crate) change_listener_registry: Arc<ChangeListenerRegistry>,
+  pub(crate) pending_events: Vec<ChangeEvent>,
 }
 
 impl<'db, S> EngineWriteTxn<'db, S>
@@ -88,7 +89,11 @@ where
     table.validate_row(&row)?;
     let pk = table.primary_key(&row)?;
     let indexes = self.catalog.indexes_for_table(table_name);
-    let listener_registry = self.change_listener_registry.clone();
+    let event = ChangeEvent::RowInserted {
+      table: table_name.to_string(),
+      pk,
+      row: row.clone(),
+    };
 
     let tx = self.transaction().await?;
     if tx.get_table_row(table_name, &pk).await?.is_some() {
@@ -101,12 +106,7 @@ where
 
     insert_all_index_entries(tx, &indexes, &row, &pk).await?;
 
-    // Emit change event
-    listener_registry.emit(ChangeEvent::RowInserted {
-      table: table_name.to_string(),
-      pk,
-      row,
-    });
+    self.pending_events.push(event);
 
     Ok(())
   }
@@ -119,24 +119,28 @@ where
   ) -> Result<Vec<EngineRow>, EngineError> {
     self.catalog.table(table_name)?;
     let indexes = self.catalog.indexes_for_table(table_name);
-    let listener_registry = self.change_listener_registry.clone();
-    let tx = self.transaction().await?;
-    let rows = collect_table_rows(tx, table_name, predicate).await?;
+    let mut pending_events = Vec::new();
     let mut returning_rows: Vec<EngineRow> = Vec::new();
 
-    for (primary_key, row) in rows {
-      if let Some(projection) = returning.as_ref() {
-        returning_rows.push(Self::project_returning_row(table_name, &row, projection)?);
-      }
-      delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
+    {
+      let tx = self.transaction().await?;
+      let rows = collect_table_rows(tx, table_name, predicate).await?;
 
-      // Emit change event
-      listener_registry.emit(ChangeEvent::RowDeleted {
-        table: table_name.to_string(),
-        pk: primary_key,
-        row,
-      });
+      for (primary_key, row) in rows {
+        if let Some(projection) = returning.as_ref() {
+          returning_rows.push(Self::project_returning_row(table_name, &row, projection)?);
+        }
+        delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
+
+        pending_events.push(ChangeEvent::RowDeleted {
+          table: table_name.to_string(),
+          pk: primary_key,
+          row,
+        });
+      }
     }
+
+    self.pending_events.extend(pending_events);
 
     Ok(returning_rows)
   }
@@ -156,62 +160,65 @@ where
     }
 
     let indexes = self.catalog.indexes_for_table(table_name);
-    let listener_registry = self.change_listener_registry.clone();
-    let tx = self.transaction().await?;
-
-    let rows = if joins.is_empty() && from_tables.is_empty() {
-      collect_table_rows(tx, table_name, predicate)
-        .await?
-        .into_iter()
-        .map(|(pk, row)| (pk, row, None))
-        .collect::<Vec<_>>()
-    } else {
-      Self::collect_join_update_rows(
-        tx,
-        &table,
-        table_name,
-        &joins,
-        &from_tables,
-        predicate.as_ref(),
-      )
-      .await?
-    };
-
+    let mut pending_events = Vec::new();
     let mut returning_rows: Vec<EngineRow> = Vec::new();
-    for (old_pk, old_row, joined_state) in rows {
-      let updated_row =
-        Self::apply_assignments(&old_row, &assignments, table_name, joined_state.as_ref())?;
-      table.validate_row(&updated_row)?;
-      let new_pk = table.primary_key(&updated_row)?;
 
-      if new_pk != old_pk && tx.get_table_row(table_name, &new_pk).await?.is_some() {
-        return Err(EngineError::DuplicatePrimaryKey(new_pk));
-      }
-
-      delete_row(tx, table_name, &old_pk, &old_row, &indexes).await?;
-      ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
-
-      tx.insert_table_row(table_name, new_pk, updated_row.clone())
-        .await?;
-
-      insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
-
-      // Emit change event
-      listener_registry.emit(ChangeEvent::RowUpdated {
-        table: table_name.to_string(),
-        pk: new_pk,
-        old_row,
-        new_row: updated_row.clone(),
-      });
-
-      if let Some(projection) = returning.as_ref() {
-        returning_rows.push(Self::project_returning_row(
+    {
+      let tx = self.transaction().await?;
+      let rows = if joins.is_empty() && from_tables.is_empty() {
+        collect_table_rows(tx, table_name, predicate)
+          .await?
+          .into_iter()
+          .map(|(pk, row)| (pk, row, None))
+          .collect::<Vec<_>>()
+      } else {
+        Self::collect_join_update_rows(
+          tx,
+          &table,
           table_name,
-          &updated_row,
-          projection,
-        )?);
+          &joins,
+          &from_tables,
+          predicate.as_ref(),
+        )
+        .await?
+      };
+
+      for (old_pk, old_row, joined_state) in rows {
+        let updated_row =
+          Self::apply_assignments(&old_row, &assignments, table_name, joined_state.as_ref())?;
+        table.validate_row(&updated_row)?;
+        let new_pk = table.primary_key(&updated_row)?;
+
+        if new_pk != old_pk && tx.get_table_row(table_name, &new_pk).await?.is_some() {
+          return Err(EngineError::DuplicatePrimaryKey(new_pk));
+        }
+
+        delete_row(tx, table_name, &old_pk, &old_row, &indexes).await?;
+        ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
+
+        tx.insert_table_row(table_name, new_pk, updated_row.clone())
+          .await?;
+
+        insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
+
+        pending_events.push(ChangeEvent::RowUpdated {
+          table: table_name.to_string(),
+          pk: new_pk,
+          old_row,
+          new_row: updated_row.clone(),
+        });
+
+        if let Some(projection) = returning.as_ref() {
+          returning_rows.push(Self::project_returning_row(
+            table_name,
+            &updated_row,
+            projection,
+          )?);
+        }
       }
     }
+
+    self.pending_events.extend(pending_events);
 
     Ok(returning_rows)
   }
@@ -439,11 +446,15 @@ where
     )
   }
 
-  pub(crate) async fn commit(mut self) -> Result<(), EngineError> {
+  pub(crate) async fn commit(mut self) -> Result<Vec<ChangeEvent>, EngineError> {
     if let Some(tx) = self.lifecycle.take_for_commit() {
       tx.commit().await?;
     }
-    Ok(())
+    let events = core::mem::take(&mut self.pending_events);
+    for event in &events {
+      self.change_listener_registry.emit(event.clone());
+    }
+    Ok(events)
   }
 
   pub(crate) async fn rollback(mut self) -> Result<(), EngineError> {

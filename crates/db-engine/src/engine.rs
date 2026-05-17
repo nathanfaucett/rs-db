@@ -8,14 +8,13 @@ use crate::{
   query::QualifiedPredicate,
   query::UpdateAssignment,
   store_adapter::EngineStore,
-  subscriptions::{QuerySubscription, SubscriptionRegistry},
+  subscriptions::{QuerySubscription, SubscriptionBatch, SubscriptionRegistry},
 };
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct EngineDatabase<S> {
   kernel: EngineKernel<S>,
-  change_listener_registry: Arc<ChangeListenerRegistry>,
   subscription_registry: Arc<SubscriptionRegistry>,
 }
 
@@ -27,7 +26,6 @@ where
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Self {
       kernel: EngineKernel::new(store, change_listener_registry.clone()),
-      change_listener_registry,
       subscription_registry: Arc::new(SubscriptionRegistry::new()),
     }
   }
@@ -36,7 +34,6 @@ where
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Ok(Self {
       kernel: EngineKernel::open(store, change_listener_registry.clone()).await?,
-      change_listener_registry,
       subscription_registry: Arc::new(SubscriptionRegistry::new()),
     })
   }
@@ -69,6 +66,7 @@ where
 
   pub fn transaction(&self) -> EngineTransaction<'_, S> {
     EngineTransaction {
+      db: self,
       inner: self.kernel.writer(),
     }
   }
@@ -78,7 +76,72 @@ where
   }
 
   pub async fn execute(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
-    self.kernel.run(query).await
+    match query {
+      EngineQuery::Insert { table, row } => {
+        let mut writer = self.kernel.writer();
+        match writer.insert(&table, row).await {
+          Ok(()) => {
+            let events = writer.commit().await?;
+            self.recompute_batched_subscriptions(&events).await?;
+            Ok(EngineResult::default())
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
+      }
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      } => {
+        let mut writer = self.kernel.writer();
+        match writer
+          .update(
+            &table,
+            assignments,
+            predicate,
+            joins,
+            from_tables,
+            returning,
+          )
+          .await
+        {
+          Ok(rows) => {
+            let events = writer.commit().await?;
+            self.recompute_batched_subscriptions(&events).await?;
+            Ok(EngineResult::new(rows))
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
+      }
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => {
+        let mut writer = self.kernel.writer();
+        match writer.delete(&table, predicate, returning).await {
+          Ok(rows) => {
+            let events = writer.commit().await?;
+            self.recompute_batched_subscriptions(&events).await?;
+            Ok(EngineResult::new(rows))
+          }
+          Err(error) => {
+            let _ = writer.rollback().await;
+            Err(error)
+          }
+        }
+      }
+      other => self.kernel.run(other).await,
+    }
   }
 
   pub async fn select(
@@ -145,33 +208,33 @@ where
     self.kernel.run(query).await
   }
 
-  /// Get a reference to the change listener registry (for internal use).
-  pub(crate) fn change_listener_registry(&self) -> &Arc<ChangeListenerRegistry> {
-    &self.change_listener_registry
-  }
-
-  /// Recompute subscriptions affected by a change event.
-  /// This is called internally after mutations.
-  pub(crate) async fn recompute_affected_subscriptions(
+  pub(crate) async fn recompute_batched_subscriptions(
     &self,
-    event: &ChangeEvent,
+    events: &[ChangeEvent],
   ) -> Result<(), EngineError> {
-    let affected = self.subscription_registry.affected_by_change(event);
+    let batch = SubscriptionBatch::new();
+    for event in events {
+      for sub in self.subscription_registry.affected_by_change(event) {
+        batch.invalidate(sub.id);
+      }
+    }
 
-    for sub in affected {
+    for id in batch.take_invalidated() {
+      let Some(sub) = self.subscription_registry.get_subscription(id) else {
+        continue;
+      };
+
       // Recompute the subscription query with scope applied
       match self.execute_with_scope(sub.query.clone(), &sub.scope).await {
         Ok(new_results) => {
           // Check if results changed (delta detection)
-          let last_results = sub.last_results.read().unwrap();
-          let results_changed = match &*last_results {
+          let results_changed = match &*sub.last_results.read().unwrap() {
             None => true, // First time
             Some(old) => {
               // Simple comparison: same number of rows and same content
               old.rows != new_results.rows
             }
           };
-          drop(last_results);
 
           if results_changed {
             // Update last results and call subscriber
@@ -194,6 +257,7 @@ pub struct EngineTransaction<'db, S>
 where
   S: EngineStore,
 {
+  db: &'db EngineDatabase<S>,
   inner: EngineWriteTxn<'db, S>,
 }
 
@@ -297,7 +361,8 @@ where
   }
 
   pub async fn commit(self) -> Result<(), EngineError> {
-    self.inner.commit().await
+    let events = self.inner.commit().await?;
+    self.db.recompute_batched_subscriptions(&events).await
   }
 
   pub async fn rollback(self) -> Result<(), EngineError> {

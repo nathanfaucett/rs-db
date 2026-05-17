@@ -79,6 +79,7 @@ where
       catalog: &self.catalog,
       lifecycle: TransactionLifecycle::new(),
       change_listener_registry: self.change_listener_registry.clone(),
+      pending_events: Vec::new(),
     }
   }
 
@@ -145,7 +146,7 @@ where
         let mut writer = self.writer();
         match writer.insert(&table, row).await {
           Ok(()) => {
-            writer.commit().await?;
+            let _ = writer.commit().await?;
             Ok(EngineResult::default())
           }
           Err(error) => {
@@ -186,7 +187,7 @@ where
           .await
         {
           Ok(rows) => {
-            writer.commit().await?;
+            let _ = writer.commit().await?;
             Ok(EngineResult::new(rows))
           }
           Err(error) => {
@@ -203,7 +204,7 @@ where
         let mut writer = self.writer();
         match writer.delete(&table, predicate, returning).await {
           Ok(rows) => {
-            writer.commit().await?;
+            let _ = writer.commit().await?;
             Ok(EngineResult::new(rows))
           }
           Err(error) => {

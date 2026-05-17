@@ -59,7 +59,58 @@ mod tests {
       assert_eq!(subscriber.get_call_count(), 1);
       assert_eq!(subscriber.get_last_row_count(), 0);
 
+      db.execute_sql(
+        "INSERT INTO events (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'created');",
+      )
+      .await
+      .expect("insert event");
+
+      assert_eq!(subscriber.get_call_count(), 2);
+      assert_eq!(subscriber.get_last_row_count(), 1);
+
       println!("✓ Facade layer subscriptions work");
+    });
+  }
+
+  #[test]
+  fn test_facade_subscription_batches_multi_row_update() {
+    block_on(async {
+      let mut db = Database::open_in_memory().await.expect("open db");
+
+      db.execute_sql("CREATE TABLE events (id UUID PRIMARY KEY, name TEXT);")
+        .await
+        .expect("create table");
+
+      db.execute_sql(
+        "INSERT INTO events (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'one');",
+      )
+      .await
+      .expect("insert first row");
+      db.execute_sql(
+        "INSERT INTO events (id, name) VALUES ('00000000-0000-0000-0000-000000000002'::uuid, 'two');",
+      )
+      .await
+      .expect("insert second row");
+
+      let subscriber = CountingSubscriber::new();
+      let subscriber_arc = Arc::new(subscriber.clone());
+
+      let query = EngineQuery::select_simple("events".to_string(), vec![0, 1], None);
+      db.subscribe(query, subscriber_arc.clone(), None)
+        .await
+        .expect("subscribe via facade");
+
+      assert_eq!(subscriber.get_call_count(), 1);
+      assert_eq!(subscriber.get_last_row_count(), 2);
+
+      db.execute_sql("UPDATE events SET name = 'updated';")
+        .await
+        .expect("update both rows in one commit");
+
+      assert_eq!(subscriber.get_call_count(), 2);
+      assert_eq!(subscriber.get_last_row_count(), 2);
+
+      println!("✓ Facade subscription batching works");
     });
   }
 
