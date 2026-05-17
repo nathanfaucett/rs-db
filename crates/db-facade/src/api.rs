@@ -311,12 +311,32 @@ where
     table_name: &str,
   ) -> Result<Vec<T>, DatabaseError> {
     let result = self.execute_query(query).await?;
+    if !result.columns.is_empty() {
+      return result
+        .into_typed_named::<T>()
+        .map_err(|e| DatabaseError::Other(e.to_string()));
+    }
+
     let schema = self
       .engine
       .describe_table(table_name)
       .ok_or_else(|| DatabaseError::Other(format!("Table '{}' not found", table_name)))?;
     result
       .into_typed::<T>(&schema)
+      .map_err(|e| DatabaseError::Other(e.to_string()))
+  }
+
+  /// Execute an `EngineQuery` and deserialize results using result column metadata.
+  ///
+  /// This is useful for projections, joins, and grouped queries whose output columns
+  /// do not directly align to a single table schema.
+  pub async fn execute_query_typed_named<T: FromRow>(
+    &self,
+    query: EngineQuery,
+  ) -> Result<Vec<T>, DatabaseError> {
+    let result = self.execute_query(query).await?;
+    result
+      .into_typed_named::<T>()
       .map_err(|e| DatabaseError::Other(e.to_string()))
   }
 

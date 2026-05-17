@@ -44,9 +44,7 @@ mod tests {
       let query_sql = "SELECT id, name FROM users;";
       let result = db.execute_sql(query_sql).await.expect("execute query");
 
-      let schema = db.engine.describe_table("users").expect("get schema");
-
-      let users: Vec<User> = result.into_typed::<User>(&schema).expect("deserialize");
+      let users: Vec<User> = result.into_typed_named::<User>().expect("deserialize");
 
       assert_eq!(users.len(), 2);
       assert_eq!(users[0].name, "Alice");
@@ -82,10 +80,8 @@ mod tests {
         .await
         .expect("execute query");
 
-      let schema = db.engine.describe_table("users").expect("get schema");
-
       let users: Vec<UserWithAge> = result
-        .into_typed::<UserWithAge>(&schema)
+        .into_typed_named::<UserWithAge>()
         .expect("deserialize");
 
       assert_eq!(users.len(), 2);

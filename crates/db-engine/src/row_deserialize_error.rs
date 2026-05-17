@@ -3,12 +3,7 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use core::fmt;
-
-use db_types::{EngineType, EngineValue};
 
 /// Error type for row deserialization failures.
 ///
@@ -114,40 +109,5 @@ impl RowDeserializeError {
     RowDeserializeError::SchemaError {
       message: message.into(),
     }
-  }
-}
-
-/// Helper to create a descriptive type label for an EngineValue
-pub(crate) fn value_type_label(value: &EngineValue) -> String {
-  match value {
-    EngineValue::Integer(_) => "integer".to_string(),
-    EngineValue::Float(_) => "float".to_string(),
-    EngineValue::Text(_) => "text".to_string(),
-    EngineValue::Uuid(_) => "uuid".to_string(),
-    EngineValue::Blob(_) => "blob".to_string(),
-    EngineValue::Null => "null".to_string(),
-  }
-}
-
-/// Helper to create a descriptive value label for error messages
-pub(crate) fn value_label(value: &EngineValue) -> String {
-  match value {
-    EngineValue::Integer(i) => format!("integer({})", i),
-    EngineValue::Float(f) => format!("float({})", f),
-    EngineValue::Text(s) => format!("text(\"{}\")", s),
-    EngineValue::Uuid(_) => "uuid(...)".to_string(),
-    EngineValue::Blob(_) => "blob(...)".to_string(),
-    EngineValue::Null => "NULL".to_string(),
-  }
-}
-
-/// Helper to create a descriptive type label for an EngineType
-pub(crate) fn engine_type_label(engine_type: &EngineType) -> String {
-  match engine_type {
-    EngineType::Integer => "integer".to_string(),
-    EngineType::Float => "float".to_string(),
-    EngineType::Text => "text".to_string(),
-    EngineType::Uuid => "uuid".to_string(),
-    EngineType::Blob => "blob".to_string(),
   }
 }

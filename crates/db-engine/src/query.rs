@@ -3,6 +3,16 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(feature = "std")]
+use std::string::String;
+
 use db_types::TableSchema;
 
 use crate::{EngineRow, EngineValue, FromRow, RowDeserializeError};
@@ -248,6 +258,32 @@ pub enum EngineQuery {
   },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub struct ResultColumn {
+  pub name: String,
+  pub source_table: Option<String>,
+  pub source_column_index: Option<usize>,
+}
+
+impl ResultColumn {
+  pub fn new(
+    name: impl Into<String>,
+    source_table: Option<String>,
+    source_column_index: Option<usize>,
+  ) -> Self {
+    Self {
+      name: name.into(),
+      source_table,
+      source_column_index,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(
   feature = "wasm",
@@ -256,11 +292,75 @@ pub enum EngineQuery {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct EngineResult {
   pub rows: Vec<EngineRow>,
+  pub columns: Vec<ResultColumn>,
 }
 
 impl EngineResult {
   pub fn new(rows: Vec<EngineRow>) -> Self {
-    Self { rows }
+    Self {
+      rows,
+      columns: Vec::new(),
+    }
+  }
+
+  pub fn new_with_columns(rows: Vec<EngineRow>, columns: Vec<ResultColumn>) -> Self {
+    Self { rows, columns }
+  }
+
+  pub fn named_rows(&self) -> Result<Vec<BTreeMap<String, EngineValue>>, RowDeserializeError> {
+    if self.columns.is_empty() {
+      return Err(RowDeserializeError::schema_error(
+        "result has no column metadata",
+      ));
+    }
+
+    self
+      .rows
+      .iter()
+      .map(|row| {
+        if row.len() != self.columns.len() {
+          return Err(RowDeserializeError::schema_error(format!(
+            "row has {} values but result has {} columns",
+            row.len(),
+            self.columns.len()
+          )));
+        }
+
+        let mut map = BTreeMap::new();
+        for (column, value) in self.columns.iter().zip(row.iter()) {
+          map.insert(column.name.clone(), value.clone());
+        }
+        Ok(map)
+      })
+      .collect()
+  }
+
+  pub fn into_typed_named<T: FromRow>(self) -> Result<Vec<T>, RowDeserializeError> {
+    if self.columns.is_empty() {
+      return Err(RowDeserializeError::schema_error(
+        "result has no column metadata",
+      ));
+    }
+
+    self
+      .rows
+      .into_iter()
+      .map(|row| T::from_named_row(&self.columns, &row))
+      .collect()
+  }
+
+  pub fn typed_rows_named<T: FromRow>(&self) -> Result<Vec<T>, RowDeserializeError> {
+    if self.columns.is_empty() {
+      return Err(RowDeserializeError::schema_error(
+        "result has no column metadata",
+      ));
+    }
+
+    self
+      .rows
+      .iter()
+      .map(|row| T::from_named_row(&self.columns, row))
+      .collect()
   }
 
   /// Deserialize all rows into typed structs using a table schema.

@@ -3,7 +3,7 @@ use std::future::Future;
 use crate::store_adapter::EngineStore;
 use crate::{
   EngineError, EngineResult,
-  query::{EngineQuery, QualifiedColumn, QualifiedPredicate, SelectOptions},
+  query::{EngineQuery, QualifiedColumn, QualifiedPredicate, ResultColumn, SelectOptions},
 };
 
 use super::join_builder::JoinedRowStates;
@@ -23,6 +23,7 @@ pub(crate) async fn execute_select_pipeline<S, F, Fut>(
   projection: &[QualifiedColumn],
   predicate: Option<QualifiedPredicate>,
   options: &SelectOptions,
+  output_columns: Vec<ResultColumn>,
   run_subquery: F,
 ) -> Result<SelectStageOutput, EngineError>
 where
@@ -48,7 +49,10 @@ where
     )
     .execute();
 
-    return Ok(SelectStageOutput::Final(EngineResult::new(out_rows)));
+    return Ok(SelectStageOutput::Final(EngineResult::new_with_columns(
+      out_rows,
+      output_columns,
+    )));
   }
 
   Ok(SelectStageOutput::Joined(partial_results))
@@ -57,6 +61,7 @@ where
 pub(crate) fn finalize_grouped_result(
   partial_results: JoinedRowStates,
   options: &SelectOptions,
+  output_columns: Vec<ResultColumn>,
 ) -> Result<EngineResult, EngineError> {
   let aggregator = Aggregator::new(
     options.group_by.clone(),
@@ -67,5 +72,8 @@ pub(crate) fn finalize_grouped_result(
     options.offset,
     partial_results,
   );
-  Ok(EngineResult::new(aggregator.execute()?))
+  Ok(EngineResult::new_with_columns(
+    aggregator.execute()?,
+    output_columns,
+  ))
 }

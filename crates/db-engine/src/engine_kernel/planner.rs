@@ -4,8 +4,8 @@ use crate::store_adapter::{
   EngineStore, collect_table_rows, lookup_index_row_pks, materialize_rows_by_primary_keys,
 };
 use crate::{
-  EngineError, IndexSchema, TableSchema, query::EngineQuery, query::EngineResult,
-  query::QualifiedColumn, query::QualifiedPredicate, query::SelectOptions,
+  EngineError, IndexSchema, TableSchema, query::Aggregate, query::EngineQuery, query::EngineResult,
+  query::QualifiedColumn, query::QualifiedPredicate, query::ResultColumn, query::SelectOptions,
 };
 
 use super::catalog::EngineCatalog;
@@ -28,6 +28,181 @@ impl<S> EngineKernel<S>
 where
   S: EngineStore,
 {
+  fn dedupe_result_column_names(columns: &mut [ResultColumn]) {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for column in columns.iter() {
+      *counts.entry(column.name.clone()).or_insert(0) += 1;
+    }
+
+    for column in columns.iter_mut() {
+      if counts.get(&column.name).copied().unwrap_or(0) > 1
+        && let Some(table) = &column.source_table
+      {
+        column.name = format!("{}.{}", table, column.name);
+      }
+    }
+
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for column in columns.iter_mut() {
+      let entry = seen.entry(column.name.clone()).or_insert(0);
+      if *entry > 0 {
+        column.name = format!("{}_{}", column.name, *entry + 1);
+      }
+      *entry += 1;
+    }
+  }
+
+  fn projection_columns_for_table(
+    &self,
+    table_name: &str,
+    projection: &[usize],
+  ) -> Result<Vec<ResultColumn>, EngineError> {
+    let schema = self.table(table_name)?;
+    let mut columns = Vec::new();
+
+    if projection.is_empty() {
+      for (column_index, column) in schema.columns.iter().enumerate() {
+        columns.push(ResultColumn::new(
+          column.name.clone(),
+          Some(table_name.to_string()),
+          Some(column_index),
+        ));
+      }
+    } else {
+      for column_index in projection {
+        let column = schema.columns.get(*column_index).ok_or_else(|| {
+          EngineError::SchemaMismatch(format!(
+            "projection index {} is out of bounds",
+            column_index
+          ))
+        })?;
+        columns.push(ResultColumn::new(
+          column.name.clone(),
+          Some(table_name.to_string()),
+          Some(*column_index),
+        ));
+      }
+    }
+
+    Self::dedupe_result_column_names(&mut columns);
+    Ok(columns)
+  }
+
+  fn projection_columns_for_qualified(
+    &self,
+    projection: &[QualifiedColumn],
+  ) -> Result<Vec<ResultColumn>, EngineError> {
+    let mut columns = Vec::with_capacity(projection.len());
+
+    for column_ref in projection {
+      let schema = self.table(&column_ref.table)?;
+      let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
+        EngineError::SchemaMismatch(format!(
+          "projection index {} is out of bounds for table {}",
+          column_ref.column_index, column_ref.table
+        ))
+      })?;
+      columns.push(ResultColumn::new(
+        column.name.clone(),
+        Some(column_ref.table.clone()),
+        Some(column_ref.column_index),
+      ));
+    }
+
+    Self::dedupe_result_column_names(&mut columns);
+    Ok(columns)
+  }
+
+  fn aggregate_label(aggregate: &Aggregate) -> String {
+    match aggregate {
+      Aggregate::Count(None) => "count_all".to_string(),
+      Aggregate::Count(Some(column)) => {
+        format!("count_{}_{}", column.table, column.column_index)
+      }
+      Aggregate::Sum(column) => format!("sum_{}_{}", column.table, column.column_index),
+      Aggregate::Min(column) => format!("min_{}_{}", column.table, column.column_index),
+      Aggregate::Max(column) => format!("max_{}_{}", column.table, column.column_index),
+      Aggregate::Avg(column) => format!("avg_{}_{}", column.table, column.column_index),
+    }
+  }
+
+  fn output_columns_for_select(
+    &self,
+    projection: &[QualifiedColumn],
+    options: &SelectOptions,
+  ) -> Result<Vec<ResultColumn>, EngineError> {
+    let needs_grouping = !options.group_by.is_empty() || !options.aggregates.is_empty();
+    if !needs_grouping {
+      return self.projection_columns_for_qualified(projection);
+    }
+
+    let mut columns = Vec::with_capacity(options.group_by.len() + options.aggregates.len());
+    for group_column in &options.group_by {
+      let schema = self.table(&group_column.table)?;
+      let column = schema
+        .columns
+        .get(group_column.column_index)
+        .ok_or_else(|| {
+          EngineError::SchemaMismatch(format!(
+            "GROUP BY index {} is out of bounds for table {}",
+            group_column.column_index, group_column.table
+          ))
+        })?;
+      columns.push(ResultColumn::new(
+        column.name.clone(),
+        Some(group_column.table.clone()),
+        Some(group_column.column_index),
+      ));
+    }
+
+    for aggregate in &options.aggregates {
+      columns.push(ResultColumn::new(
+        Self::aggregate_label(aggregate),
+        None,
+        None,
+      ));
+    }
+
+    Self::dedupe_result_column_names(&mut columns);
+    Ok(columns)
+  }
+
+  fn output_columns_for_returning(
+    &self,
+    table_name: &str,
+    returning: &[QualifiedColumn],
+  ) -> Result<Vec<ResultColumn>, EngineError> {
+    let schema = self.table(table_name)?;
+    let mut columns = Vec::with_capacity(returning.len());
+
+    for column_ref in returning {
+      if column_ref.table != table_name {
+        return Err(EngineError::SchemaMismatch(format!(
+          "RETURNING column {} must reference target table {}",
+          column_ref.table, table_name
+        )));
+      }
+
+      let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
+        EngineError::SchemaMismatch(format!(
+          "RETURNING index {} is out of bounds for table {}",
+          column_ref.column_index, table_name
+        ))
+      })?;
+
+      columns.push(ResultColumn::new(
+        column.name.clone(),
+        Some(table_name.to_string()),
+        Some(column_ref.column_index),
+      ));
+    }
+
+    Self::dedupe_result_column_names(&mut columns);
+    Ok(columns)
+  }
+
   pub(crate) fn new(store: S, change_listener_registry: Arc<ChangeListenerRegistry>) -> Self {
     Self {
       store,
@@ -90,6 +265,7 @@ where
     predicate: Option<QualifiedPredicate>,
   ) -> Result<EngineResult, EngineError> {
     self.table(table_name)?;
+    let columns = self.projection_columns_for_table(table_name, projection)?;
 
     let mut writer = self.writer();
     let tx = writer.transaction().await?;
@@ -101,21 +277,23 @@ where
       let rows = materialize_rows_by_primary_keys(tx, table_name, row_pks).await?;
 
       if !rows.is_empty() {
-        return Ok(EngineResult::new(
+        return Ok(EngineResult::new_with_columns(
           rows
             .into_iter()
             .map(|row| self.catalog.project_row(&row, projection))
             .collect::<Result<Vec<_>, _>>()?,
+          columns.clone(),
         ));
       }
     }
 
     let rows = collect_table_rows(tx, table_name, predicate).await?;
-    Ok(EngineResult::new(
+    Ok(EngineResult::new_with_columns(
       rows
         .into_iter()
         .map(|(_primary_key, row)| self.catalog.project_row(&row, projection))
         .collect::<Result<Vec<_>, _>>()?,
+      columns,
     ))
   }
 
@@ -126,16 +304,23 @@ where
     predicate: Option<QualifiedPredicate>,
     options: &SelectOptions,
   ) -> Result<EngineResult, EngineError> {
+    let output_columns = self.output_columns_for_select(projection, options)?;
     let mut writer = self.writer();
     let tx = writer.transaction().await?;
-    match execute_select_pipeline::<S, _, _>(tx, base_table, projection, predicate, options, |q| {
-      self.run(q)
-    })
+    match execute_select_pipeline::<S, _, _>(
+      tx,
+      base_table,
+      projection,
+      predicate,
+      options,
+      output_columns.clone(),
+      |q| self.run(q),
+    )
     .await?
     {
       SelectStageOutput::Final(result) => Ok(result),
       SelectStageOutput::Joined(partial_results) => {
-        finalize_grouped_result(partial_results, options)
+        finalize_grouped_result(partial_results, options, output_columns)
       }
     }
   }
@@ -175,6 +360,10 @@ where
         returning,
       } => {
         let mut writer = self.writer();
+        let returning_columns = match &returning {
+          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+          None => None,
+        };
         match writer
           .update(
             &table,
@@ -188,7 +377,10 @@ where
         {
           Ok(rows) => {
             let _ = writer.commit().await?;
-            Ok(EngineResult::new(rows))
+            Ok(match returning_columns {
+              Some(columns) => EngineResult::new_with_columns(rows, columns),
+              None => EngineResult::new(rows),
+            })
           }
           Err(error) => {
             let _ = writer.rollback().await;
@@ -202,10 +394,17 @@ where
         returning,
       } => {
         let mut writer = self.writer();
+        let returning_columns = match &returning {
+          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+          None => None,
+        };
         match writer.delete(&table, predicate, returning).await {
           Ok(rows) => {
             let _ = writer.commit().await?;
-            Ok(EngineResult::new(rows))
+            Ok(match returning_columns {
+              Some(columns) => EngineResult::new_with_columns(rows, columns),
+              None => EngineResult::new(rows),
+            })
           }
           Err(error) => {
             let _ = writer.rollback().await;

@@ -5,7 +5,9 @@ use crate::{
   query::EngineQuery,
   query::EngineResult,
   query::JoinClause,
+  query::QualifiedColumn,
   query::QualifiedPredicate,
+  query::ResultColumn,
   query::UpdateAssignment,
   store_adapter::EngineStore,
   subscriptions::{QuerySubscription, SubscriptionBatch, SubscriptionRegistry},
@@ -22,6 +24,41 @@ impl<S> EngineDatabase<S>
 where
   S: EngineStore,
 {
+  fn returning_columns(
+    &self,
+    table_name: &str,
+    returning: &[QualifiedColumn],
+  ) -> Result<Vec<ResultColumn>, EngineError> {
+    let schema = self
+      .describe_table(table_name)
+      .ok_or_else(|| EngineError::TableNotFound(table_name.to_string()))?;
+
+    let mut columns = Vec::with_capacity(returning.len());
+    for column_ref in returning {
+      if column_ref.table != table_name {
+        return Err(EngineError::SchemaMismatch(format!(
+          "RETURNING column {} must reference target table {}",
+          column_ref.table, table_name
+        )));
+      }
+
+      let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
+        EngineError::SchemaMismatch(format!(
+          "RETURNING index {} is out of bounds for table {}",
+          column_ref.column_index, table_name
+        ))
+      })?;
+
+      columns.push(ResultColumn::new(
+        column.name.clone(),
+        Some(table_name.to_string()),
+        Some(column_ref.column_index),
+      ));
+    }
+
+    Ok(columns)
+  }
+
   pub fn new(store: S) -> Self {
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Self {
@@ -100,6 +137,10 @@ where
         returning,
       } => {
         let mut writer = self.kernel.writer();
+        let returning_columns = match &returning {
+          Some(columns) => Some(self.returning_columns(&table, columns)?),
+          None => None,
+        };
         match writer
           .update(
             &table,
@@ -114,7 +155,10 @@ where
           Ok(rows) => {
             let events = writer.commit().await?;
             self.recompute_batched_subscriptions(&events).await?;
-            Ok(EngineResult::new(rows))
+            Ok(match returning_columns {
+              Some(columns) => EngineResult::new_with_columns(rows, columns),
+              None => EngineResult::new(rows),
+            })
           }
           Err(error) => {
             let _ = writer.rollback().await;
@@ -128,11 +172,18 @@ where
         returning,
       } => {
         let mut writer = self.kernel.writer();
+        let returning_columns = match &returning {
+          Some(columns) => Some(self.returning_columns(&table, columns)?),
+          None => None,
+        };
         match writer.delete(&table, predicate, returning).await {
           Ok(rows) => {
             let events = writer.commit().await?;
             self.recompute_batched_subscriptions(&events).await?;
-            Ok(EngineResult::new(rows))
+            Ok(match returning_columns {
+              Some(columns) => EngineResult::new_with_columns(rows, columns),
+              None => EngineResult::new(rows),
+            })
           }
           Err(error) => {
             let _ = writer.rollback().await;
@@ -232,7 +283,7 @@ where
             None => true, // First time
             Some(old) => {
               // Simple comparison: same number of rows and same content
-              old.rows != new_results.rows
+              old.rows != new_results.rows || old.columns != new_results.columns
             }
           };
 
@@ -283,8 +334,15 @@ where
     predicate: Option<QualifiedPredicate>,
     returning: Option<Vec<crate::query::QualifiedColumn>>,
   ) -> Result<EngineResult, EngineError> {
+    let returning_columns = match &returning {
+      Some(columns) => Some(self.db.returning_columns(table_name, columns)?),
+      None => None,
+    };
     let rows = self.inner.delete(table_name, predicate, returning).await?;
-    Ok(EngineResult::new(rows))
+    Ok(match returning_columns {
+      Some(columns) => EngineResult::new_with_columns(rows, columns),
+      None => EngineResult::new(rows),
+    })
   }
 
   pub async fn update_rows(
@@ -345,6 +403,10 @@ where
     from_tables: Vec<String>,
     returning: Option<Vec<crate::query::QualifiedColumn>>,
   ) -> Result<EngineResult, EngineError> {
+    let returning_columns = match &returning {
+      Some(columns) => Some(self.db.returning_columns(table_name, columns)?),
+      None => None,
+    };
     let rows = self
       .inner
       .update(
@@ -356,7 +418,10 @@ where
         returning,
       )
       .await?;
-    Ok(EngineResult::new(rows))
+    Ok(match returning_columns {
+      Some(columns) => EngineResult::new_with_columns(rows, columns),
+      None => EngineResult::new(rows),
+    })
   }
 
   pub async fn commit(self) -> Result<(), EngineError> {

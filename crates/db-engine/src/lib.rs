@@ -27,7 +27,7 @@ pub use query::{
   QualifiedOperand, QualifiedPredicate, RefOrAgg, SelectOptions, SortDirection, UpdateAssignment,
   UpdateValueExpr,
 };
-pub use query::{EngineQuery, EngineResult};
+pub use query::{EngineQuery, EngineResult, ResultColumn};
 pub use row_deserialize_error::RowDeserializeError;
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{

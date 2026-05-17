@@ -87,13 +87,8 @@ fn main() {
       .await
       .expect("Failed to query users");
 
-    let users_schema = db
-      .engine
-      .describe_table("users")
-      .expect("Failed to get users schema");
-
     let users: Vec<User> = users_result
-      .into_typed::<User>(&users_schema)
+      .into_typed_named::<User>()
       .expect("Failed to deserialize users");
 
     for user in users {
@@ -108,13 +103,8 @@ fn main() {
       .await
       .expect("Failed to query products");
 
-    let products_schema = db
-      .engine
-      .describe_table("products")
-      .expect("Failed to get products schema");
-
     let products: Vec<Product> = products_result
-      .into_typed::<Product>(&products_schema)
+      .into_typed_named::<Product>()
       .expect("Failed to deserialize products");
 
     for product in products {

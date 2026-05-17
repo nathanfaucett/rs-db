@@ -1,7 +1,10 @@
 use db_types::TableSchema;
 
 use crate::{
-  EngineRow, row_deserialize_error::RowDeserializeError, row_deserializer::deserialize_row,
+  EngineRow,
+  query::ResultColumn,
+  row_deserialize_error::RowDeserializeError,
+  row_deserializer::{deserialize_named_row, deserialize_row},
 };
 
 /// Trait for types that can be deserialized from a row using a table schema.
@@ -32,6 +35,13 @@ use crate::{
 pub trait FromRow: serde::de::DeserializeOwned {
   fn from_row(schema: &TableSchema, row: &EngineRow) -> Result<Self, RowDeserializeError> {
     deserialize_row(schema, row)
+  }
+
+  fn from_named_row(
+    columns: &[ResultColumn],
+    row: &EngineRow,
+  ) -> Result<Self, RowDeserializeError> {
+    deserialize_named_row(columns, row)
   }
 }
 

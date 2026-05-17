@@ -1,7 +1,7 @@
 use db_types::{ColumnSchema, EngineType, EngineValue, TableSchema};
 use serde::Deserialize;
 
-use db_engine::{EngineResult, FromRow, RowDeserializeError};
+use db_engine::{EngineResult, FromRow, ResultColumn, RowDeserializeError};
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct TestUser {
@@ -373,4 +373,53 @@ fn test_empty_result() {
   let result = EngineResult::new(vec![]);
   let users: Vec<TestUser> = result.into_typed::<TestUser>(&schema).unwrap();
   assert!(users.is_empty());
+}
+
+#[test]
+fn test_named_rows() {
+  let rows = vec![vec![
+    EngineValue::Integer(1),
+    EngineValue::Text("Alice".to_string()),
+  ]];
+  let columns = vec![
+    ResultColumn::new("id", Some("users".to_string()), Some(0)),
+    ResultColumn::new("name", Some("users".to_string()), Some(1)),
+  ];
+
+  let result = EngineResult::new_with_columns(rows, columns);
+  let named = result.named_rows().unwrap();
+
+  assert_eq!(named.len(), 1);
+  assert_eq!(named[0].get("id"), Some(&EngineValue::Integer(1)));
+  assert_eq!(
+    named[0].get("name"),
+    Some(&EngineValue::Text("Alice".to_string()))
+  );
+}
+
+#[test]
+fn test_into_typed_named() {
+  let rows = vec![
+    vec![
+      EngineValue::Integer(1),
+      EngineValue::Text("Alice".to_string()),
+    ],
+    vec![
+      EngineValue::Integer(2),
+      EngineValue::Text("Bob".to_string()),
+    ],
+  ];
+  let columns = vec![
+    ResultColumn::new("id", Some("users".to_string()), Some(0)),
+    ResultColumn::new("name", Some("users".to_string()), Some(1)),
+  ];
+
+  let result = EngineResult::new_with_columns(rows, columns);
+  let users: Vec<TestUser> = result.into_typed_named::<TestUser>().unwrap();
+
+  assert_eq!(users.len(), 2);
+  assert_eq!(users[0].id, 1);
+  assert_eq!(users[0].name, "Alice");
+  assert_eq!(users[1].id, 2);
+  assert_eq!(users[1].name, "Bob");
 }

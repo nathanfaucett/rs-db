@@ -8,7 +8,7 @@ use serde::de::{DeserializeSeed, MapAccess, Visitor};
 
 use db_types::TableSchema;
 
-use crate::{EngineRow, EngineValue};
+use crate::{EngineRow, EngineValue, query::ResultColumn};
 
 use super::row_deserialize_error::RowDeserializeError;
 
@@ -18,6 +18,14 @@ pub fn deserialize_row<'a, T: serde::de::Deserialize<'a>>(
   row: &'a EngineRow,
 ) -> Result<T, RowDeserializeError> {
   let deserializer = RowDeserializer::new(schema, row);
+  T::deserialize(deserializer)
+}
+
+pub fn deserialize_named_row<'a, T: serde::de::Deserialize<'a>>(
+  columns: &'a [ResultColumn],
+  row: &'a EngineRow,
+) -> Result<T, RowDeserializeError> {
+  let deserializer = NamedRowDeserializer::new(columns, row);
   T::deserialize(deserializer)
 }
 
@@ -43,6 +51,26 @@ impl<'a> RowDeserializer<'a> {
   }
 }
 
+struct NamedRowDeserializer<'a> {
+  columns: &'a [ResultColumn],
+  row: &'a EngineRow,
+}
+
+impl<'a> NamedRowDeserializer<'a> {
+  fn new(columns: &'a [ResultColumn], row: &'a EngineRow) -> Self {
+    Self { columns, row }
+  }
+
+  fn get_column_index(&self, name: &str) -> Result<usize, RowDeserializeError> {
+    let name_lower = name.to_lowercase();
+    self
+      .columns
+      .iter()
+      .position(|column| column.name.to_lowercase() == name_lower)
+      .ok_or_else(|| RowDeserializeError::column_not_found(name))
+  }
+}
+
 impl<'de> serde::Deserializer<'de> for RowDeserializer<'de> {
   type Error = RowDeserializeError;
 
@@ -63,6 +91,39 @@ impl<'de> serde::Deserializer<'de> for RowDeserializer<'de> {
     V: Visitor<'de>,
   {
     visitor.visit_map(RowMapAccess {
+      deserializer: self,
+      fields,
+      field_index: 0,
+    })
+  }
+
+  serde::forward_to_deserialize_any! {
+    bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes
+    byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct
+    map enum identifier ignored_any
+  }
+}
+
+impl<'de> serde::Deserializer<'de> for NamedRowDeserializer<'de> {
+  type Error = RowDeserializeError;
+
+  fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+  where
+    V: Visitor<'de>,
+  {
+    Err(RowDeserializeError::serde_error("not supported"))
+  }
+
+  fn deserialize_struct<V>(
+    self,
+    _name: &'static str,
+    fields: &'static [&'static str],
+    visitor: V,
+  ) -> Result<V::Value, Self::Error>
+  where
+    V: Visitor<'de>,
+  {
+    visitor.visit_map(NamedRowMapAccess {
       deserializer: self,
       fields,
       field_index: 0,
@@ -105,6 +166,47 @@ impl<'de> MapAccess<'de> for RowMapAccess<'de> {
     V: DeserializeSeed<'de>,
   {
     // Find the column index matching this field name (case-insensitive)
+    let field_name = self.fields[self.field_index];
+    let column_index = self.deserializer.get_column_index(field_name)?;
+
+    if column_index < self.deserializer.row.len() {
+      let value = &self.deserializer.row[column_index];
+      let result = seed.deserialize(EngineValueDeserializer(value))?;
+      self.field_index += 1;
+      Ok(result)
+    } else {
+      Err(RowDeserializeError::schema_error("row index out of bounds"))
+    }
+  }
+}
+
+struct NamedRowMapAccess<'de> {
+  deserializer: NamedRowDeserializer<'de>,
+  fields: &'static [&'static str],
+  field_index: usize,
+}
+
+impl<'de> MapAccess<'de> for NamedRowMapAccess<'de> {
+  type Error = RowDeserializeError;
+
+  fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+  where
+    K: DeserializeSeed<'de>,
+  {
+    if self.field_index < self.fields.len() {
+      let field_name = self.fields[self.field_index];
+      let key = seed
+        .deserialize(serde::de::value::StrDeserializer::<RowDeserializeError>::new(field_name))?;
+      Ok(Some(key))
+    } else {
+      Ok(None)
+    }
+  }
+
+  fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+  where
+    V: DeserializeSeed<'de>,
+  {
     let field_name = self.fields[self.field_index];
     let column_index = self.deserializer.get_column_index(field_name)?;
 
