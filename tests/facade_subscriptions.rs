@@ -51,7 +51,7 @@ mod tests {
 
       // Subscribe through facade
       let _id = db
-        .subscribe(query, subscriber_arc.clone(), None)
+        .subscribe_query(query, subscriber_arc.clone(), None)
         .await
         .expect("subscribe via facade");
 
@@ -96,7 +96,7 @@ mod tests {
       let subscriber_arc = Arc::new(subscriber.clone());
 
       let query = EngineQuery::select_simple("events".to_string(), vec![0, 1], None);
-      db.subscribe(query, subscriber_arc.clone(), None)
+      db.subscribe_query(query, subscriber_arc.clone(), None)
         .await
         .expect("subscribe via facade");
 
@@ -131,7 +131,7 @@ mod tests {
 
       // Subscribe with explicit scope
       let _id = db
-        .subscribe(query, subscriber_arc.clone(), Some(scope))
+        .subscribe_query(query, subscriber_arc.clone(), Some(scope))
         .await
         .expect("subscribe with scope");
 
@@ -162,6 +162,53 @@ mod tests {
       assert_eq!(results.rows.len(), 0);
 
       println!("✓ execute_with_scope on facade works");
+    });
+  }
+
+  #[test]
+  fn test_facade_subscribe_sql() {
+    block_on(async {
+      let mut db = Database::open_in_memory().await.expect("open db");
+
+      db.execute_sql("CREATE TABLE orders (id UUID PRIMARY KEY, total INT);")
+        .await
+        .expect("create table");
+
+      let subscriber = CountingSubscriber::new();
+      let subscriber_arc = Arc::new(subscriber.clone());
+
+      // Subscribe via SQL string
+      let _id = db
+        .subscribe_sql("SELECT id, total FROM orders", subscriber_arc.clone(), None)
+        .await
+        .expect("subscribe_sql");
+
+      // Should have initial (empty) callback
+      assert_eq!(subscriber.get_call_count(), 1);
+      assert_eq!(subscriber.get_last_row_count(), 0);
+
+      println!("✓ subscribe_sql on facade works");
+    });
+  }
+
+  #[test]
+  fn test_facade_subscribe_sql_rejects_ddl() {
+    block_on(async {
+      let db = Database::open_in_memory().await.expect("open db");
+
+      let subscriber = CountingSubscriber::new();
+      let subscriber_arc = Arc::new(subscriber.clone());
+
+      let result = db
+        .subscribe_sql(
+          "CREATE TABLE should_fail (id UUID PRIMARY KEY)",
+          subscriber_arc,
+          None,
+        )
+        .await;
+
+      assert!(result.is_err(), "DDL should be rejected");
+      println!("✓ subscribe_sql correctly rejects DDL");
     });
   }
 }

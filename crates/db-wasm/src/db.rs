@@ -84,16 +84,29 @@ impl BrowserDatabase {
     EngineQuery::select_simple(table, projection, predicate)
   }
 
-  #[wasm_bindgen(js_name = subscribe)]
-  pub async fn subscribe(
+  #[wasm_bindgen(js_name = subscribeQuery)]
+  pub async fn subscribe_query(
     &self,
     query: EngineQuery,
     callback: js_sys::Function,
   ) -> Result<SubscriptionId, JsValue> {
-    let callback = WasmSubscriber { callback };
     let sub_id = self
       .inner
-      .subscribe(query, Arc::new(callback), None)
+      .subscribe_query(query, Arc::new(WasmSubscriber { callback }), None)
+      .await
+      .map_err(to_js_error)?;
+    Ok(sub_id)
+  }
+
+  #[wasm_bindgen(js_name = subscribeSql)]
+  pub async fn subscribe_sql(
+    &self,
+    sql: &str,
+    callback: js_sys::Function,
+  ) -> Result<SubscriptionId, JsValue> {
+    let sub_id = self
+      .inner
+      .subscribe_sql(sql, Arc::new(WasmSubscriber { callback }), None)
       .await
       .map_err(to_js_error)?;
     Ok(sub_id)

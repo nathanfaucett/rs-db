@@ -325,8 +325,8 @@ where
     }
   }
 
-  /// Subscribe to a query with optional scope.
-  pub async fn subscribe(
+  /// Subscribe to an `EngineQuery` with optional scope.
+  pub async fn subscribe_query(
     &self,
     query: EngineQuery,
     subscriber: std::sync::Arc<dyn Subscriber>,
@@ -340,13 +340,33 @@ where
       .map_err(Into::into)
   }
 
+  /// Subscribe to a SQL SELECT string with optional scope.
+  /// Returns an error if the SQL is not a SELECT statement.
+  pub async fn subscribe_sql(
+    &self,
+    sql: &str,
+    subscriber: std::sync::Arc<dyn Subscriber>,
+    scope: Option<SyncScope>,
+  ) -> Result<SubscriptionId, DatabaseError> {
+    let query = match parse_and_translate_statement(sql, self) {
+      Ok(CanonicalStatement::Query(q)) => q,
+      Ok(_) => {
+        return Err(DatabaseError::Other(
+          "subscribe_sql only accepts SELECT statements".into(),
+        ));
+      }
+      Err(e) => return Err(DatabaseError::Other(format!("{e}"))),
+    };
+    self.subscribe_query(query, subscriber, scope).await
+  }
+
   /// Subscribe to a query (unrestricted).
   pub async fn subscribe_unrestricted(
     &self,
     query: EngineQuery,
     subscriber: std::sync::Arc<dyn Subscriber>,
   ) -> Result<SubscriptionId, DatabaseError> {
-    self.subscribe(query, subscriber, None).await
+    self.subscribe_query(query, subscriber, None).await
   }
 
   /// Unsubscribe from a subscription.
