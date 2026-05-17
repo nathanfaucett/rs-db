@@ -468,10 +468,15 @@ where
     let query =
       parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
     match query {
-      EngineQuery::Insert { table, row } => {
-        self.insert_row(&table, row).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => self
+        .inner
+        .insert_row_with_returning(&table, row, returning)
+        .await
+        .map_err(Into::into),
       EngineQuery::Update {
         table,
         assignments,

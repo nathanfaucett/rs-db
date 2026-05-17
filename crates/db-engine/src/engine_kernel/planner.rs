@@ -6,6 +6,7 @@ use crate::store_adapter::{
 use crate::{
   EngineError, IndexSchema, TableSchema, query::Aggregate, query::EngineQuery, query::EngineResult,
   query::QualifiedColumn, query::QualifiedPredicate, query::ResultColumn, query::SelectOptions,
+  query::UpdateValueExpr,
 };
 
 use super::catalog::EngineCatalog;
@@ -172,31 +173,38 @@ where
   fn output_columns_for_returning(
     &self,
     table_name: &str,
-    returning: &[QualifiedColumn],
+    returning: &[UpdateValueExpr],
   ) -> Result<Vec<ResultColumn>, EngineError> {
     let schema = self.table(table_name)?;
     let mut columns = Vec::with_capacity(returning.len());
 
-    for column_ref in returning {
-      if column_ref.table != table_name {
-        return Err(EngineError::SchemaMismatch(format!(
-          "RETURNING column {} must reference target table {}",
-          column_ref.table, table_name
-        )));
+    for (index, expression) in returning.iter().enumerate() {
+      match expression {
+        UpdateValueExpr::Column(column_ref) => {
+          if column_ref.table != table_name {
+            return Err(EngineError::SchemaMismatch(format!(
+              "RETURNING column {} must reference target table {}",
+              column_ref.table, table_name
+            )));
+          }
+
+          let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
+            EngineError::SchemaMismatch(format!(
+              "RETURNING index {} is out of bounds for table {}",
+              column_ref.column_index, table_name
+            ))
+          })?;
+
+          columns.push(ResultColumn::new(
+            column.name.clone(),
+            Some(table_name.to_string()),
+            Some(column_ref.column_index),
+          ));
+        }
+        _ => {
+          columns.push(ResultColumn::new(format!("expr_{}", index + 1), None, None));
+        }
       }
-
-      let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
-        EngineError::SchemaMismatch(format!(
-          "RETURNING index {} is out of bounds for table {}",
-          column_ref.column_index, table_name
-        ))
-      })?;
-
-      columns.push(ResultColumn::new(
-        column.name.clone(),
-        Some(table_name.to_string()),
-        Some(column_ref.column_index),
-      ));
     }
 
     Self::dedupe_result_column_names(&mut columns);
@@ -327,12 +335,23 @@ where
 
   pub(crate) async fn run(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
     match query {
-      EngineQuery::Insert { table, row } => {
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => {
         let mut writer = self.writer();
-        match writer.insert(&table, row).await {
-          Ok(()) => {
+        let returning_columns = match &returning {
+          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+          None => None,
+        };
+        match writer.insert_returning(&table, row, returning).await {
+          Ok(rows) => {
             let _ = writer.commit().await?;
-            Ok(EngineResult::default())
+            Ok(match returning_columns {
+              Some(columns) => EngineResult::new_with_columns(rows, columns),
+              None => EngineResult::new(rows),
+            })
           }
           Err(error) => {
             let _ = writer.rollback().await;

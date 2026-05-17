@@ -310,6 +310,56 @@ mod tests {
   }
 
   #[test]
+  fn automerge_in_memory_insert_returning_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      let result = db
+        .execute_sql(&format!(
+          "INSERT INTO users (id, score) VALUES ({U1}, 10) RETURNING id, score;"
+        ))
+        .await
+        .expect("insert returning");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![uuid_value(1), EngineValue::Integer(10)]],
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_insert_returning_expression_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      let result = db
+        .execute_sql(&format!(
+          "INSERT INTO users (id, score) VALUES ({U1}, 10) RETURNING id, score + 2;"
+        ))
+        .await
+        .expect("insert returning expression");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![uuid_value(1), EngineValue::Integer(12)]],
+      );
+    });
+  }
+
+  #[test]
   fn automerge_in_memory_delete_returning_sql_roundtrip() {
     block_on(async {
       let mut db = Database::open_automerge_in_memory()
@@ -341,6 +391,58 @@ mod tests {
         .await
         .expect("select users");
       assert!(remaining.rows.is_empty());
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_update_returning_expression_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql(&format!("INSERT INTO users (id, score) VALUES ({U1}, 10);"))
+        .await
+        .expect("insert user");
+
+      let result = db
+        .execute_sql(&format!(
+          "UPDATE users SET score = score + 2 WHERE id = {U1} RETURNING score * 2;"
+        ))
+        .await
+        .expect("update returning expression");
+
+      assert_eq!(result.rows, vec![vec![EngineValue::Integer(24)]]);
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_delete_returning_expression_sql_roundtrip() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql(&format!("INSERT INTO users (id, score) VALUES ({U1}, 10);"))
+        .await
+        .expect("insert user");
+
+      let result = db
+        .execute_sql(&format!(
+          "DELETE FROM users WHERE id = {U1} RETURNING score + 1;"
+        ))
+        .await
+        .expect("delete returning expression");
+
+      assert_eq!(result.rows, vec![vec![EngineValue::Integer(11)]]);
     });
   }
 

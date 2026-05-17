@@ -52,6 +52,7 @@ fn make_db_with_items() -> TestDb {
           EngineValue::Text(name.into()),
           EngineValue::Integer(score),
         ],
+        returning: None,
       })
       .await
       .expect("insert");
@@ -122,6 +123,7 @@ fn engine_works_with_mock_btree() {
     db.execute(EngineQuery::Insert {
       table: "items".into(),
       row: vec![uuid_value(1), EngineValue::Text("One".into())],
+      returning: None,
     })
     .await
     .expect("insert");

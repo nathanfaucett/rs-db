@@ -51,6 +51,7 @@ fn main() {
     db.execute(EngineQuery::Insert {
       table: "users".into(),
       row: vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())],
+      returning: None,
     })
     .await
     .expect("insert user 1");
@@ -58,6 +59,7 @@ fn main() {
     db.execute(EngineQuery::Insert {
       table: "users".into(),
       row: vec![EngineValue::Integer(2), EngineValue::Text("Bob".into())],
+      returning: None,
     })
     .await
     .expect("insert user 2");
@@ -70,6 +72,7 @@ fn main() {
         EngineValue::Integer(1),
         EngineValue::Integer(100),
       ],
+      returning: None,
     })
     .await
     .expect("insert order 1");
@@ -81,6 +84,7 @@ fn main() {
         EngineValue::Integer(2),
         EngineValue::Integer(200),
       ],
+      returning: None,
     })
     .await
     .expect("insert order 2");

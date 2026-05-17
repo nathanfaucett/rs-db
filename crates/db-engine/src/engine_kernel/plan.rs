@@ -15,6 +15,7 @@ pub enum LogicalPlan {
   Insert {
     table: String,
     row: EngineRow,
+    returning: Option<Vec<crate::query::UpdateValueExpr>>,
   },
   Update {
     table: String,
@@ -22,12 +23,12 @@ pub enum LogicalPlan {
     predicate: Option<QualifiedPredicate>,
     joins: Vec<JoinClause>,
     from_tables: Vec<String>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<crate::query::UpdateValueExpr>>,
   },
   Delete {
     table: String,
     predicate: Option<QualifiedPredicate>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<crate::query::UpdateValueExpr>>,
   },
 }
 
@@ -46,7 +47,15 @@ impl LogicalPlan {
         predicate,
         options,
       },
-      EngineQuery::Insert { table, row } => LogicalPlan::Insert { table, row },
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => LogicalPlan::Insert {
+        table,
+        row,
+        returning,
+      },
       EngineQuery::Update {
         table,
         assignments,

@@ -11,8 +11,8 @@ use crate::store_adapter::{
 };
 use crate::{
   ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, EngineValue, IndexSchema,
-  PrimaryKey, query::JoinClause, query::QualifiedColumn, query::QualifiedPredicate,
-  query::UpdateAssignment, query::UpdateValueExpr,
+  PrimaryKey, query::JoinClause, query::QualifiedPredicate, query::UpdateAssignment,
+  query::UpdateValueExpr,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -111,11 +111,31 @@ where
     Ok(())
   }
 
+  pub(crate) async fn insert_returning(
+    &mut self,
+    table_name: &str,
+    row: EngineRow,
+    returning: Option<Vec<UpdateValueExpr>>,
+  ) -> Result<Vec<EngineRow>, EngineError> {
+    let inserted_row = row.clone();
+    self.insert(table_name, row).await?;
+
+    if let Some(expressions) = returning.as_ref() {
+      return Ok(vec![Self::evaluate_returning_row(
+        table_name,
+        &inserted_row,
+        expressions,
+      )?]);
+    }
+
+    Ok(Vec::new())
+  }
+
   pub(crate) async fn delete(
     &mut self,
     table_name: &str,
     predicate: Option<QualifiedPredicate>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<UpdateValueExpr>>,
   ) -> Result<Vec<EngineRow>, EngineError> {
     self.catalog.table(table_name)?;
     let indexes = self.catalog.indexes_for_table(table_name);
@@ -127,8 +147,8 @@ where
       let rows = collect_table_rows(tx, table_name, predicate).await?;
 
       for (primary_key, row) in rows {
-        if let Some(projection) = returning.as_ref() {
-          returning_rows.push(Self::project_returning_row(table_name, &row, projection)?);
+        if let Some(expressions) = returning.as_ref() {
+          returning_rows.push(Self::evaluate_returning_row(table_name, &row, expressions)?);
         }
         delete_row(tx, table_name, &primary_key, &row, &indexes).await?;
 
@@ -152,7 +172,7 @@ where
     predicate: Option<QualifiedPredicate>,
     joins: Vec<JoinClause>,
     from_tables: Vec<String>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<UpdateValueExpr>>,
   ) -> Result<Vec<EngineRow>, EngineError> {
     let table = self.catalog.table(table_name)?.clone();
     if assignments.is_empty() {
@@ -208,11 +228,11 @@ where
           new_row: updated_row.clone(),
         });
 
-        if let Some(projection) = returning.as_ref() {
-          returning_rows.push(Self::project_returning_row(
+        if let Some(expressions) = returning.as_ref() {
+          returning_rows.push(Self::evaluate_returning_row(
             table_name,
             &updated_row,
-            projection,
+            expressions,
           )?);
         }
       }
@@ -223,26 +243,16 @@ where
     Ok(returning_rows)
   }
 
-  fn project_returning_row(
+  fn evaluate_returning_row(
     table_name: &str,
     row: &EngineRow,
-    projection: &[QualifiedColumn],
+    expressions: &[UpdateValueExpr],
   ) -> Result<EngineRow, EngineError> {
-    let mut output: EngineRow = Vec::with_capacity(projection.len());
-    for column in projection {
-      if column.table != table_name {
-        return Err(EngineError::SchemaMismatch(format!(
-          "RETURNING column {} must reference target table {}",
-          column.table, table_name
-        )));
-      }
-      let value = row.get(column.column_index).cloned().ok_or_else(|| {
-        EngineError::SchemaMismatch(format!(
-          "RETURNING index {} out of bounds",
-          column.column_index
-        ))
-      })?;
-      output.push(value);
+    let mut output: EngineRow = Vec::with_capacity(expressions.len());
+    for expression in expressions {
+      output.push(Self::evaluate_update_expr(
+        row, expression, table_name, None,
+      )?);
     }
     Ok(output)
   }

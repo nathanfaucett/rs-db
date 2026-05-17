@@ -242,6 +242,7 @@ pub enum EngineQuery {
   Insert {
     table: String,
     row: EngineRow,
+    returning: Option<Vec<UpdateValueExpr>>,
   },
   Update {
     table: String,
@@ -249,12 +250,12 @@ pub enum EngineQuery {
     predicate: Option<QualifiedPredicate>,
     joins: Vec<JoinClause>,
     from_tables: Vec<String>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<UpdateValueExpr>>,
   },
   Delete {
     table: String,
     predicate: Option<QualifiedPredicate>,
-    returning: Option<Vec<QualifiedColumn>>,
+    returning: Option<Vec<UpdateValueExpr>>,
   },
 }
 

@@ -32,6 +32,7 @@ fn main() {
     db.execute(EngineQuery::Insert {
       table: "items".into(),
       row: vec![EngineValue::Integer(1), EngineValue::Text("One".into())],
+      returning: None,
     })
     .await
     .expect("insert");

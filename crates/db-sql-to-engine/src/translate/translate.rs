@@ -693,6 +693,7 @@ fn translate_update(
       &table,
       &alias_map,
       &table_schemas,
+      mapper,
     )?)
   } else {
     None
@@ -825,6 +826,7 @@ fn translate_delete(
       &table,
       &alias_map,
       &table_schemas,
+      mapper,
     )?)
   } else {
     None
@@ -842,21 +844,22 @@ fn translate_returning_projection(
   target_table: &str,
   alias_map: &HashMap<String, String>,
   table_schemas: &HashMap<String, db_engine::TableSchema>,
-) -> Result<Vec<db_engine::QualifiedColumn>, TranslateError> {
+  mapper: &dyn ValueMapper,
+) -> Result<Vec<db_engine::UpdateValueExpr>, TranslateError> {
   let schema = table_schemas
     .get(target_table)
     .ok_or_else(|| TranslateError::UnknownTable(target_table.to_string()))?;
 
-  let mut projection: Vec<db_engine::QualifiedColumn> = Vec::new();
+  let mut projection: Vec<db_engine::UpdateValueExpr> = Vec::new();
   for item in returning {
     match item {
       SelectItem::Wildcard(_) => {
-        projection.extend(
-          (0..schema.columns.len()).map(|index| db_engine::QualifiedColumn {
+        projection.extend((0..schema.columns.len()).map(|index| {
+          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
             table: target_table.to_string(),
             column_index: index,
-          }),
-        );
+          })
+        }));
       }
       SelectItem::QualifiedWildcard(kind, _) => {
         let table_name = match kind {
@@ -875,35 +878,51 @@ fn translate_returning_projection(
             "RETURNING can reference only target table columns".into(),
           ));
         }
-        projection.extend(
-          (0..schema.columns.len()).map(|index| db_engine::QualifiedColumn {
+        projection.extend((0..schema.columns.len()).map(|index| {
+          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
             table: target_table.to_string(),
             column_index: index,
-          }),
-        );
+          })
+        }));
       }
       SelectItem::UnnamedExpr(expr) => {
-        let qc = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
-        if qc.table != target_table {
-          return Err(TranslateError::UnsupportedFeature(
-            "RETURNING can reference only target table columns".into(),
-          ));
-        }
-        projection.push(qc);
+        let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+        ensure_returning_expr_uses_target(&returning_expr, target_table)?;
+        projection.push(returning_expr);
       }
       SelectItem::ExprWithAlias { expr, .. } => {
-        let qc = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
-        if qc.table != target_table {
-          return Err(TranslateError::UnsupportedFeature(
-            "RETURNING can reference only target table columns".into(),
-          ));
-        }
-        projection.push(qc);
+        let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+        ensure_returning_expr_uses_target(&returning_expr, target_table)?;
+        projection.push(returning_expr);
       }
     }
   }
 
   Ok(projection)
+}
+
+fn ensure_returning_expr_uses_target(
+  expr: &db_engine::UpdateValueExpr,
+  target_table: &str,
+) -> Result<(), TranslateError> {
+  match expr {
+    db_engine::UpdateValueExpr::Value(_) => Ok(()),
+    db_engine::UpdateValueExpr::Column(column) => {
+      if column.table != target_table {
+        return Err(TranslateError::UnsupportedFeature(
+          "RETURNING can reference only target table columns".into(),
+        ));
+      }
+      Ok(())
+    }
+    db_engine::UpdateValueExpr::Add(left, right)
+    | db_engine::UpdateValueExpr::Subtract(left, right)
+    | db_engine::UpdateValueExpr::Multiply(left, right)
+    | db_engine::UpdateValueExpr::Divide(left, right) => {
+      ensure_returning_expr_uses_target(left, target_table)?;
+      ensure_returning_expr_uses_target(right, target_table)
+    }
+  }
 }
 
 fn assignment_target_column_name(
@@ -970,12 +989,6 @@ fn translate_insert(
       "INSERT ON is not supported: {on:?}"
     )));
   }
-  if insert.returning.is_some() {
-    return Err(TranslateError::UnsupportedFeature(
-      "INSERT RETURNING is not supported".into(),
-    ));
-  }
-
   let table = match &insert.table {
     sqlparser::ast::TableObject::TableName(name) => object_name_to_string(name),
     _ => {
@@ -1040,7 +1053,29 @@ fn translate_insert(
     row[idx] = mapper.map_sql_value(expr)?;
   }
 
-  Ok(db_engine::EngineQuery::Insert { table, row })
+  let mut alias_map: HashMap<String, String> = HashMap::new();
+  alias_map.insert(table.clone(), table.clone());
+
+  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+  table_schemas.insert(table.clone(), schema.clone());
+
+  let returning = if let Some(returning_items) = &insert.returning {
+    Some(translate_returning_projection(
+      returning_items,
+      &table,
+      &alias_map,
+      &table_schemas,
+      mapper,
+    )?)
+  } else {
+    None
+  };
+
+  Ok(db_engine::EngineQuery::Insert {
+    table,
+    row,
+    returning,
+  })
 }
 
 // `extract_identifier` moved to `translate/helpers.rs`.
@@ -2013,8 +2048,13 @@ mod tests {
       .expect("translate insert");
 
     match q {
-      EngineQuery::Insert { table, row } => {
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => {
         assert_eq!(table, "items");
+        assert!(returning.is_none());
         assert_eq!(
           row,
           vec![EngineValue::Integer(1), EngineValue::Text("One".into())]
@@ -2022,6 +2062,122 @@ mod tests {
       }
       other => panic!("unexpected query kind: {:?}", other),
     }
+  }
+
+  #[test]
+  fn translate_insert_returning_projection() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "items".into(),
+      TableSchema {
+        name: "items".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate(
+      "INSERT INTO items (id, score) VALUES (1, 9) RETURNING id, score + 1;",
+      &resolver,
+    )
+    .expect("translate insert returning");
+
+    match q {
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => {
+        assert_eq!(table, "items");
+        assert_eq!(row, vec![EngineValue::Integer(1), EngineValue::Integer(9)]);
+        let returning = returning.expect("returning projection");
+        assert_eq!(
+          returning,
+          vec![
+            UpdateValueExpr::Column(QualifiedColumn {
+              table: "items".into(),
+              column_index: 0,
+            }),
+            UpdateValueExpr::Add(
+              Box::new(UpdateValueExpr::Column(QualifiedColumn {
+                table: "items".into(),
+                column_index: 1,
+              })),
+              Box::new(UpdateValueExpr::Value(EngineValue::Integer(1))),
+            ),
+          ]
+        );
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_insert_returning_rejects_aggregate() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "items".into(),
+      TableSchema {
+        name: "items".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let error = parse_and_translate(
+      "INSERT INTO items (id) VALUES (1) RETURNING COUNT(id);",
+      &resolver,
+    )
+    .expect_err("RETURNING aggregate should be rejected");
+
+    assert!(matches!(
+      error,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("unsupported UPDATE assignment expression")
+    ));
+  }
+
+  #[test]
+  fn translate_insert_returning_rejects_subquery() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "items".into(),
+      TableSchema {
+        name: "items".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let error = parse_and_translate(
+      "INSERT INTO items (id) VALUES (1) RETURNING (SELECT 1);",
+      &resolver,
+    )
+    .expect_err("RETURNING subquery should be rejected");
+
+    assert!(matches!(
+      error,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("unsupported UPDATE assignment expression")
+    ));
   }
 
   #[test]
@@ -2377,10 +2533,10 @@ mod tests {
         let projection = returning.expect("returning projection");
         assert_eq!(
           projection,
-          vec![QualifiedColumn {
+          vec![UpdateValueExpr::Column(QualifiedColumn {
             table: "users".into(),
             column_index: 0,
-          }]
+          })]
         );
       }
       other => panic!("unexpected query kind: {:?}", other),
@@ -2428,14 +2584,14 @@ mod tests {
         assert_eq!(
           projection,
           vec![
-            QualifiedColumn {
+            UpdateValueExpr::Column(QualifiedColumn {
               table: "users".into(),
               column_index: 0,
-            },
-            QualifiedColumn {
+            }),
+            UpdateValueExpr::Column(QualifiedColumn {
               table: "users".into(),
               column_index: 1,
-            },
+            }),
           ]
         );
       }

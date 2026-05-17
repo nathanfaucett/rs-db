@@ -73,6 +73,7 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     db.execute(EngineQuery::Insert {
       table: "t1".into(),
       row: vec![uuid_value(1), EngineValue::Integer(1)],
+      returning: None,
     })
     .await
     .expect("insert t1");
@@ -80,6 +81,7 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     db.execute(EngineQuery::Insert {
       table: "t2".into(),
       row: vec![uuid_value(2), EngineValue::Integer(2)],
+      returning: None,
     })
     .await
     .expect("insert t2");
