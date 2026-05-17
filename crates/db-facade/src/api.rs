@@ -34,7 +34,9 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use db_sql_to_engine::{
-  CanonicalStatement, DdlOp, SchemaResolver, parse_and_translate, parse_and_translate_statement,
+  CanonicalStatement, DdlOp, SchemaResolver, SqlParams, parse_and_translate,
+  parse_and_translate_statement, parse_and_translate_statement_with_params,
+  parse_and_translate_with_params,
 };
 
 #[cfg(all(feature = "automerge", feature = "redb"))]
@@ -364,6 +366,34 @@ where
     }
   }
 
+  /// Execute a SQL string using the database schema catalog with bound parameters.
+  pub async fn execute_sql_with_params(
+    &mut self,
+    sql: &str,
+    params: &SqlParams,
+  ) -> Result<EngineResult, DatabaseError> {
+    match parse_and_translate_statement_with_params(sql, self, params) {
+      Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
+        self.register_table(schema).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
+        self.engine.drop_table(&name).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
+        self.engine.register_index(schema).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
+        self.engine.drop_index(&name).await?;
+        Ok(EngineResult::new(Vec::new()))
+      }
+      Err(e) => Err(DatabaseError::Other(format!("{e}"))),
+    }
+  }
+
   /// Convenience: run a closure in a transaction context.
   pub async fn transaction<F, Fut, T>(&self, f: F) -> Result<T, DatabaseError>
   where
@@ -421,6 +451,27 @@ where
     self.subscribe_query(query, subscriber, scope).await
   }
 
+  /// Subscribe to a SQL SELECT string with optional scope and bound parameters.
+  /// Returns an error if the SQL is not a SELECT statement.
+  pub async fn subscribe_sql_with_params(
+    &self,
+    sql: &str,
+    params: &SqlParams,
+    subscriber: std::sync::Arc<dyn Subscriber>,
+    scope: Option<SyncScope>,
+  ) -> Result<SubscriptionId, DatabaseError> {
+    let query = match parse_and_translate_statement_with_params(sql, self, params) {
+      Ok(CanonicalStatement::Query(q)) => q,
+      Ok(_) => {
+        return Err(DatabaseError::Other(
+          "subscribe_sql_with_params only accepts SELECT statements".into(),
+        ));
+      }
+      Err(e) => return Err(DatabaseError::Other(format!("{e}"))),
+    };
+    self.subscribe_query(query, subscriber, scope).await
+  }
+
   /// Subscribe to a query (unrestricted).
   pub async fn subscribe_unrestricted(
     &self,
@@ -467,6 +518,61 @@ where
   ) -> Result<EngineResult, DatabaseError> {
     let query =
       parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    match query {
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => self
+        .inner
+        .insert_row_with_returning(&table, row, returning)
+        .await
+        .map_err(Into::into),
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      } => {
+        let result = self
+          .inner
+          .update_rows_with_sources_and_returning(
+            &table,
+            assignments,
+            predicate,
+            joins,
+            from_tables,
+            returning,
+          )
+          .await?;
+        Ok(result)
+      }
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => self
+        .inner
+        .delete_rows_with_returning(&table, predicate, returning)
+        .await
+        .map_err(Into::into),
+      EngineQuery::Select { .. } => Err(DatabaseError::Other(
+        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
+      )),
+    }
+  }
+
+  /// Execute a SQL string inside this transaction with bound parameters.
+  pub async fn execute_sql_with_params(
+    &mut self,
+    resolver: &dyn SchemaResolver,
+    sql: &str,
+    params: &SqlParams,
+  ) -> Result<EngineResult, DatabaseError> {
+    let query = parse_and_translate_with_params(sql, resolver, params)
+      .map_err(|e| DatabaseError::Other(format!("{e}")))?;
     match query {
       EngineQuery::Insert {
         table,

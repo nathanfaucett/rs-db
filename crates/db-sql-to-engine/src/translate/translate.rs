@@ -6,6 +6,7 @@ use alloc::{
   vec,
   vec::Vec,
 };
+use core::cell::Cell;
 
 pub use db_engine::SchemaResolver;
 use hashbrown::HashMap;
@@ -23,6 +24,7 @@ use thiserror::Error;
 use super::having as having_module;
 use super::helpers;
 use super::helpers::sql_value_to_engine_value;
+use super::params::SqlParams;
 use super::predicates as predicates_module;
 
 // Reduce verbosity in signatures by aliasing the projection parse result.
@@ -45,6 +47,14 @@ pub enum TranslateError {
   UnknownColumn(String),
   #[error("unsupported feature: {0}")]
   UnsupportedFeature(String),
+  #[error("missing positional parameter: ${0}")]
+  MissingPositionalParameter(usize),
+  #[error("missing named parameter: :{0}")]
+  MissingNamedParameter(String),
+  #[error("cannot mix positional and named parameters in one SQL statement")]
+  MixedParameterStyles,
+  #[error("invalid parameter placeholder: {0}")]
+  InvalidParameterPlaceholder(String),
 }
 
 /// Pluggable mapper for converting `sqlparser` literal expressions into `EngineValue`.
@@ -59,6 +69,116 @@ pub struct DefaultValueMapper;
 impl ValueMapper for DefaultValueMapper {
   fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError> {
     sql_value_to_engine_value(expr)
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceholderStyle {
+  Positional,
+  Named,
+}
+
+enum PlaceholderToken {
+  Positional(usize),
+  Named(String),
+}
+
+struct ParamsValueMapper<'a> {
+  params: &'a SqlParams,
+  style: Cell<Option<PlaceholderStyle>>,
+}
+
+impl<'a> ParamsValueMapper<'a> {
+  fn new(params: &'a SqlParams) -> Self {
+    Self {
+      params,
+      style: Cell::new(None),
+    }
+  }
+
+  fn extract_placeholder(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+      SqlExpr::Value(value_with_span) => match &value_with_span.value {
+        SqlValue::Placeholder(raw) => Some(raw.as_str()),
+        _ => None,
+      },
+      SqlExpr::Cast { expr, .. } => Self::extract_placeholder(expr),
+      _ => None,
+    }
+  }
+
+  fn parse_placeholder(raw: &str) -> Result<PlaceholderToken, TranslateError> {
+    if let Some(index) = raw.strip_prefix('$') {
+      let parsed = index
+        .parse::<usize>()
+        .map_err(|_| TranslateError::InvalidParameterPlaceholder(raw.to_string()))?;
+      if parsed == 0 {
+        return Err(TranslateError::InvalidParameterPlaceholder(raw.to_string()));
+      }
+      return Ok(PlaceholderToken::Positional(parsed));
+    }
+
+    if let Some(name) = raw.strip_prefix(':') {
+      if name.is_empty() {
+        return Err(TranslateError::InvalidParameterPlaceholder(raw.to_string()));
+      }
+      return Ok(PlaceholderToken::Named(name.to_string()));
+    }
+
+    if raw == "?" {
+      return Err(TranslateError::InvalidParameterPlaceholder(raw.to_string()));
+    }
+
+    if let Ok(parsed) = raw.parse::<usize>() {
+      if parsed == 0 {
+        return Err(TranslateError::InvalidParameterPlaceholder(raw.to_string()));
+      }
+      return Ok(PlaceholderToken::Positional(parsed));
+    }
+
+    if raw.is_empty() {
+      return Err(TranslateError::InvalidParameterPlaceholder(raw.to_string()));
+    }
+
+    Ok(PlaceholderToken::Named(raw.to_string()))
+  }
+
+  fn enforce_style(&self, style: PlaceholderStyle) -> Result<(), TranslateError> {
+    match self.style.get() {
+      Some(previous) if previous != style => Err(TranslateError::MixedParameterStyles),
+      Some(_) => Ok(()),
+      None => {
+        self.style.set(Some(style));
+        Ok(())
+      }
+    }
+  }
+}
+
+impl ValueMapper for ParamsValueMapper<'_> {
+  fn map_sql_value(&self, expr: &SqlExpr) -> Result<db_engine::EngineValue, TranslateError> {
+    let Some(raw) = Self::extract_placeholder(expr) else {
+      return sql_value_to_engine_value(expr);
+    };
+
+    match Self::parse_placeholder(raw)? {
+      PlaceholderToken::Positional(index) => {
+        self.enforce_style(PlaceholderStyle::Positional)?;
+        self
+          .params
+          .get_positional(index)
+          .cloned()
+          .ok_or(TranslateError::MissingPositionalParameter(index))
+      }
+      PlaceholderToken::Named(name) => {
+        self.enforce_style(PlaceholderStyle::Named)?;
+        self
+          .params
+          .get_named(&name)
+          .cloned()
+          .ok_or(TranslateError::MissingNamedParameter(name))
+      }
+    }
   }
 }
 
@@ -85,12 +205,32 @@ pub fn parse_and_translate_with_mapper(
   }
 }
 
+/// Variant of `parse_and_translate` that resolves placeholders using `SqlParams`.
+pub fn parse_and_translate_with_params(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  params: &SqlParams,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let mapper = ParamsValueMapper::new(params);
+  parse_and_translate_with_mapper(sql, resolver, &mapper)
+}
+
 /// Parse a SQL string and translate the first statement into a canonical statement.
 pub fn parse_and_translate_statement(
   sql: &str,
   resolver: &dyn SchemaResolver,
 ) -> Result<crate::ir::CanonicalStatement, TranslateError> {
   parse_and_translate_statement_to_ir(sql, resolver)
+}
+
+/// Variant of `parse_and_translate_statement` that resolves placeholders using `SqlParams`.
+pub fn parse_and_translate_statement_with_params(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  params: &SqlParams,
+) -> Result<crate::ir::CanonicalStatement, TranslateError> {
+  let mapper = ParamsValueMapper::new(params);
+  parse_and_translate_statement_to_ir_with_mapper(sql, resolver, &mapper)
 }
 
 /// Variant of `parse_and_translate_statement` that accepts a custom `ValueMapper`.
@@ -109,6 +249,16 @@ pub fn parse_and_translate_to_ir(
   resolver: &dyn SchemaResolver,
 ) -> Result<crate::ir::CanonicalQuery, TranslateError> {
   parse_and_translate_to_ir_with_mapper(sql, resolver, &DefaultValueMapper)
+}
+
+/// Variant of `parse_and_translate_to_ir` that resolves placeholders using `SqlParams`.
+pub fn parse_and_translate_to_ir_with_params(
+  sql: &str,
+  resolver: &dyn SchemaResolver,
+  params: &SqlParams,
+) -> Result<crate::ir::CanonicalQuery, TranslateError> {
+  let mapper = ParamsValueMapper::new(params);
+  parse_and_translate_to_ir_with_mapper(sql, resolver, &mapper)
 }
 
 /// Variant of `parse_and_translate_to_ir` that accepts a custom `ValueMapper`.
@@ -2020,6 +2170,176 @@ mod tests {
       },
       other => panic!("unexpected query kind: {:?}", other),
     }
+  }
+
+  #[test]
+  fn translate_with_positional_params() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let params = SqlParams::from(vec![EngineValue::Integer(7)]);
+
+    let canon = parse_and_translate_to_ir_with_params(
+      "SELECT id FROM users WHERE id = $1;",
+      &resolver,
+      &params,
+    )
+    .expect("translate with positional params");
+
+    match canon.engine_query {
+      EngineQuery::Select { predicate, .. } => match predicate {
+        Some(QualifiedPredicate::Equals(_, QualifiedOperand::Value(v))) => {
+          assert_eq!(v, EngineValue::Integer(7));
+        }
+        other => panic!("unexpected predicate: {:?}", other),
+      },
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_with_named_params() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let params = SqlParams::named([("user_id", EngineValue::Integer(11))]);
+
+    let canon = parse_and_translate_to_ir_with_params(
+      "SELECT id FROM users WHERE id = :user_id OR score = :user_id;",
+      &resolver,
+      &params,
+    )
+    .expect("translate with named params");
+
+    match canon.engine_query {
+      EngineQuery::Select { predicate, .. } => match predicate {
+        Some(QualifiedPredicate::Or(left, right)) => {
+          assert!(matches!(
+            *left,
+            QualifiedPredicate::Equals(_, QualifiedOperand::Value(EngineValue::Integer(11)))
+          ));
+          assert!(matches!(
+            *right,
+            QualifiedPredicate::Equals(_, QualifiedOperand::Value(EngineValue::Integer(11)))
+          ));
+        }
+        other => panic!("unexpected predicate: {:?}", other),
+      },
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_with_mixed_param_styles_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let params = SqlParams::named([("id", EngineValue::Integer(1))]);
+    let err = parse_and_translate_to_ir_with_params(
+      "SELECT id FROM users WHERE id = :id OR id = $1;",
+      &resolver,
+      &params,
+    )
+    .expect_err("mixed styles should fail");
+
+    assert!(matches!(err, TranslateError::MixedParameterStyles));
+  }
+
+  #[test]
+  fn translate_with_missing_named_param_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate_to_ir_with_params(
+      "SELECT id FROM users WHERE id = :missing;",
+      &resolver,
+      &SqlParams::default(),
+    )
+    .expect_err("missing named parameter should fail");
+
+    assert!(matches!(err, TranslateError::MissingNamedParameter(name) if name == "missing"));
+  }
+
+  #[test]
+  fn translate_with_missing_positional_param_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate_to_ir_with_params(
+      "SELECT id FROM users WHERE id = $1;",
+      &resolver,
+      &SqlParams::default(),
+    )
+    .expect_err("missing positional parameter should fail");
+
+    assert!(matches!(err, TranslateError::MissingPositionalParameter(1)));
   }
 
   #[test]

@@ -1,6 +1,6 @@
 #[cfg(feature = "std")]
 mod tests {
-  use db::Database;
+  use db::{Database, SqlParams};
   use db_engine::{EngineError, EngineQuery, EngineResult, Subscriber, SyncScope};
   use futures::executor::block_on;
   use std::sync::{Arc, Mutex};
@@ -211,6 +211,34 @@ mod tests {
 
       assert!(result.is_err(), "DDL should be rejected");
       println!("✓ subscribe_sql correctly rejects DDL");
+    });
+  }
+
+  #[test]
+  fn test_facade_subscribe_sql_with_params() {
+    block_on(async {
+      let mut db = Database::open_in_memory().await.expect("open db");
+
+      db.execute_sql("CREATE TABLE orders (id UUID PRIMARY KEY, total INT);")
+        .await
+        .expect("create table");
+
+      let subscriber = CountingSubscriber::new();
+      let subscriber_arc = Arc::new(subscriber.clone());
+      let params = SqlParams::from(vec![db_engine::EngineValue::Integer(50)]);
+
+      let _id = db
+        .subscribe_sql_with_params(
+          "SELECT id, total FROM orders WHERE total >= $1",
+          &params,
+          subscriber_arc,
+          None,
+        )
+        .await
+        .expect("subscribe_sql_with_params");
+
+      assert_eq!(subscriber.get_call_count(), 1);
+      assert_eq!(subscriber.get_last_row_count(), 0);
     });
   }
 }

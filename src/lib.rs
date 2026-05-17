@@ -3,4 +3,4 @@
 
 extern crate alloc;
 
-pub use db_facade::{Database, DatabaseError, Row};
+pub use db_facade::{Database, DatabaseError, Row, SqlParams};

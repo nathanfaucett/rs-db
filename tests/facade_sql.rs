@@ -1,6 +1,6 @@
 #[cfg(feature = "automerge")]
 mod tests {
-  use db::Database;
+  use db::{Database, SqlParams};
   use db_engine::EngineValue;
   use futures::executor::block_on;
 
@@ -443,6 +443,62 @@ mod tests {
         .expect("delete returning expression");
 
       assert_eq!(result.rows, vec![vec![EngineValue::Integer(11)]]);
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_execute_sql_with_named_params() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql(&format!("INSERT INTO users (id, score) VALUES ({U1}, 10);"))
+        .await
+        .expect("insert user");
+
+      let params = SqlParams::named([("user_id", uuid_value(1))]);
+      let result = db
+        .execute_sql_with_params("SELECT id, score FROM users WHERE id = :user_id;", &params)
+        .await
+        .expect("select with named params");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![uuid_value(1), EngineValue::Integer(10)]]
+      );
+    });
+  }
+
+  #[test]
+  fn automerge_in_memory_execute_sql_with_positional_params() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+        .await
+        .expect("create users");
+
+      db.execute_sql(&format!("INSERT INTO users (id, score) VALUES ({U1}, 10);"))
+        .await
+        .expect("insert user");
+
+      let params = SqlParams::from(vec![uuid_value(1)]);
+      let result = db
+        .execute_sql_with_params("SELECT id, score FROM users WHERE id = $1;", &params)
+        .await
+        .expect("select with positional params");
+
+      assert_eq!(
+        result.rows,
+        vec![vec![uuid_value(1), EngineValue::Integer(10)]]
+      );
     });
   }
 

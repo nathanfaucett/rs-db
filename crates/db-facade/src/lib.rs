@@ -3,6 +3,7 @@
 mod api;
 mod types;
 
+pub use db_sql_to_engine::SqlParams;
 #[cfg(feature = "automerge")]
 pub use types::InMemoryAutomergeStore;
 #[cfg(all(feature = "automerge", feature = "redb"))]
