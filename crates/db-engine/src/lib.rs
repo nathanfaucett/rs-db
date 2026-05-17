@@ -1,9 +1,17 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
 mod access_control;
 mod change_event;
 mod engine;
 mod engine_kernel;
+mod from_row;
 mod predicate;
 mod query;
+mod row_deserialize_error;
+mod row_deserializer;
 mod schema_resolver;
 mod store_adapter;
 mod subscriptions;
@@ -13,12 +21,14 @@ pub use access_control::SyncScope;
 pub use change_event::{ChangeEvent, ChangeListener};
 pub use db_types::schema::{ColumnSchema, IndexSchema, TableSchema};
 pub use engine::{EngineDatabase, EngineTransaction};
+pub use from_row::FromRow;
 pub use query::{
   Aggregate, HavingPredicate, JoinClause, JoinKind, JoinOn, OrderBy, QualifiedColumn,
   QualifiedOperand, QualifiedPredicate, RefOrAgg, SelectOptions, SortDirection, UpdateAssignment,
   UpdateValueExpr,
 };
 pub use query::{EngineQuery, EngineResult};
+pub use row_deserialize_error::RowDeserializeError;
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{
   BackendCapability, EngineStore, EngineStoreTransaction, IndexStore, RowStore, SchemaStore,

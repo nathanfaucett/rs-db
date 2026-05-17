@@ -11,22 +11,20 @@ name = "db_engine"
 [features]
 default = ["std"]
 std = ["futures/std", "db-core/std", "db-in-memory/std"]
-wasm = ["tsify", "serde", "serde-wasm-bindgen", "wasm-bindgen"]
+wasm = ["tsify", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false }
 db-types = { path = "../db-types", default-features = false }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 
 thiserror = { version = "1.0", default-features = false }
 
 # Optional TS generation + serde for tsify
 tsify = { version = "0.5", default-features = false, features = [
   "js",
-], optional = true }
-serde = { version = "1.0", default-features = false, features = [
-  "derive",
 ], optional = true }
 serde-wasm-bindgen = { version = "0.6", default-features = false, optional = true }
 wasm-bindgen = { version = "0.2", default-features = false, features = [

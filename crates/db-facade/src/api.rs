@@ -13,8 +13,8 @@ use db_core::{BTree, BTreeExecutor, BTreeTransaction};
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
 use db_engine::{
-  EngineDatabase, EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, SyncScope,
-  TableSchema,
+  EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
+  SyncScope, TableSchema,
 };
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -277,6 +277,47 @@ where
   pub async fn execute_query(&self, query: EngineQuery) -> Result<EngineResult, DatabaseError> {
     let result = self.engine.execute(query).await?;
     Ok(result)
+  }
+
+  /// Execute an `EngineQuery` and deserialize results into typed structs.
+  ///
+  /// # Arguments
+  ///
+  /// * `query` - The engine query to execute
+  /// * `table_name` - The name of the table being queried (used to fetch schema)
+  ///
+  /// # Returns
+  ///
+  /// A vector of typed structs, one per result row, or an error if query or deserialization fails
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// use serde::Deserialize;
+  /// use db_facade::FromRow;
+  ///
+  /// #[derive(Deserialize)]
+  /// struct User {
+  ///   id: i64,
+  ///   name: String,
+  /// }
+  ///
+  /// let query = EngineQuery::select_simple("users".to_string(), vec![0, 1], None);
+  /// let users: Vec<User> = db.execute_query_typed::<User>(query, "users").await?;
+  /// ```
+  pub async fn execute_query_typed<T: FromRow>(
+    &self,
+    query: EngineQuery,
+    table_name: &str,
+  ) -> Result<Vec<T>, DatabaseError> {
+    let result = self.execute_query(query).await?;
+    let schema = self
+      .engine
+      .describe_table(table_name)
+      .ok_or_else(|| DatabaseError::Other(format!("Table '{}' not found", table_name)))?;
+    result
+      .into_typed::<T>(&schema)
+      .map_err(|e| DatabaseError::Other(e.to_string()))
   }
 
   /// Execute a SQL string using the database schema catalog.

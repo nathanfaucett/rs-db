@@ -39,6 +39,8 @@ db-engine = { path = "crates/db-engine", default-features = false, features = [
     "std",
 ] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+uuid = { version = "1.0", default-features = false, features = ["v4"] }
 [workspace]
 members = [
     "crates/db-facade",

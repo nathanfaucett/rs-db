@@ -1,4 +1,11 @@
-use crate::{EngineRow, EngineValue};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use std::vec::Vec;
+
+use db_types::TableSchema;
+
+use crate::{EngineRow, EngineValue, FromRow, RowDeserializeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
@@ -254,6 +261,54 @@ pub struct EngineResult {
 impl EngineResult {
   pub fn new(rows: Vec<EngineRow>) -> Self {
     Self { rows }
+  }
+
+  /// Deserialize all rows into typed structs using a table schema.
+  ///
+  /// # Arguments
+  ///
+  /// * `schema` - The table schema that describes the row structure
+  ///
+  /// # Returns
+  ///
+  /// A vector of typed structs, one per row, or an error if deserialization fails
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// use serde::Deserialize;
+  /// use db_engine::FromRow;
+  ///
+  /// #[derive(Deserialize)]
+  /// struct User {
+  ///   id: i64,
+  ///   name: String,
+  /// }
+  ///
+  /// let schema = engine.describe_table("users")?;
+  /// let result = engine.execute_query(query)?;
+  /// let users: Vec<User> = result.into_typed::<User>(&schema)?;
+  /// ```
+  pub fn into_typed<T: FromRow>(self, schema: &TableSchema) -> Result<Vec<T>, RowDeserializeError> {
+    self
+      .rows
+      .into_iter()
+      .map(|row| T::from_row(schema, &row))
+      .collect()
+  }
+
+  /// Deserialize row references into typed structs using a table schema.
+  ///
+  /// Similar to `into_typed` but borrows self instead of consuming it.
+  pub fn typed_rows<T: FromRow>(
+    &self,
+    schema: &TableSchema,
+  ) -> Result<Vec<T>, RowDeserializeError> {
+    self
+      .rows
+      .iter()
+      .map(|row| T::from_row(schema, row))
+      .collect()
   }
 }
 

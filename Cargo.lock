@@ -267,6 +267,8 @@ dependencies = [
  "db-engine",
  "db-facade",
  "futures",
+ "serde",
+ "uuid",
 ]
 
 [[package]]
