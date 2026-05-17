@@ -11,6 +11,14 @@ fn to_js_error(message: impl core::fmt::Display) -> JsValue {
   js_sys::Error::new(&message.to_string()).into()
 }
 
+/// Strongly-typed callback for query subscriptions.
+/// TypeScript sees: `(error: Error | null, result: EngineResult | null) => void`
+#[wasm_bindgen]
+extern "C" {
+  #[wasm_bindgen(typescript_type = "(error: Error | null, result: EngineResult | null) => void")]
+  pub type SubscribeCallback;
+}
+
 #[wasm_bindgen]
 pub struct BrowserDatabase {
   inner: Database<PluggableBackendStore>,
@@ -88,8 +96,9 @@ impl BrowserDatabase {
   pub async fn subscribe_query(
     &self,
     query: EngineQuery,
-    callback: js_sys::Function,
+    callback: SubscribeCallback,
   ) -> Result<SubscriptionId, JsValue> {
+    let callback: js_sys::Function = callback.unchecked_into();
     let sub_id = self
       .inner
       .subscribe_query(query, Arc::new(WasmSubscriber { callback }), None)
@@ -102,8 +111,9 @@ impl BrowserDatabase {
   pub async fn subscribe_sql(
     &self,
     sql: &str,
-    callback: js_sys::Function,
+    callback: SubscribeCallback,
   ) -> Result<SubscriptionId, JsValue> {
+    let callback: js_sys::Function = callback.unchecked_into();
     let sub_id = self
       .inner
       .subscribe_sql(sql, Arc::new(WasmSubscriber { callback }), None)
@@ -124,9 +134,17 @@ struct WasmSubscriber {
 }
 
 impl Subscriber for WasmSubscriber {
-  fn on_results(&self, results: EngineResult) {
+  fn on_results(&self, result: Result<EngineResult, db_engine::EngineError>) {
     let this = JsValue::null();
-    let results_js: JsValue = results.into();
-    let _ = self.callback.call1(&this, &results_js);
+    match result {
+      Ok(results) => {
+        let results_js: JsValue = results.into();
+        let _ = self.callback.call2(&this, &JsValue::null(), &results_js);
+      }
+      Err(e) => {
+        let error = js_sys::Error::new(&e.to_string());
+        let _ = self.callback.call2(&this, &error.into(), &JsValue::null());
+      }
+    }
   }
 }

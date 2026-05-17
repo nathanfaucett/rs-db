@@ -1,7 +1,7 @@
 #[cfg(feature = "std")]
 mod tests {
   use db::Database;
-  use db_engine::{EngineQuery, EngineResult, Subscriber, SyncScope};
+  use db_engine::{EngineError, EngineQuery, EngineResult, Subscriber, SyncScope};
   use futures::executor::block_on;
   use std::sync::{Arc, Mutex};
 
@@ -29,9 +29,11 @@ mod tests {
   }
 
   impl Subscriber for CountingSubscriber {
-    fn on_results(&self, results: EngineResult) {
+    fn on_results(&self, result: Result<EngineResult, EngineError>) {
       *self.call_count.lock().unwrap() += 1;
-      *self.last_row_count.lock().unwrap() = results.rows.len();
+      if let Ok(results) = result {
+        *self.last_row_count.lock().unwrap() = results.rows.len();
+      }
     }
   }
 

@@ -173,7 +173,7 @@ where
     let initial_results = self.execute_with_scope(query.clone(), scope).await?;
 
     // Call subscriber with initial results
-    subscriber.on_results(initial_results.clone());
+    subscriber.on_results(Ok(initial_results.clone()));
 
     // Create subscription with initial results
     let subscription = Arc::new(QuerySubscription {
@@ -239,12 +239,11 @@ where
           if results_changed {
             // Update last results and call subscriber
             *sub.last_results.write().unwrap() = Some(new_results.clone());
-            sub.subscriber.on_results(new_results);
+            sub.subscriber.on_results(Ok(new_results));
           }
         }
         Err(e) => {
-          // Log error but don't fail—subscriptions should be resilient
-          eprintln!("Error recomputing subscription {:?}: {:?}", sub.id, e);
+          sub.subscriber.on_results(Err(e));
         }
       }
     }

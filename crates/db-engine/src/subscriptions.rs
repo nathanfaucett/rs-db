@@ -1,4 +1,4 @@
-use crate::{ChangeEvent, EngineQuery, EngineResult, SyncScope};
+use crate::{ChangeEvent, EngineError, EngineQuery, EngineResult, SyncScope};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -22,8 +22,8 @@ impl SubscriptionId {
 /// Trait for objects that want to receive subscription updates.
 /// Called when a subscribed query's results change.
 pub trait Subscriber: Send + Sync {
-  /// Called with new query results.
-  fn on_results(&self, results: EngineResult);
+  /// Called with new query results, or an error if recomputation failed.
+  fn on_results(&self, result: Result<EngineResult, EngineError>);
 }
 
 /// Internal representation of a subscription.
