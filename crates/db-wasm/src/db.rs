@@ -4,12 +4,9 @@ use db_in_memory::InMemoryNamedBTree;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
+use crate::params::{parse_sql_params, to_js_error};
 use crate::pluggable_store::PluggableBackendStore;
 use crate::store_adapter::{DatabaseEngineOptions, StoreAdapterCallbacks};
-
-fn to_js_error(message: impl core::fmt::Display) -> JsValue {
-  js_sys::Error::new(&message.to_string()).into()
-}
 
 /// Strongly-typed callback for query subscriptions.
 /// TypeScript sees: `(error: Error | null, result: EngineResult | null) => void`
@@ -83,6 +80,20 @@ impl BrowserDatabase {
     self.inner.execute_sql(sql).await.map_err(to_js_error)
   }
 
+  #[wasm_bindgen(js_name = executeSqlWithParams)]
+  pub async fn execute_sql_with_params(
+    &mut self,
+    sql: &str,
+    params: JsValue,
+  ) -> Result<EngineResult, JsValue> {
+    let params = parse_sql_params(params)?;
+    self
+      .inner
+      .execute_sql_with_params(sql, &params)
+      .await
+      .map_err(to_js_error)
+  }
+
   #[wasm_bindgen(js_name = selectSimple)]
   pub fn select_simple(
     table: String,
@@ -117,6 +128,23 @@ impl BrowserDatabase {
     let sub_id = self
       .inner
       .subscribe_sql(sql, Arc::new(WasmSubscriber { callback }), None)
+      .await
+      .map_err(to_js_error)?;
+    Ok(sub_id)
+  }
+
+  #[wasm_bindgen(js_name = subscribeSqlWithParams)]
+  pub async fn subscribe_sql_with_params(
+    &self,
+    sql: &str,
+    params: JsValue,
+    callback: SubscribeCallback,
+  ) -> Result<SubscriptionId, JsValue> {
+    let params = parse_sql_params(params)?;
+    let callback: js_sys::Function = callback.unchecked_into();
+    let sub_id = self
+      .inner
+      .subscribe_sql_with_params(sql, &params, Arc::new(WasmSubscriber { callback }), None)
       .await
       .map_err(to_js_error)?;
     Ok(sub_id)

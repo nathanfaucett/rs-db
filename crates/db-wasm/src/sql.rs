@@ -1,11 +1,12 @@
 use db_engine::{EngineQuery, SchemaResolver, TableSchema};
-use db_sql_to_engine::{CanonicalStatement, parse_and_translate, parse_and_translate_statement};
+use db_sql_to_engine::{
+  CanonicalStatement, parse_and_translate, parse_and_translate_statement,
+  parse_and_translate_statement_with_params, parse_and_translate_with_params,
+};
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 
-fn to_js_error(message: impl core::fmt::Display) -> JsValue {
-  js_sys::Error::new(&message.to_string()).into()
-}
+use crate::params::{parse_sql_params, to_js_error};
 
 #[derive(Default)]
 struct StaticSchemaResolver {
@@ -45,4 +46,26 @@ pub fn translate_sql_to_statement(
 ) -> Result<CanonicalStatement, JsValue> {
   let resolver = StaticSchemaResolver::from_tables(schemas);
   parse_and_translate_statement(sql, &resolver).map_err(to_js_error)
+}
+
+#[wasm_bindgen]
+pub fn translate_sql_to_query_with_params(
+  sql: &str,
+  schemas: Vec<TableSchema>,
+  params: JsValue,
+) -> Result<EngineQuery, JsValue> {
+  let resolver = StaticSchemaResolver::from_tables(schemas);
+  let params = parse_sql_params(params)?;
+  parse_and_translate_with_params(sql, &resolver, &params).map_err(to_js_error)
+}
+
+#[wasm_bindgen]
+pub fn translate_sql_to_statement_with_params(
+  sql: &str,
+  schemas: Vec<TableSchema>,
+  params: JsValue,
+) -> Result<CanonicalStatement, JsValue> {
+  let resolver = StaticSchemaResolver::from_tables(schemas);
+  let params = parse_sql_params(params)?;
+  parse_and_translate_statement_with_params(sql, &resolver, &params).map_err(to_js_error)
 }

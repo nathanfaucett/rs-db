@@ -1,4 +1,5 @@
 mod db;
+mod params;
 mod pluggable_store;
 mod sql;
 mod store_adapter;
@@ -9,5 +10,8 @@ pub use db_sql_to_engine as sql_to_engine;
 pub use db_types as types;
 
 pub use db::BrowserDatabase;
-pub use sql::{translate_sql_to_query, translate_sql_to_statement};
+pub use sql::{
+  translate_sql_to_query, translate_sql_to_query_with_params, translate_sql_to_statement,
+  translate_sql_to_statement_with_params,
+};
 pub use store_adapter::DatabaseEngineOptions;

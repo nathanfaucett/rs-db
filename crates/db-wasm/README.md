@@ -24,7 +24,9 @@ import {
   type PrimaryKeyRangeRequest,
   type RowBytes,
   translate_sql_to_query,
+  translate_sql_to_query_with_params,
   translate_sql_to_statement,
+  translate_sql_to_statement_with_params,
 } from "@aicacia/db-wasm";
 import type {
   EngineQuery,
@@ -48,6 +50,48 @@ await db.executeSql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
 await db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Ada')");
 const result = await db.executeSql("SELECT name FROM users WHERE id = 1");
 console.log(result.rows);
+```
+
+## SQL Params
+
+```ts
+import init from "@aicacia/db-wasm";
+import { BrowserDatabase } from "@aicacia/db-wasm";
+
+await init();
+
+const db = BrowserDatabase.open();
+
+await db.executeSql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
+await db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Ada')");
+
+const byPositional = await db.executeSqlWithParams(
+  "SELECT name FROM users WHERE id = $1",
+  [1],
+);
+
+const byNamed = await db.executeSqlWithParams(
+  "SELECT name FROM users WHERE id = :id",
+  { id: 1 },
+);
+
+console.log(byPositional.rows, byNamed.rows);
+```
+
+You can also translate with params:
+
+```ts
+const query = translate_sql_to_query_with_params(
+  "SELECT name FROM users WHERE id = :id",
+  schemas,
+  { id: 1 },
+);
+
+const statement = translate_sql_to_statement_with_params(
+  "SELECT name FROM users WHERE id = $1",
+  schemas,
+  [1],
+);
 ```
 
 ## Notes
