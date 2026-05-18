@@ -92,6 +92,7 @@ impl ColumnSchema {
         | (EngineType::Text, EngineValue::Text(_))
         | (EngineType::Uuid, EngineValue::Uuid(_))
         | (EngineType::Blob, EngineValue::Blob(_))
+        | (EngineType::Json, EngineValue::Json(_))
         | (_, EngineValue::Null)
     )
   }

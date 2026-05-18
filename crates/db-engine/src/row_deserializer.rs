@@ -237,6 +237,7 @@ impl<'de> serde::Deserializer<'de> for EngineValueDeserializer<'de> {
       EngineValue::Text(s) => visitor.visit_str(s),
       EngineValue::Uuid(bytes) => visitor.visit_bytes(bytes),
       EngineValue::Blob(bytes) => visitor.visit_bytes(bytes),
+      EngineValue::Json(s) => visitor.visit_str(s),
     }
   }
 

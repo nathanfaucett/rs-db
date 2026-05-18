@@ -8,6 +8,7 @@ mod change_event;
 mod engine;
 mod engine_kernel;
 mod from_row;
+mod json_ops;
 mod predicate;
 mod query;
 mod row_deserialize_error;
@@ -22,6 +23,7 @@ pub use change_event::{ChangeEvent, ChangeListener};
 pub use db_types::schema::{ColumnSchema, IndexSchema, TableSchema};
 pub use engine::{EngineDatabase, EngineTransaction};
 pub use from_row::FromRow;
+pub use json_ops::{json_extract, json_merge, json_valid};
 pub use query::{
   Aggregate, HavingPredicate, JoinClause, JoinKind, JoinOn, OrderBy, QualifiedColumn,
   QualifiedOperand, QualifiedPredicate, RefOrAgg, SelectOptions, SortDirection, UpdateAssignment,

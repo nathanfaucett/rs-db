@@ -470,10 +470,10 @@ fn sql_type_to_engine_type(data_type: &DataType) -> Result<db_engine::EngineType
     | SqlDataType::TinyText
     | SqlDataType::MediumText
     | SqlDataType::LongText
-    | SqlDataType::JSON
     | SqlDataType::Clob(_)
     | SqlDataType::CharacterLargeObject(_)
     | SqlDataType::CharLargeObject(_) => db_engine::EngineType::Text,
+    SqlDataType::JSON => db_engine::EngineType::Json,
     SqlDataType::Uuid => db_engine::EngineType::Uuid,
     SqlDataType::Binary(_)
     | SqlDataType::Varbinary(_)
@@ -1129,6 +1129,30 @@ fn object_name_to_column(
   }
 }
 
+/// Converts an EngineValue to the appropriate type for a given column.
+/// E.g., converts Text to Json if the column type is Json.
+fn convert_value_to_column_type(
+  value: db_engine::EngineValue,
+  column_type: &db_engine::EngineType,
+) -> Result<db_engine::EngineValue, TranslateError> {
+  match (value, column_type) {
+    // Text -> Json conversion for JSON columns
+    (db_engine::EngineValue::Text(s), db_engine::EngineType::Json) => {
+      // Validate that the string is valid JSON
+      if serde_json::from_str::<serde_json::Value>(&s).is_err() {
+        return Err(TranslateError::UnsupportedFeature(format!(
+          "invalid JSON literal: {}",
+          s
+        )));
+      }
+      Ok(db_engine::EngineValue::Json(s))
+    }
+    // Keep value as-is if types match or are null
+    (db_engine::EngineValue::Null, _) => Ok(db_engine::EngineValue::Null),
+    (v, _) => Ok(v),
+  }
+}
+
 fn translate_insert(
   insert: &sqlparser::ast::Insert,
   resolver: &dyn SchemaResolver,
@@ -1205,7 +1229,13 @@ fn translate_insert(
       .iter()
       .position(|c| c.name == *col_name)
       .ok_or_else(|| TranslateError::UnknownColumn(col_name.clone()))?;
-    row[idx] = mapper.map_sql_value(expr)?;
+    let mut value = mapper.map_sql_value(expr)?;
+
+    // Convert to appropriate type based on schema
+    let column_type = &schema.columns[idx].data_type;
+    value = convert_value_to_column_type(value, column_type)?;
+
+    row[idx] = value;
   }
 
   let mut alias_map: HashMap<String, String> = HashMap::new();

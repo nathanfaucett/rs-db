@@ -61,6 +61,10 @@ fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValu
       sink.push_bytes(&[5]);
       sink.push_bytes(bytes);
     }
+    EngineValue::Json(json) => {
+      sink.push_bytes(&[6]);
+      encode_string_into_sink(sink, json);
+    }
   }
 }
 
@@ -77,6 +81,7 @@ fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeErr
       value.copy_from_slice(bytes);
       Ok(EngineValue::Uuid(value))
     }
+    6 => Ok(EngineValue::Json(decode_string(cursor)?)),
     _ => Err(DecodeError::Malformed),
   }
 }

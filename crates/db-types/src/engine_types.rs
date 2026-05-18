@@ -27,6 +27,7 @@ pub enum EngineType {
   Text,
   Uuid,
   Blob,
+  Json,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ pub enum EngineValue {
   Text(String),
   Uuid([u8; 16]),
   Blob(Vec<u8>),
+  Json(String),
   Null,
 }
 
@@ -59,6 +61,7 @@ impl PartialEq for EngineValue {
       (EngineValue::Text(left), EngineValue::Text(right)) => left == right,
       (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left == right,
       (EngineValue::Blob(left), EngineValue::Blob(right)) => left == right,
+      (EngineValue::Json(left), EngineValue::Json(right)) => left == right,
       _ => false,
     }
   }
@@ -97,6 +100,10 @@ impl Hash for EngineValue {
       }
       EngineValue::Blob(value) => {
         state.write_u8(5);
+        value.hash(state);
+      }
+      EngineValue::Json(value) => {
+        state.write_u8(6);
         value.hash(state);
       }
     }
@@ -142,17 +149,28 @@ impl Ord for EngineValue {
       (EngineValue::Text(left), EngineValue::Text(right)) => left.cmp(right),
       (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left.cmp(right),
       (EngineValue::Blob(left), EngineValue::Blob(right)) => left.cmp(right),
+      (EngineValue::Json(left), EngineValue::Json(right)) => left.cmp(right),
       (EngineValue::Integer(_), EngineValue::Text(_)) => Ordering::Less,
       (EngineValue::Integer(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Integer(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Integer(_), EngineValue::Json(_)) => Ordering::Less,
       (EngineValue::Float(_), EngineValue::Text(_)) => Ordering::Less,
       (EngineValue::Float(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Float(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Float(_), EngineValue::Json(_)) => Ordering::Less,
       (EngineValue::Text(_), EngineValue::Integer(_)) => Ordering::Greater,
       (EngineValue::Text(_), EngineValue::Float(_)) => Ordering::Greater,
       (EngineValue::Text(_), EngineValue::Uuid(_)) => Ordering::Less,
       (EngineValue::Text(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Text(_), EngineValue::Json(_)) => Ordering::Less,
       (EngineValue::Uuid(_), EngineValue::Blob(_)) => Ordering::Less,
+      (EngineValue::Uuid(_), EngineValue::Json(_)) => Ordering::Less,
+      (EngineValue::Blob(_), EngineValue::Json(_)) => Ordering::Less,
+      (EngineValue::Json(_), EngineValue::Integer(_)) => Ordering::Greater,
+      (EngineValue::Json(_), EngineValue::Float(_)) => Ordering::Greater,
+      (EngineValue::Json(_), EngineValue::Text(_)) => Ordering::Greater,
+      (EngineValue::Json(_), EngineValue::Uuid(_)) => Ordering::Greater,
+      (EngineValue::Json(_), EngineValue::Blob(_)) => Ordering::Greater,
       (EngineValue::Uuid(_), _) => Ordering::Greater,
       (EngineValue::Blob(_), _) => Ordering::Greater,
     }
@@ -181,6 +199,7 @@ impl fmt::Display for EngineValue {
         }
         Ok(())
       }
+      EngineValue::Json(value) => write!(f, "{}", value),
       EngineValue::Null => write!(f, "NULL"),
     }
   }
