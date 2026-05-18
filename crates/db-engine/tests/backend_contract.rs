@@ -35,37 +35,43 @@ fn multi_tree_atomicity_enables_cross_table_updates() {
     let mut db = make_test_db();
 
     // Create two tables
-    db.register_table(TableSchema {
-      name: "t1".into(),
-      columns: vec![
-        ColumnSchema {
-          name: "id".into(),
-          data_type: EngineType::Uuid,
-        },
-        ColumnSchema {
-          name: "value".into(),
-          data_type: EngineType::Integer,
-        },
-      ],
-      primary_key: vec![0],
-    })
+    db.register_table(
+      TableSchema {
+        name: "t1".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "value".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+      false,
+    )
     .await
     .expect("register t1");
 
-    db.register_table(TableSchema {
-      name: "t2".into(),
-      columns: vec![
-        ColumnSchema {
-          name: "id".into(),
-          data_type: EngineType::Uuid,
-        },
-        ColumnSchema {
-          name: "value".into(),
-          data_type: EngineType::Integer,
-        },
-      ],
-      primary_key: vec![0],
-    })
+    db.register_table(
+      TableSchema {
+        name: "t2".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "value".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+      false,
+    )
     .await
     .expect("register t2");
 

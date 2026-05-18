@@ -31,8 +31,8 @@ proptest! {
 
   #[test]
   fn engine_key_ordering(a in engine_value_strategy(), b in engine_value_strategy()) {
-    let left_key = <DefaultEncoding as KeyEncoding>::encode_values(&[a.clone()]);
-    let right_key = <DefaultEncoding as KeyEncoding>::encode_values(&[b.clone()]);
+    let left_key = <DefaultEncoding as KeyEncoding>::encode_values(std::slice::from_ref(&a));
+    let right_key = <DefaultEncoding as KeyEncoding>::encode_values(std::slice::from_ref(&b));
 
     let left_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&left_key);
     let right_encoded = <EngineKeyCodec as db_core::ValueCodec<EngineKey>>::encode_to_vec(&right_key);

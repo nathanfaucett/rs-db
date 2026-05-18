@@ -557,4 +557,35 @@ mod tests {
       let _ = fs::remove_file(path);
     });
   }
+
+  #[test]
+  fn automerge_if_exists_not_exists() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE IF NOT EXISTS test_table (id UUID PRIMARY KEY);")
+        .await
+        .expect("create if not exists on missing table");
+      db.execute_sql("CREATE TABLE IF NOT EXISTS test_table (id UUID PRIMARY KEY);")
+        .await
+        .expect("create if not exists on existing table");
+
+      db.execute_sql("CREATE TABLE test_table (id UUID PRIMARY KEY);")
+        .await
+        .expect_err("plain create should fail when table exists");
+
+      db.execute_sql("DROP TABLE IF EXISTS test_table;")
+        .await
+        .expect("drop if exists on existing table");
+      db.execute_sql("DROP TABLE IF EXISTS test_table;")
+        .await
+        .expect("drop if exists on missing table");
+
+      db.execute_sql("DROP TABLE test_table;")
+        .await
+        .expect_err("plain drop should fail when table is missing");
+    });
+  }
 }

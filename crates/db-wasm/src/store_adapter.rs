@@ -903,16 +903,12 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
     future::ready(Ok(tree))
   }
 
-  fn begin_transaction(
-    &self,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + Send + '_ {
-    async move {
-      let backend_tx = self.begin_backend_transaction()?;
-      Ok(StoreAdapterTransaction {
-        adapter: self.clone(),
-        backend_tx,
-      })
-    }
+  async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
+    let backend_tx = self.begin_backend_transaction()?;
+    Ok(StoreAdapterTransaction {
+      adapter: self.clone(),
+      backend_tx,
+    })
   }
 }
 
@@ -1111,15 +1107,11 @@ impl db_core::BTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
 impl db_core::BTree<EngineKey, Vec<u8>> for StoreAdapterTree {
   type Transaction = StoreAdapterTransaction;
 
-  fn transaction<'a>(
-    &'a self,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + Send + 'a {
-    async move {
-      let backend_tx = self.adapter.begin_backend_transaction()?;
-      Ok(StoreAdapterTransaction {
-        adapter: self.adapter.clone(),
-        backend_tx,
-      })
-    }
+  async fn transaction(&self) -> BTreeResult<Self::Transaction> {
+    let backend_tx = self.adapter.begin_backend_transaction()?;
+    Ok(StoreAdapterTransaction {
+      adapter: self.adapter.clone(),
+      backend_tx,
+    })
   }
 }

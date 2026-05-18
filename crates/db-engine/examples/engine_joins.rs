@@ -44,8 +44,12 @@ fn main() {
       primary_key: vec![0],
     };
 
-    db.register_table(users).await.expect("register users");
-    db.register_table(orders).await.expect("register orders");
+    db.register_table(users, false)
+      .await
+      .expect("register users");
+    db.register_table(orders, false)
+      .await
+      .expect("register orders");
 
     // Insert some users
     db.execute(EngineQuery::Insert {

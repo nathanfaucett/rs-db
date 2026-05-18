@@ -27,7 +27,9 @@ fn main() {
       primary_key: vec![0],
     };
 
-    db.register_table(schema).await.expect("register table");
+    db.register_table(schema, false)
+      .await
+      .expect("register table");
 
     db.execute(EngineQuery::Insert {
       table: "items".into(),

@@ -27,8 +27,8 @@ impl From<db_engine::EngineQuery> for CanonicalQuery {
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum DdlOp {
-  CreateTable(db_engine::TableSchema),
-  DropTable(String),
+  CreateTable(db_engine::TableSchema, bool),
+  DropTable(String, bool),
   CreateIndex(db_engine::IndexSchema),
   DropIndex(String),
 }

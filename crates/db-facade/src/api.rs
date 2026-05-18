@@ -255,13 +255,21 @@ where
   }
 
   /// Register a table schema with the engine.
-  pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), DatabaseError> {
-    self.engine.register_table(schema).await?;
+  pub async fn register_table(
+    &mut self,
+    schema: TableSchema,
+    if_not_exists: bool,
+  ) -> Result<(), DatabaseError> {
+    self.engine.register_table(schema, if_not_exists).await?;
     Ok(())
   }
 
-  pub async fn drop_table(&mut self, table_name: &str) -> Result<(), DatabaseError> {
-    self.engine.drop_table(table_name).await?;
+  pub async fn drop_table(
+    &mut self,
+    table_name: &str,
+    if_exists: bool,
+  ) -> Result<(), DatabaseError> {
+    self.engine.drop_table(table_name, if_exists).await?;
     Ok(())
   }
 
@@ -346,12 +354,12 @@ where
   pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, DatabaseError> {
     match parse_and_translate_statement(sql, self) {
       Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
-        self.register_table(schema).await?;
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema, if_not_exists))) => {
+        self.register_table(schema, if_not_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
-        self.engine.drop_table(&name).await?;
+      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name, if_exists))) => {
+        self.engine.drop_table(&name, if_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
       Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
@@ -374,12 +382,12 @@ where
   ) -> Result<EngineResult, DatabaseError> {
     match parse_and_translate_statement_with_params(sql, self, params) {
       Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema))) => {
-        self.register_table(schema).await?;
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema, if_not_exists))) => {
+        self.register_table(schema, if_not_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name))) => {
-        self.engine.drop_table(&name).await?;
+      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name, if_exists))) => {
+        self.engine.drop_table(&name, if_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
       Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {

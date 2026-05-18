@@ -10,13 +10,6 @@ struct TestUser {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct TestUserWithEmail {
-  id: i64,
-  name: String,
-  email: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
 struct TestUserOptional {
   id: i64,
   name: String,

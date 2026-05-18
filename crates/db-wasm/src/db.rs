@@ -47,12 +47,20 @@ impl BrowserDatabase {
 
   #[wasm_bindgen(js_name = registerTable)]
   pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), JsValue> {
-    self.inner.register_table(schema).await.map_err(to_js_error)
+    self
+      .inner
+      .register_table(schema, false)
+      .await
+      .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = dropTable)]
   pub async fn drop_table(&mut self, table_name: &str) -> Result<(), JsValue> {
-    self.inner.drop_table(table_name).await.map_err(to_js_error)
+    self
+      .inner
+      .drop_table(table_name, false)
+      .await
+      .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = registerIndex)]

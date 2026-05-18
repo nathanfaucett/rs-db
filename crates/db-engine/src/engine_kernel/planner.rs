@@ -240,12 +240,26 @@ where
     self.catalog.table(table_name)
   }
 
-  pub(crate) async fn register_table(&mut self, schema: TableSchema) -> Result<(), EngineError> {
-    self.catalog.register_table(&self.store, schema).await
+  pub(crate) async fn register_table(
+    &mut self,
+    schema: TableSchema,
+    if_not_exists: bool,
+  ) -> Result<(), EngineError> {
+    self
+      .catalog
+      .register_table(&self.store, schema, if_not_exists)
+      .await
   }
 
-  pub(crate) async fn drop_table(&mut self, table_name: &str) -> Result<(), EngineError> {
-    self.catalog.drop_table(&self.store, table_name).await
+  pub(crate) async fn drop_table(
+    &mut self,
+    table_name: &str,
+    if_exists: bool,
+  ) -> Result<(), EngineError> {
+    self
+      .catalog
+      .drop_table(&self.store, table_name, if_exists)
+      .await
   }
 
   pub(crate) async fn register_index(&mut self, schema: IndexSchema) -> Result<(), EngineError> {

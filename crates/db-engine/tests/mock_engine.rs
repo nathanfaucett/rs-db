@@ -17,24 +17,27 @@ fn make_db_with_items() -> TestDb {
   let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
   let mut db = EngineDatabase::new(store);
   block_on(async {
-    db.register_table(TableSchema {
-      name: "items".into(),
-      columns: vec![
-        ColumnSchema {
-          name: "id".into(),
-          data_type: EngineType::Uuid,
-        },
-        ColumnSchema {
-          name: "name".into(),
-          data_type: EngineType::Text,
-        },
-        ColumnSchema {
-          name: "score".into(),
-          data_type: EngineType::Integer,
-        },
-      ],
-      primary_key: vec![0],
-    })
+    db.register_table(
+      TableSchema {
+        name: "items".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+      false,
+    )
     .await
     .expect("register table");
 
@@ -118,7 +121,9 @@ fn engine_works_with_mock_btree() {
       primary_key: vec![0],
     };
 
-    db.register_table(schema).await.expect("register table");
+    db.register_table(schema, false)
+      .await
+      .expect("register table");
 
     db.execute(EngineQuery::Insert {
       table: "items".into(),

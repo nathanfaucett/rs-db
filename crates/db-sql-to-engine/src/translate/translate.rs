@@ -314,7 +314,10 @@ pub fn translate_statement_to_canonical(
       crate::ir::CanonicalStatement::Query(translate_statement(stmt, resolver, mapper)?),
     ),
     Statement::CreateTable(create_table) => Ok(crate::ir::CanonicalStatement::Ddl(
-      crate::ir::DdlOp::CreateTable(translate_create_table(create_table)?),
+      crate::ir::DdlOp::CreateTable(
+        translate_create_table(create_table)?,
+        create_table.if_not_exists,
+      ),
     )),
     Statement::CreateIndex(create_index) => Ok(crate::ir::CanonicalStatement::Ddl(
       crate::ir::DdlOp::CreateIndex(translate_create_index(create_index, resolver)?),
@@ -323,9 +326,10 @@ pub fn translate_statement_to_canonical(
       object_type,
       names,
       table,
+      if_exists,
       ..
     } => Ok(crate::ir::CanonicalStatement::Ddl(
-      translate_drop_statement(object_type, names, table)?,
+      translate_drop_statement(object_type, names, table, *if_exists)?,
     )),
     _ => Err(TranslateError::UnsupportedStatement),
   }
@@ -547,6 +551,7 @@ fn translate_drop_statement(
   object_type: &ObjectType,
   names: &[ObjectName],
   _table: &Option<ObjectName>,
+  if_exists: bool,
 ) -> Result<crate::ir::DdlOp, TranslateError> {
   if names.len() != 1 {
     return Err(TranslateError::UnsupportedFeature(
@@ -557,7 +562,7 @@ fn translate_drop_statement(
   let object_name = object_name_to_string(&names[0]);
 
   match object_type {
-    ObjectType::Table => Ok(crate::ir::DdlOp::DropTable(object_name)),
+    ObjectType::Table => Ok(crate::ir::DdlOp::DropTable(object_name, if_exists)),
     ObjectType::Index => Ok(crate::ir::DdlOp::DropIndex(object_name)),
     _ => Err(TranslateError::UnsupportedStatement),
   }
@@ -2104,7 +2109,7 @@ mod tests {
     .expect("uuid primary key should be accepted");
 
     match statement {
-      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateTable(table)) => {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateTable(table, _)) => {
         assert_eq!(table.primary_key, vec![0]);
         assert_eq!(table.columns[0].data_type, EngineType::Uuid);
       }

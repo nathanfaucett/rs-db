@@ -92,12 +92,16 @@ where
     self.kernel.load_schema().await
   }
 
-  pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), EngineError> {
-    self.kernel.register_table(schema).await
+  pub async fn register_table(
+    &mut self,
+    schema: TableSchema,
+    if_not_exists: bool,
+  ) -> Result<(), EngineError> {
+    self.kernel.register_table(schema, if_not_exists).await
   }
 
-  pub async fn drop_table(&mut self, table_name: &str) -> Result<(), EngineError> {
-    self.kernel.drop_table(table_name).await
+  pub async fn drop_table(&mut self, table_name: &str, if_exists: bool) -> Result<(), EngineError> {
+    self.kernel.drop_table(table_name, if_exists).await
   }
 
   pub async fn register_index(&mut self, schema: IndexSchema) -> Result<(), EngineError> {
@@ -542,7 +546,7 @@ mod tests {
       };
 
       database
-        .register_table(schema)
+        .register_table(schema, false)
         .await
         .expect("register users table");
 
@@ -590,7 +594,7 @@ mod tests {
       };
 
       database
-        .register_table(schema)
+        .register_table(schema, false)
         .await
         .expect("register measurements table");
 
@@ -639,7 +643,7 @@ mod tests {
       let blob = vec![0xde, 0xad, 0xbe, 0xef];
 
       database
-        .register_table(schema)
+        .register_table(schema, false)
         .await
         .expect("register files table");
 
@@ -686,7 +690,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
 
@@ -774,8 +778,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       // Insert users
       db.execute(EngineQuery::Insert {
@@ -915,8 +923,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       // Insert users
       db.execute(EngineQuery::Insert {
@@ -1085,8 +1097,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       db.execute(EngineQuery::Insert {
         table: "users".into(),
@@ -1237,8 +1253,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       // Insert users: include a user with no orders
       db.execute(EngineQuery::Insert {
@@ -1382,8 +1402,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       // Insert a user and an order that references a missing user
       db.execute(EngineQuery::Insert {
@@ -1501,8 +1525,12 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
 
       // user 1 exists, user 2 has no orders; order 3 references missing user 3
       db.execute(EngineQuery::Insert {
@@ -1648,9 +1676,13 @@ mod tests {
         primary_key: vec![0],
       };
 
-      db.register_table(users).await.expect("register users");
-      db.register_table(orders).await.expect("register orders");
-      db.register_table(products)
+      db.register_table(users, false)
+        .await
+        .expect("register users");
+      db.register_table(orders, false)
+        .await
+        .expect("register orders");
+      db.register_table(products, false)
         .await
         .expect("register products");
 
@@ -1774,7 +1806,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
       database
@@ -1836,7 +1868,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
       database
@@ -1929,7 +1961,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
       database
@@ -2012,7 +2044,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
 
@@ -2075,7 +2107,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
 
@@ -2139,7 +2171,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
 
@@ -2214,7 +2246,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
 
@@ -2290,42 +2322,48 @@ mod tests {
       let mut database = EngineDatabase::new(store);
 
       database
-        .register_table(TableSchema {
-          name: "users".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "team_id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "score".into(),
-              data_type: EngineType::Integer,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "users".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "team_id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "score".into(),
+                data_type: EngineType::Integer,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register users table");
 
       database
-        .register_table(TableSchema {
-          name: "teams".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "bonus".into(),
-              data_type: EngineType::Integer,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "teams".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "bonus".into(),
+                data_type: EngineType::Integer,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register teams table");
 
@@ -2400,46 +2438,52 @@ mod tests {
       let mut database = EngineDatabase::new(store);
 
       database
-        .register_table(TableSchema {
-          name: "users".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "team_id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "score".into(),
-              data_type: EngineType::Integer,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "users".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "team_id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "score".into(),
+                data_type: EngineType::Integer,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register users table");
 
       database
-        .register_table(TableSchema {
-          name: "teams".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "dept_id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "bonus".into(),
-              data_type: EngineType::Integer,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "teams".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "dept_id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "bonus".into(),
+                data_type: EngineType::Integer,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register teams table");
 
@@ -2530,20 +2574,23 @@ mod tests {
       let mut database = EngineDatabase::new(store);
 
       database
-        .register_table(TableSchema {
-          name: "users".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "score".into(),
-              data_type: EngineType::Integer,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "users".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "score".into(),
+                data_type: EngineType::Integer,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register users table");
 
@@ -2577,7 +2624,7 @@ mod tests {
       };
 
       database
-        .register_table(users)
+        .register_table(users, false)
         .await
         .expect("register users table");
       database
@@ -2633,20 +2680,23 @@ mod tests {
       let mut database = EngineDatabase::new(store.clone());
 
       database
-        .register_table(TableSchema {
-          name: "users".into(),
-          columns: vec![
-            ColumnSchema {
-              name: "id".into(),
-              data_type: EngineType::Uuid,
-            },
-            ColumnSchema {
-              name: "name".into(),
-              data_type: EngineType::Text,
-            },
-          ],
-          primary_key: vec![0],
-        })
+        .register_table(
+          TableSchema {
+            name: "users".into(),
+            columns: vec![
+              ColumnSchema {
+                name: "id".into(),
+                data_type: EngineType::Uuid,
+              },
+              ColumnSchema {
+                name: "name".into(),
+                data_type: EngineType::Text,
+              },
+            ],
+            primary_key: vec![0],
+          },
+          false,
+        )
         .await
         .expect("register users table");
 

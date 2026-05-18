@@ -102,6 +102,7 @@ impl EngineCatalog {
     &mut self,
     store: &S,
     schema: TableSchema,
+    if_not_exists: bool,
   ) -> Result<(), EngineError>
   where
     S: EngineStore,
@@ -111,7 +112,11 @@ impl EngineCatalog {
     schema.validate_primary_key_definition()?;
 
     if self.contains_table(&schema.name) {
-      return Err(EngineError::DuplicateTable(schema.name));
+      return if if_not_exists {
+        Ok(())
+      } else {
+        Err(EngineError::DuplicateTable(schema.name))
+      };
     }
 
     let mut tx = store.engine_transaction().await?;
@@ -151,6 +156,7 @@ impl EngineCatalog {
     &mut self,
     store: &S,
     table_name: &str,
+    if_exists: bool,
   ) -> Result<(), EngineError>
   where
     S: EngineStore,
@@ -158,7 +164,11 @@ impl EngineCatalog {
     self.load_from_store(store).await?;
 
     if !self.contains_table(table_name) {
-      return Err(EngineError::TableNotFound(table_name.into()));
+      return if if_exists {
+        Ok(())
+      } else {
+        Err(EngineError::TableNotFound(table_name.into()))
+      };
     }
 
     let indexes = self.indexes_for_table(table_name);
