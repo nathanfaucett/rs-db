@@ -824,6 +824,14 @@ fn translate_update(
       .ok_or_else(|| TranslateError::UnknownColumn(column.clone()))?;
     let value =
       sql_expr_to_update_value_expr(&assignment.value, &alias_map, &table_schemas, mapper)?;
+    let value = if let db_engine::UpdateValueExpr::Value(literal) = value {
+      db_engine::UpdateValueExpr::Value(convert_value_to_column_type(
+        literal,
+        &schema.columns[column_index].data_type,
+      )?)
+    } else {
+      value
+    };
     resolved_assignments.push(db_engine::UpdateAssignment {
       column_index,
       value,

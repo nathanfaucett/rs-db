@@ -11,7 +11,7 @@ fn test_json_type_codec_roundtrip() {
 
   // Encode
   use db_types::key_encoding::DefaultEncoding;
-  let encoded = DefaultEncoding::encode_values(&[value.clone()]);
+  let encoded = DefaultEncoding::encode_values(std::slice::from_ref(&value));
 
   // Decode
   let decoded = DefaultEncoding::decode_values(&encoded).expect("failed to decode");
@@ -44,7 +44,7 @@ fn test_json_mixed_types_codec_roundtrip() {
     EngineValue::Text("hello".to_string()),
     EngineValue::Json(r#"{"key": "value"}"#.to_string()),
     EngineValue::Null,
-    EngineValue::Float(3.14),
+    EngineValue::Float(3.5),
   ];
 
   let encoded = DefaultEncoding::encode_values(&values);
@@ -135,7 +135,7 @@ fn test_json_roundtrip_preserves_structure() {
   let value = EngineValue::Json(normalized.clone());
 
   // Roundtrip
-  let encoded = DefaultEncoding::encode_values(&[value.clone()]);
+  let encoded = DefaultEncoding::encode_values(std::slice::from_ref(&value));
   let decoded = DefaultEncoding::decode_values(&encoded).expect("decode failed");
 
   assert_eq!(decoded[0], value);
