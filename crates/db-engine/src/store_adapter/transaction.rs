@@ -1,4 +1,5 @@
 use core::future::Future;
+use db_core::MaybeSend;
 use futures::Stream;
 
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
@@ -7,7 +8,7 @@ use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSch
 ///
 /// This trait only concerns row access by primary key (or table scan). It does
 /// not resolve secondary index predicates.
-pub trait RowStore: Send + 'static {
+pub trait RowStore: MaybeSend + 'static {
   fn get_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
@@ -34,7 +35,7 @@ pub trait RowStore: Send + 'static {
 }
 
 /// Read and write catalog schemas (tables and indexes) within a transaction.
-pub trait SchemaStore: Send + 'static {
+pub trait SchemaStore: MaybeSend + 'static {
   fn insert_table_schema<'a>(
     &'a mut self,
     schema: TableSchema,
@@ -64,7 +65,7 @@ pub trait SchemaStore: Send + 'static {
 ///
 /// This trait only concerns index access and index-entry maintenance. It should
 /// return primary-key identities, not materialized rows.
-pub trait IndexStore: Send + 'static {
+pub trait IndexStore: MaybeSend + 'static {
   fn insert_index_entry<'a>(
     &'a mut self,
     index: &'a IndexSchema,
@@ -86,7 +87,7 @@ pub trait IndexStore: Send + 'static {
 }
 
 /// Lifecycle control for a transaction (commit or rollback).
-pub trait TransactionControl: Send + 'static {
+pub trait TransactionControl: MaybeSend + 'static {
   fn commit(self) -> impl Future<Output = Result<(), EngineError>>;
 
   fn rollback(self) -> impl Future<Output = Result<(), EngineError>>;

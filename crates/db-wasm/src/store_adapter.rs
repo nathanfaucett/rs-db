@@ -1,7 +1,7 @@
+use async_stream::stream;
 use core::fmt;
-use core::future;
 use core::ops::{Bound, RangeBounds};
-use db_core::{BTreeError, BTreeResult, NamedTreeProvider, NamedTreeTransaction, block_on};
+use db_core::{BTreeError, BTreeResult, MaybeSend, NamedTreeProvider, NamedTreeTransaction};
 use db_engine::{EngineKey, PrimaryKey};
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use db_types::persistence::decode_index_schema_row;
@@ -73,31 +73,31 @@ export type IndexSchemaEntry = {
 };
 
 export interface DatabaseTransaction {
-  getRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined>;
-  putRow(table: string, primaryKey: PrimaryKey, row: RowBytes): Promise<void>;
-  deleteRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined>;
-  rangeRows(table: string, range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]>;
-  addIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
-  removeIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void>;
+  getRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  putRow(table: string, primaryKey: PrimaryKey, row: RowBytes): Promise<void> | void;
+  deleteRow(table: string, primaryKey: PrimaryKey): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  rangeRows(table: string, range: PrimaryKeyRangeRequest): Promise<PrimaryKeyEntry[]> | PrimaryKeyEntry[];
+  addIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> | void;
+  removeIndex(index: string, indexKey: EngineKey, rowPrimaryKey: PrimaryKey): Promise<void> | void;
   /**
    * Returns index entries sorted by ascending EngineKey byte order.
    * Apply start/end bounds using bytewise lexicographic comparison.
    */
-  rangeIndex(index: string, range: IndexRangeRequest): Promise<IndexEntry[]>;
-  getTableSchema(table: string): Promise<RowBytes | null | undefined>;
-  putTableSchema(table: string, row: RowBytes): Promise<void>;
-  deleteTableSchema(table: string): Promise<RowBytes | null | undefined>;
-  rangeTableSchemas(): Promise<TableSchemaEntry[]>;
-  getIndexSchema(index: string): Promise<RowBytes | null | undefined>;
-  putIndexSchema(index: string, row: RowBytes): Promise<void>;
-  deleteIndexSchema(index: string): Promise<RowBytes | null | undefined>;
-  rangeIndexSchemas(): Promise<IndexSchemaEntry[]>;
-  commit(): Promise<void>;
-  rollback(): Promise<void>;
+  rangeIndex(index: string, range: IndexRangeRequest): Promise<IndexEntry[]> | IndexEntry[];
+  getTableSchema(table: string): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  putTableSchema(table: string, row: RowBytes): Promise<void> | void;
+  deleteTableSchema(table: string): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  rangeTableSchemas(): Promise<TableSchemaEntry[]> | TableSchemaEntry[];
+  getIndexSchema(index: string): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  putIndexSchema(index: string, row: RowBytes): Promise<void> | void;
+  deleteIndexSchema(index: string): Promise<RowBytes | null | undefined> | RowBytes | null | undefined;
+  rangeIndexSchemas(): Promise<IndexSchemaEntry[]> | IndexSchemaEntry[];
+  commit(): Promise<void> | void;
+  rollback(): Promise<void> | void;
 }
 
 export interface DatabaseEngineOptions {
-  beginTransaction(): Promise<DatabaseTransaction>;
+  beginTransaction(mode: "readonly" | "readwrite"): Promise<DatabaseTransaction> | DatabaseTransaction;
 }
 "#;
 
@@ -139,32 +139,32 @@ fn from_js<T: DeserializeOwned>(value: JsValue) -> BTreeResult<T> {
   serde_wasm_bindgen::from_value(value).map_err(serde_error)
 }
 
-fn resolve_js(value: JsValue) -> BTreeResult<JsValue> {
+async fn resolve_js(value: JsValue) -> BTreeResult<JsValue> {
   let promise = Promise::resolve(&value);
-  block_on(JsFuture::from(promise)).map_err(js_error)
+  JsFuture::from(promise).await.map_err(js_error)
 }
 
-fn call_method0(function: &Function, this: &JsValue) -> BTreeResult<JsValue> {
+async fn call_method0(function: &Function, this: &JsValue) -> BTreeResult<JsValue> {
   let value = function.call0(this).map_err(js_error)?;
-  resolve_js(value)
+  resolve_js(value).await
 }
 
-fn call_method1(function: &Function, this: &JsValue, arg0: &JsValue) -> BTreeResult<JsValue> {
+async fn call_method1(function: &Function, this: &JsValue, arg0: &JsValue) -> BTreeResult<JsValue> {
   let value = function.call1(this, arg0).map_err(js_error)?;
-  resolve_js(value)
+  resolve_js(value).await
 }
 
-fn call_method2(
+async fn call_method2(
   function: &Function,
   this: &JsValue,
   arg0: &JsValue,
   arg1: &JsValue,
 ) -> BTreeResult<JsValue> {
   let value = function.call2(this, arg0, arg1).map_err(js_error)?;
-  resolve_js(value)
+  resolve_js(value).await
 }
 
-fn call_method3(
+async fn call_method3(
   function: &Function,
   this: &JsValue,
   arg0: &JsValue,
@@ -172,7 +172,7 @@ fn call_method3(
   arg2: &JsValue,
 ) -> BTreeResult<JsValue> {
   let value = function.call3(this, arg0, arg1, arg2).map_err(js_error)?;
-  resolve_js(value)
+  resolve_js(value).await
 }
 
 fn load_required_function(adapter: &JsValue, name: &str) -> Result<Function, String> {
@@ -215,12 +215,12 @@ struct BackendTransaction {
 }
 
 impl BackendTransaction {
-  fn commit(self) -> BTreeResult<()> {
-    call_method0(&self.commit, &self.value).map(|_| ())
+  async fn commit(self) -> BTreeResult<()> {
+    call_method0(&self.commit, &self.value).await.map(|_| ())
   }
 
-  fn rollback(self) -> BTreeResult<()> {
-    call_method0(&self.rollback, &self.value).map(|_| ())
+  async fn rollback(self) -> BTreeResult<()> {
+    call_method0(&self.rollback, &self.value).await.map(|_| ())
   }
 }
 
@@ -521,8 +521,21 @@ impl StoreAdapterCallbacks {
     }
   }
 
-  fn begin_backend_transaction(&self) -> BTreeResult<BackendTransaction> {
-    let value = call_method0(&self.callbacks.begin_transaction, &self.callbacks.adapter)?;
+  async fn begin_backend_transaction(
+    &self,
+    commit_on_success: bool,
+  ) -> BTreeResult<BackendTransaction> {
+    let mode = if commit_on_success {
+      "readwrite"
+    } else {
+      "readonly"
+    };
+    let value = call_method1(
+      &self.callbacks.begin_transaction,
+      &self.callbacks.adapter,
+      &JsValue::from_str(mode),
+    )
+    .await?;
 
     if value.is_null() || value.is_undefined() {
       return Err(serde_error("beginTransaction returned null or undefined"));
@@ -554,28 +567,7 @@ impl StoreAdapterCallbacks {
     })
   }
 
-  fn with_ephemeral_tx<T, F>(&self, commit_on_success: bool, op: F) -> BTreeResult<T>
-  where
-    F: FnOnce(&StoreAdapterCallbacks, &BackendTransaction) -> BTreeResult<T>,
-  {
-    let tx = self.begin_backend_transaction()?;
-    match op(self, &tx) {
-      Ok(value) => {
-        if commit_on_success {
-          tx.commit()?;
-        } else {
-          tx.rollback()?;
-        }
-        Ok(value)
-      }
-      Err(err) => {
-        let _ = tx.rollback();
-        Err(err)
-      }
-    }
-  }
-
-  fn tx_get(
+  async fn tx_get(
     &self,
     tx: &BackendTransaction,
     tree: &str,
@@ -584,7 +576,7 @@ impl StoreAdapterCallbacks {
     if tree == TABLE_SCHEMAS_TREE {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
-      let value = call_method1(&tx.get_table_schema, &tx.value, &table_js)?;
+      let value = call_method1(&tx.get_table_schema, &tx.value, &table_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -594,7 +586,7 @@ impl StoreAdapterCallbacks {
     if tree == INDEX_SCHEMAS_TREE {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
-      let value = call_method1(&tx.get_index_schema, &tx.value, &index_js)?;
+      let value = call_method1(&tx.get_index_schema, &tx.value, &index_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -605,7 +597,7 @@ impl StoreAdapterCallbacks {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
-      let value = call_method2(&tx.get_row, &tx.value, &table_js, &pk_js)?;
+      let value = call_method2(&tx.get_row, &tx.value, &table_js, &pk_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -622,7 +614,7 @@ impl StoreAdapterCallbacks {
       };
       let index_js = JsValue::from_str(index_name);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js)?;
+      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js).await?;
       let entries: Vec<IndexEntry> = from_js(value)?;
       let found = entries
         .into_iter()
@@ -633,7 +625,7 @@ impl StoreAdapterCallbacks {
     Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn tx_insert(
+  async fn tx_insert(
     &self,
     tx: &BackendTransaction,
     tree: &str,
@@ -644,7 +636,7 @@ impl StoreAdapterCallbacks {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
       let row_js = to_js(row)?;
-      let _ = call_method2(&tx.put_table_schema, &tx.value, &table_js, &row_js)?;
+      let _ = call_method2(&tx.put_table_schema, &tx.value, &table_js, &row_js).await?;
       return Ok(());
     }
 
@@ -652,7 +644,7 @@ impl StoreAdapterCallbacks {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
       let row_js = to_js(row)?;
-      let _ = call_method2(&tx.put_index_schema, &tx.value, &index_js, &row_js)?;
+      let _ = call_method2(&tx.put_index_schema, &tx.value, &index_js, &row_js).await?;
       self.maybe_update_index_schema_widths(tree, key, row);
       return Ok(());
     }
@@ -662,7 +654,7 @@ impl StoreAdapterCallbacks {
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
       let row_js = to_js(row)?;
-      let _ = call_method3(&tx.put_row, &tx.value, &table_js, &pk_js, &row_js)?;
+      let _ = call_method3(&tx.put_row, &tx.value, &table_js, &pk_js, &row_js).await?;
       self.maybe_update_index_schema_widths(tree, key, row);
       return Ok(());
     }
@@ -678,14 +670,15 @@ impl StoreAdapterCallbacks {
         &index_js,
         &index_key_js,
         &row_pk_js,
-      )?;
+      )
+      .await?;
       return Ok(());
     }
 
     Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn tx_remove(
+  async fn tx_remove(
     &self,
     tx: &BackendTransaction,
     tree: &str,
@@ -694,7 +687,7 @@ impl StoreAdapterCallbacks {
     if tree == TABLE_SCHEMAS_TREE {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
-      let value = call_method1(&tx.delete_table_schema, &tx.value, &table_js)?;
+      let value = call_method1(&tx.delete_table_schema, &tx.value, &table_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -704,7 +697,7 @@ impl StoreAdapterCallbacks {
     if tree == INDEX_SCHEMAS_TREE {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
-      let value = call_method1(&tx.delete_index_schema, &tx.value, &index_js)?;
+      let value = call_method1(&tx.delete_index_schema, &tx.value, &index_js).await?;
       self.maybe_remove_index_schema_width(tree, key);
       if value.is_null() || value.is_undefined() {
         return Ok(None);
@@ -716,7 +709,7 @@ impl StoreAdapterCallbacks {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
-      let value = call_method2(&tx.delete_row, &tx.value, &table_js, &pk_js)?;
+      let value = call_method2(&tx.delete_row, &tx.value, &table_js, &pk_js).await?;
       if value.is_null() || value.is_undefined() {
         self.maybe_remove_index_schema_width(tree, key);
         return Ok(None);
@@ -736,14 +729,15 @@ impl StoreAdapterCallbacks {
         &index_js,
         &index_key_js,
         &row_pk_js,
-      )?;
+      )
+      .await?;
       return Ok(None);
     }
 
     Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn tx_range<R>(
+  async fn tx_range<R>(
     &self,
     tx: &BackendTransaction,
     tree: &str,
@@ -753,7 +747,7 @@ impl StoreAdapterCallbacks {
     R: RangeBounds<EngineKey>,
   {
     if tree == TABLE_SCHEMAS_TREE {
-      let value = call_method0(&tx.range_table_schemas, &tx.value)?;
+      let value = call_method0(&tx.range_table_schemas, &tx.value).await?;
       let entries: Vec<TableSchemaEntry> = from_js(value)?;
       return Ok(
         entries
@@ -771,7 +765,7 @@ impl StoreAdapterCallbacks {
     }
 
     if tree == INDEX_SCHEMAS_TREE {
-      let value = call_method0(&tx.range_index_schemas, &tx.value)?;
+      let value = call_method0(&tx.range_index_schemas, &tx.value).await?;
       let entries: Vec<IndexSchemaEntry> = from_js(value)?;
       let out = entries
         .into_iter()
@@ -812,7 +806,7 @@ impl StoreAdapterCallbacks {
 
       let table_js = JsValue::from_str(table);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_rows, &tx.value, &table_js, &req_js)?;
+      let value = call_method2(&tx.range_rows, &tx.value, &table_js, &req_js).await?;
       let rows: Vec<PrimaryKeyEntry> = from_js(value)?;
       let out = rows
         .into_iter()
@@ -850,7 +844,7 @@ impl StoreAdapterCallbacks {
 
       let index_js = JsValue::from_str(index_name);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js)?;
+      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js).await?;
       let entries: Vec<IndexEntry> = from_js(value)?;
       return Ok(
         entries
@@ -868,23 +862,60 @@ impl StoreAdapterCallbacks {
     Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
-  fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
-    self.with_ephemeral_tx(false, |adapter, tx| adapter.tx_get(tx, tree, key))
+  async fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    let tx = self.begin_backend_transaction(false).await?;
+    match self.tx_get(&tx, tree, key).await {
+      Ok(value) => {
+        tx.rollback().await?;
+        Ok(value)
+      }
+      Err(err) => {
+        let _ = tx.rollback().await;
+        Err(err)
+      }
+    }
   }
 
-  fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
-    self.with_ephemeral_tx(true, |adapter, tx| adapter.tx_insert(tx, tree, key, row))
+  async fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
+    let tx = self.begin_backend_transaction(true).await?;
+    match self.tx_insert(&tx, tree, key, row).await {
+      Ok(()) => tx.commit().await,
+      Err(err) => {
+        let _ = tx.rollback().await;
+        Err(err)
+      }
+    }
   }
 
-  fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
-    self.with_ephemeral_tx(true, |adapter, tx| adapter.tx_remove(tx, tree, key))
+  async fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    let tx = self.begin_backend_transaction(true).await?;
+    match self.tx_remove(&tx, tree, key).await {
+      Ok(value) => {
+        tx.commit().await?;
+        Ok(value)
+      }
+      Err(err) => {
+        let _ = tx.rollback().await;
+        Err(err)
+      }
+    }
   }
 
-  fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
+  async fn callback_range<R>(&self, tree: &str, range: &R) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
   where
     R: RangeBounds<EngineKey>,
   {
-    self.with_ephemeral_tx(false, |adapter, tx| adapter.tx_range(tx, tree, range))
+    let tx = self.begin_backend_transaction(false).await?;
+    match self.tx_range(&tx, tree, range).await {
+      Ok(value) => {
+        tx.rollback().await?;
+        Ok(value)
+      }
+      Err(err) => {
+        let _ = tx.rollback().await;
+        Err(err)
+      }
+    }
   }
 }
 
@@ -895,16 +926,16 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   fn get_tree(
     &self,
     name: &str,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Tree>> + Send + '_ {
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Tree>> + '_ {
     let tree = StoreAdapterTree {
       adapter: self.clone(),
       tree: name.to_string(),
     };
-    future::ready(Ok(tree))
+    async move { Ok(tree) }
   }
 
   async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
-    let backend_tx = self.begin_backend_transaction()?;
+    let backend_tx = self.begin_backend_transaction(true).await?;
     Ok(StoreAdapterTransaction {
       adapter: self.clone(),
       backend_tx,
@@ -917,11 +948,11 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
   {
-    future::ready(self.adapter.tx_get(&self.backend_tx, tree, key))
+    async move { self.adapter.tx_get(&self.backend_tx, tree, key).await }
   }
 
   fn insert<'a>(
@@ -929,59 +960,64 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
     tree: &'a str,
     key: EngineKey,
     value: Vec<u8>,
-  ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + 'a
   where
     EngineKey: Ord,
   {
-    future::ready(self.adapter.tx_insert(&self.backend_tx, tree, &key, &value))
+    async move {
+      self
+        .adapter
+        .tx_insert(&self.backend_tx, tree, &key, &value)
+        .await
+    }
   }
 
   fn remove<'a>(
     &'a mut self,
     tree: &'a str,
     key: &'a EngineKey,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
   {
-    future::ready(self.adapter.tx_remove(&self.backend_tx, tree, key))
+    async move { self.adapter.tx_remove(&self.backend_tx, tree, key).await }
   }
 
   fn range<'a, R>(
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + 'a
   where
     EngineKey: Ord,
-    R: RangeBounds<EngineKey> + Send + 'a,
+    R: RangeBounds<EngineKey> + MaybeSend + 'a,
   {
-    let rows = self
-      .adapter
-      .tx_range(&self.backend_tx, tree, &range)
-      .map(|pairs| {
-        pairs
-          .into_iter()
-          .filter(|(key, _)| key_in_range(key, &range))
-          .map(Ok)
-          .collect::<Vec<_>>()
-      })
-      .unwrap_or_else(|err| vec![Err(err)]);
-    futures::stream::iter(rows)
+    stream! {
+      match self.adapter.tx_range(&self.backend_tx, tree, &range).await {
+        Ok(pairs) => {
+          for (key, value) in pairs {
+            if key_in_range(&key, &range) {
+              yield Ok((key, value));
+            }
+          }
+        }
+        Err(err) => yield Err(err),
+      }
+    }
   }
 
-  fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
+  fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
-    future::ready(self.backend_tx.commit())
+    async move { self.backend_tx.commit().await }
   }
 
-  fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
+  fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
-    future::ready(self.backend_tx.rollback())
+    async move { self.backend_tx.rollback().await }
   }
 }
 
@@ -989,56 +1025,53 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
   fn get<'a, Q>(
     &'a self,
     key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
-    Q: core::borrow::Borrow<EngineKey> + Send + 'a,
+    Q: core::borrow::Borrow<EngineKey> + MaybeSend + 'a,
   {
-    future::ready(self.adapter.callback_get(&self.tree, key.borrow()))
+    async move { self.adapter.callback_get(&self.tree, key.borrow()).await }
   }
 
   fn insert<'a>(
     &'a mut self,
     key: EngineKey,
     value: Vec<u8>,
-  ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + 'a
   where
     EngineKey: Ord,
   {
-    future::ready(self.adapter.callback_insert(&self.tree, &key, &value))
+    async move { self.adapter.callback_insert(&self.tree, &key, &value).await }
   }
 
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
-    Q: core::borrow::Borrow<EngineKey> + Send + 'a,
+    Q: core::borrow::Borrow<EngineKey> + MaybeSend + 'a,
   {
-    future::ready(self.adapter.callback_remove(&self.tree, key.borrow()))
+    async move { self.adapter.callback_remove(&self.tree, key.borrow()).await }
   }
 
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + 'a
   where
     EngineKey: Ord,
-    R: RangeBounds<EngineKey> + Send + 'a,
+    R: RangeBounds<EngineKey> + MaybeSend + 'a,
   {
-    let rows = self
-      .adapter
-      .callback_range(&self.tree, &range)
-      .map(|pairs| {
-        pairs
-          .into_iter()
-          .filter(|(key, _)| key_in_range(key, &range))
-          .map(Ok)
-          .collect::<Vec<_>>()
-      })
-      .unwrap_or_else(|err| vec![Err(err)]);
-    futures::stream::iter(rows)
+    stream! {
+      match self.adapter.callback_range(&self.tree, &range).await {
+        Ok(pairs) => {
+          for (key, value) in pairs {
+            if key_in_range(&key, &range) {
+              yield Ok((key, value));
+            }
+          }
+        }
+        Err(err) => yield Err(err),
+      }
+    }
   }
 }
 
@@ -1046,57 +1079,54 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a, Q>(
     &'a self,
     _key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
-    Q: core::borrow::Borrow<EngineKey> + Send + 'a,
+    Q: core::borrow::Borrow<EngineKey> + MaybeSend + 'a,
   {
-    future::ready(Err(BTreeError::UnsupportedOperation))
+    async move { Err(BTreeError::UnsupportedOperation) }
   }
 
   fn insert<'a>(
     &'a mut self,
     _key: EngineKey,
     _value: Vec<u8>,
-  ) -> impl core::future::Future<Output = BTreeResult<()>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + 'a
   where
     EngineKey: Ord,
   {
-    future::ready(Err(BTreeError::UnsupportedOperation))
+    async move { Err(BTreeError::UnsupportedOperation) }
   }
 
   fn remove<'a, Q>(
     &'a mut self,
     _key: Q,
-  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + Send + 'a
+  ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,
-    Q: core::borrow::Borrow<EngineKey> + Send + 'a,
+    Q: core::borrow::Borrow<EngineKey> + MaybeSend + 'a,
   {
-    future::ready(Err(BTreeError::UnsupportedOperation))
+    async move { Err(BTreeError::UnsupportedOperation) }
   }
 
-  fn range<'a, R>(
-    &'a self,
-    _range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
+  fn range<'a, R>(&'a self, _range: R) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + 'a
   where
     EngineKey: Ord,
-    R: RangeBounds<EngineKey> + Send + 'a,
+    R: RangeBounds<EngineKey> + MaybeSend + 'a,
   {
     futures::stream::iter(Vec::new())
   }
 }
 
 impl db_core::BTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
-  fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
+  fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
     <Self as NamedTreeTransaction<EngineKey, Vec<u8>>>::commit(self)
   }
 
-  fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>> + Send
+  fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
@@ -1108,7 +1138,7 @@ impl db_core::BTree<EngineKey, Vec<u8>> for StoreAdapterTree {
   type Transaction = StoreAdapterTransaction;
 
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
-    let backend_tx = self.adapter.begin_backend_transaction()?;
+    let backend_tx = self.adapter.begin_backend_transaction(true).await?;
     Ok(StoreAdapterTransaction {
       adapter: self.adapter.clone(),
       backend_tx,

@@ -1,20 +1,18 @@
-use core::future::Future;
 use core::ops::RangeBounds;
 
-use futures::Stream;
-
 use crate::btree::{BTree, BTreeResult};
+use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 /// An atomic transaction that spans multiple named trees within a single backend.
 ///
 /// All mutations are buffered and applied together on [`commit`]. A [`rollback`]
 /// discards all pending changes.
-pub trait NamedTreeTransaction<K, V>: Send + 'static {
+pub trait NamedTreeTransaction<K, V>: MaybeSend + 'static {
   fn get<'a>(
     &'a mut self,
     tree: &'a str,
     key: &'a K,
-  ) -> impl Future<Output = BTreeResult<Option<V>>> + Send + 'a
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
   where
     K: Ord;
 
@@ -23,7 +21,7 @@ pub trait NamedTreeTransaction<K, V>: Send + 'static {
     tree: &'a str,
     key: K,
     value: V,
-  ) -> impl Future<Output = BTreeResult<()>> + Send + 'a
+  ) -> impl MaybeSendFuture<Output = BTreeResult<()>> + 'a
   where
     K: Ord;
 
@@ -31,7 +29,7 @@ pub trait NamedTreeTransaction<K, V>: Send + 'static {
     &'a mut self,
     tree: &'a str,
     key: &'a K,
-  ) -> impl Future<Output = BTreeResult<Option<V>>> + Send + 'a
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
   where
     K: Ord;
 
@@ -39,16 +37,16 @@ pub trait NamedTreeTransaction<K, V>: Send + 'static {
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  ) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord,
-    R: RangeBounds<K> + Send + 'a;
+    R: RangeBounds<K> + MaybeSend + 'a;
 
-  fn commit(self) -> impl Future<Output = BTreeResult<()>> + Send
+  fn commit(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
     Self: Sized;
 
-  fn rollback(self) -> impl Future<Output = BTreeResult<()>> + Send
+  fn rollback(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
     Self: Sized;
 }
@@ -69,11 +67,12 @@ pub trait NamedTreeTransaction<K, V>: Send + 'static {
 ///   no cross-tree ordering is required.
 /// - Mutations through [`begin_transaction`] MUST be atomic: either all
 ///   changes across all trees commit together, or none do.
-pub trait NamedTreeProvider<K, V>: Clone + Send + Sync {
+pub trait NamedTreeProvider<K, V>: Clone + MaybeSend + MaybeSync {
   type Tree: BTree<K, V>;
   type Transaction: NamedTreeTransaction<K, V>;
 
-  fn get_tree(&self, name: &str) -> impl Future<Output = BTreeResult<Self::Tree>> + Send + '_;
+  fn get_tree(&self, name: &str) -> impl MaybeSendFuture<Output = BTreeResult<Self::Tree>> + '_;
 
-  fn begin_transaction(&self) -> impl Future<Output = BTreeResult<Self::Transaction>> + Send + '_;
+  fn begin_transaction(&self)
+  -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + '_;
 }

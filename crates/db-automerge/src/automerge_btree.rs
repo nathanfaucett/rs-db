@@ -2,6 +2,7 @@ use std::{borrow::Borrow, ops::RangeBounds};
 
 use async_stream::stream;
 use automerge::AutoCommit;
+use db_core::MaybeSend;
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -109,7 +110,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
 
@@ -134,7 +135,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     // capture previous state
@@ -170,10 +171,10 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + Send + 'a
+  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + 'a
   where
     Uuid: Ord,
-    R: RangeBounds<Uuid> + Send + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
       let (start_doc, end_doc) = all_document_bounds();
@@ -357,7 +358,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     let (accumulator, _) = self.scan_document_state(doc_id).await?;
@@ -407,7 +408,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     let (accumulator, has_entries) = self.scan_document_state(doc_id).await?;
@@ -431,10 +432,10 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + Send + 'a
+  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + 'a
   where
     Uuid: Ord,
-    R: RangeBounds<Uuid> + Send + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
       let (start_enc, end_enc) = self.full_scan_bounds();

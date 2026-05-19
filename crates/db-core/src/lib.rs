@@ -5,6 +5,7 @@ extern crate alloc;
 mod blocking;
 mod btree;
 mod codec;
+mod concurrency;
 mod named_tree;
 mod range_merge;
 #[cfg(feature = "test-helpers")]
@@ -21,6 +22,7 @@ pub use codec::{
   encode_string_into_sink, encode_u32_into_sink, encode_u64_into_sink, encode_usize_into_sink,
   encode_version_into_sink, encode_with_version,
 };
+pub use concurrency::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 pub use range_merge::merge_range_maps;
 

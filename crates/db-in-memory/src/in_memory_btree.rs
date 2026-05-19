@@ -1,7 +1,7 @@
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
-use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, TransactionPatch};
+use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, MaybeSend, TransactionPatch};
 use futures::Stream;
 
 use crate::patch_map::{
@@ -55,7 +55,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let inner = self.inner.clone();
     let guard = inner.read().await;
@@ -75,17 +75,17 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let inner = self.inner.clone();
     let mut guard = inner.write().await;
     Ok(guard.remove(key.borrow()))
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let inner = self.inner.clone();
     stream! {
@@ -121,7 +121,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     Ok(get_from_patch_then_map(&self.patch, &guard, key.borrow()))
@@ -138,7 +138,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord + Clone,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     Ok(remove_from_patch_then_map(
@@ -148,10 +148,10 @@ where
     ))
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let inner = self.inner.clone();
     let patch = self.patch.clone();

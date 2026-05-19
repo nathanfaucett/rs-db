@@ -9,7 +9,7 @@ use core::fmt;
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentType};
 #[cfg(feature = "automerge")]
 use db_core::BufferSink;
-use db_core::NamedTreeProvider;
+use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
 use db_engine::{EngineDatabase, EngineKey, EngineValue};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -63,12 +63,12 @@ pub struct AutomergeSyncMetrics {
 }
 
 pub trait FacadeStore:
-  Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
+  Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static
 {
 }
 
 impl<T> FacadeStore for T where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
+  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static
 {
 }
 

@@ -3,7 +3,7 @@
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
 use async_stream::stream;
 use core::future::Future;
-use db_core::{NamedTreeProvider, NamedTreeTransaction};
+use db_core::{MaybeSend, MaybeSync, NamedTreeProvider, NamedTreeTransaction};
 use db_types::key_encoding::{DefaultEncoding, RowEncoding};
 use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
@@ -74,8 +74,8 @@ where
   Ok(rows)
 }
 
-pub trait EngineStore: Clone + Send + Sync + 'static {
-  type Transaction: EngineStoreTransaction + Send + 'static;
+pub trait EngineStore: Clone + MaybeSend + MaybeSync + 'static {
+  type Transaction: EngineStoreTransaction + MaybeSend + 'static;
 
   fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>>;
 
@@ -334,7 +334,7 @@ where
 /// engine store.
 impl<T> EngineStore for T
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static,
+  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   type Transaction = NamedTreeEngineTransaction<T::Transaction>;
 

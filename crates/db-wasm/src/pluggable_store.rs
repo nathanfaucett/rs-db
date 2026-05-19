@@ -1,7 +1,7 @@
 use async_stream::stream;
 use core::borrow::Borrow;
 use core::ops::RangeBounds;
-use db_core::{BTreeError, BTreeResult, NamedTreeProvider, NamedTreeTransaction};
+use db_core::{BTreeError, BTreeResult, MaybeSend, NamedTreeProvider, NamedTreeTransaction};
 use db_engine::EngineKey;
 use db_in_memory::{InMemoryNamedBTree, InMemoryNamedTransaction};
 use futures::{Stream, StreamExt, pin_mut};
@@ -30,7 +30,7 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for PluggableBackendStore {
   fn get_tree(
     &self,
     name: &str,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Tree>> + Send + '_ {
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Tree>> + '_ {
     let name = name.to_string();
     async move {
       match self {
@@ -101,10 +101,10 @@ impl NamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransaction {
     &'a self,
     tree: &'a str,
     range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
+  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + 'a
   where
     EngineKey: Ord,
-    R: RangeBounds<EngineKey> + Send + 'a,
+    R: RangeBounds<EngineKey> + MaybeSend + 'a,
   {
     stream! {
       match self {
@@ -151,7 +151,7 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
-    Q: Borrow<EngineKey> + Send + 'a,
+    Q: Borrow<EngineKey> + MaybeSend + 'a,
   {
     match self {
       PluggableBackendTree::External(tree) => tree.get(key).await,
@@ -170,20 +170,17 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
-    Q: Borrow<EngineKey> + Send + 'a,
+    Q: Borrow<EngineKey> + MaybeSend + 'a,
   {
     match self {
       PluggableBackendTree::External(tree) => tree.remove(key).await,
     }
   }
 
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(EngineKey, Vec<u8>)>> + 'a
   where
     EngineKey: Ord,
-    R: RangeBounds<EngineKey> + Send + 'a,
+    R: RangeBounds<EngineKey> + MaybeSend + 'a,
   {
     stream! {
       match self {

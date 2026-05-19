@@ -19,7 +19,7 @@ const ADAPTER_SCRIPT: &str = r#"
   const indexEntryKey = (indexKey, rowPrimaryKey) => `${JSON.stringify(indexKey)}|${pkKey(rowPrimaryKey)}`;
 
   return {
-    beginTransaction() {
+    beginTransaction(_mode) {
       return Promise.resolve({
         getRow(table, primaryKey) {
           const tableRows = state.rowsByTable.get(table);
@@ -125,6 +125,82 @@ const ADAPTER_SCRIPT: &str = r#"
 })()
 "#;
 
+const DELAYED_ADAPTER_SCRIPT: &str = r#"
+(() => {
+  const delay = (value) => new Promise((resolve) => setTimeout(() => resolve(value), 5));
+  const state = {
+    tableSchemas: new Map(),
+    indexSchemas: new Map(),
+  };
+
+  return {
+    beginTransaction(_mode) {
+      return delay({
+        getRow() {
+          return delay(undefined);
+        },
+        putRow() {
+          return delay(undefined);
+        },
+        deleteRow() {
+          return delay(undefined);
+        },
+        rangeRows() {
+          return delay([]);
+        },
+        addIndex() {
+          return delay(undefined);
+        },
+        removeIndex() {
+          return delay(undefined);
+        },
+        rangeIndex() {
+          return delay([]);
+        },
+        getTableSchema(table) {
+          const row = state.tableSchemas.get(table);
+          return delay(row ? [...row] : undefined);
+        },
+        putTableSchema(table, row) {
+          state.tableSchemas.set(table, [...row]);
+          return delay(undefined);
+        },
+        deleteTableSchema(table) {
+          const previous = state.tableSchemas.get(table);
+          state.tableSchemas.delete(table);
+          return delay(previous ? [...previous] : undefined);
+        },
+        rangeTableSchemas() {
+          return delay(Array.from(state.tableSchemas.entries()).map(([table, row]) => ({ table, row: [...row] })));
+        },
+        getIndexSchema(index) {
+          const row = state.indexSchemas.get(index);
+          return delay(row ? [...row] : undefined);
+        },
+        putIndexSchema(index, row) {
+          state.indexSchemas.set(index, [...row]);
+          return delay(undefined);
+        },
+        deleteIndexSchema(index) {
+          const previous = state.indexSchemas.get(index);
+          state.indexSchemas.delete(index);
+          return delay(previous ? [...previous] : undefined);
+        },
+        rangeIndexSchemas() {
+          return delay(Array.from(state.indexSchemas.entries()).map(([index, row]) => ({ index, row: [...row] })));
+        },
+        commit() {
+          return delay(undefined);
+        },
+        rollback() {
+          return delay(undefined);
+        },
+      });
+    },
+  };
+})()
+"#;
+
 #[wasm_bindgen_test]
 async fn open_with_strict_transaction_adapter_supports_schema_lifecycle() {
   let adapter_value = js_sys::eval(ADAPTER_SCRIPT).expect("adapter eval should succeed");
@@ -161,4 +237,35 @@ async fn open_with_strict_transaction_adapter_supports_schema_lifecycle() {
 
   let described_after_drop = db.describe_table("users");
   assert_eq!(described_after_drop, None);
+}
+
+#[wasm_bindgen_test]
+async fn open_with_delayed_promise_adapter_supports_schema_lifecycle() {
+  let adapter_value = js_sys::eval(DELAYED_ADAPTER_SCRIPT).expect("adapter eval should succeed");
+  let options: DatabaseEngineOptions = adapter_value.unchecked_into();
+  let mut db = BrowserDatabase::open_with_backend(options)
+    .await
+    .expect("open_with_backend should succeed");
+
+  let schema = TableSchema {
+    name: "delayed_users".to_string(),
+    columns: vec![
+      ColumnSchema {
+        name: "id".to_string(),
+        data_type: EngineType::Uuid,
+      },
+      ColumnSchema {
+        name: "name".to_string(),
+        data_type: EngineType::Text,
+      },
+    ],
+    primary_key: vec![0],
+  };
+
+  db.register_table(schema.clone())
+    .await
+    .expect("register_table should succeed");
+
+  let described = db.describe_table("delayed_users");
+  assert_eq!(described, Some(schema));
 }

@@ -7,7 +7,7 @@ use std::{
 
 use async_stream::stream;
 use db_core::{
-  BTreeError, BTreeResult, KeyCodec, NamedTreeProvider, NamedTreeTransaction, ValueCodec,
+  BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedTreeProvider, NamedTreeTransaction, ValueCodec,
 };
 use futures::Stream;
 use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
@@ -86,14 +86,10 @@ where
     Ok(guard.map(|g| g.value()))
   }
 
-  fn range<'a, R>(
-    &'a self,
-    tree: &'a str,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  fn range<'a, R>(&'a self, tree: &'a str, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord,
-    R: core::ops::RangeBounds<K> + Send + 'a,
+    R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
     let write_tx = &self.write_tx;
     stream! {
@@ -200,7 +196,7 @@ where
   fn get_tree<'a>(
     &'a self,
     name: &str,
-  ) -> impl core::future::Future<Output = BTreeResult<REDBBTree<K, V, KC, VC>>> + Send + 'a {
+  ) -> impl core::future::Future<Output = BTreeResult<REDBBTree<K, V, KC, VC>>> + 'a {
     let static_name = intern(name);
     let db = Arc::clone(&self.db);
     async move { Ok(REDBBTree::from_arc_with_codecs(db, static_name)) }
@@ -208,8 +204,7 @@ where
 
   fn begin_transaction<'a>(
     &'a self,
-  ) -> impl core::future::Future<Output = BTreeResult<REDBNamedTransaction<K, V, KC, VC>>> + Send + 'a
-  {
+  ) -> impl core::future::Future<Output = BTreeResult<REDBNamedTransaction<K, V, KC, VC>>> + 'a {
     let db = Arc::clone(&self.db);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;

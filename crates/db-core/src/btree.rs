@@ -1,15 +1,15 @@
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
-use core::{borrow::Borrow, error::Error, future::Future, ops::RangeBounds};
+use core::{borrow::Borrow, error::Error, ops::RangeBounds};
 #[cfg(feature = "std")]
 use std::boxed::Box;
 #[cfg(feature = "std")]
-use std::{borrow::Borrow, error::Error, future::Future, ops::RangeBounds};
-
-use futures::Stream;
+use std::{borrow::Borrow, error::Error, ops::RangeBounds};
 
 use thiserror::Error;
+
+use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
@@ -40,40 +40,40 @@ impl BTreeError {
   }
 }
 
-pub trait BTreeExecutor<K, V>: Send + Sync {
-  fn get<'a, Q>(&'a self, key: Q) -> impl Future<Output = BTreeResult<Option<V>>> + Send + 'a
+pub trait BTreeExecutor<K, V>: MaybeSend + MaybeSync {
+  fn get<'a, Q>(&'a self, key: Q) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a;
+    Q: Borrow<K> + MaybeSend + 'a;
 
   fn insert<'a>(
     &'a mut self,
     key: K,
     value: V,
-  ) -> impl Future<Output = BTreeResult<()>> + Send + 'a
+  ) -> impl MaybeSendFuture<Output = BTreeResult<()>> + 'a
   where
     K: Ord;
 
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,
-  ) -> impl Future<Output = BTreeResult<Option<V>>> + Send + 'a
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a;
+    Q: Borrow<K> + MaybeSend + 'a;
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord,
-    R: RangeBounds<K> + Send + 'a;
+    R: RangeBounds<K> + MaybeSend + 'a;
 }
 
 pub trait BTreeTransaction<K, V>: BTreeExecutor<K, V> {
-  fn commit(self) -> impl Future<Output = BTreeResult<()>> + Send
+  fn commit(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
     Self: Sized;
 
-  fn rollback(self) -> impl Future<Output = BTreeResult<()>> + Send
+  fn rollback(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
     Self: Sized;
 }
@@ -81,5 +81,7 @@ pub trait BTreeTransaction<K, V>: BTreeExecutor<K, V> {
 pub trait BTree<K, V>: BTreeExecutor<K, V> {
   type Transaction: BTreeTransaction<K, V>;
 
-  fn transaction<'a>(&'a self) -> impl Future<Output = BTreeResult<Self::Transaction>> + Send + 'a;
+  fn transaction<'a>(
+    &'a self,
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a;
 }

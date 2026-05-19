@@ -252,7 +252,7 @@ const tableSchemas = new Map<string, RowBytes>();
 const indexSchemas = new Map<string, RowBytes>();
 
 const options: DatabaseEngineOptions = {
-  async beginTransaction() {
+  async beginTransaction(_mode) {
     return new InMemoryTx(rowsByTable, entriesByIndex, tableSchemas, indexSchemas);
   },
 };

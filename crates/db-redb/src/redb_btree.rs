@@ -5,7 +5,7 @@ use std::{
 use async_stream::stream;
 use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, FastKeyCodec, KeyCodec, KeyScratch,
-  ValueCodec,
+  MaybeSend, ValueCodec,
 };
 use futures::Stream;
 use redb::{
@@ -254,7 +254,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let read_tx = self.db.begin_read().map_err(BTreeError::other)?;
     let table = read_tx
@@ -285,7 +285,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let write_tx = self.db.begin_write().map_err(BTreeError::other)?;
     let removed = {
@@ -303,10 +303,10 @@ where
     Ok(removed)
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let table_definition = self.table_definition;
     let db = Arc::clone(&self.db);
@@ -369,7 +369,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let table = self
       .write_tx
@@ -396,7 +396,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let mut table = self
       .write_tx
@@ -406,10 +406,10 @@ where
     Ok(guard.map(|g| g.value()))
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let table_definition = self.table_definition;
     let write_tx = &self.write_tx;

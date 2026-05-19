@@ -4,7 +4,7 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 
 use automerge::AutoCommit;
-use db_core::{BTreeError, BTreeExecutor, BTreeTransaction};
+use db_core::{BTreeError, BTreeExecutor, BTreeTransaction, MaybeSend};
 use uuid::Uuid;
 
 use super::codec::encode_doc_key_range_value_codec;
@@ -178,7 +178,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     if let Some(pending) = self.pending.get(&doc_id) {
@@ -201,7 +201,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
 
@@ -223,10 +223,10 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + Send + 'a
+  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + 'a
   where
     Uuid: Ord,
-    R: RangeBounds<Uuid> + Send + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
       // Map to internal document key range
@@ -450,7 +450,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     if let Some(pending) = self.pending.get(&doc_id) {
@@ -473,7 +473,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
   where
     Uuid: Ord,
-    Q: Borrow<Uuid> + Send + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
     if let Some(existing) = self.pending.remove(&doc_id) {
@@ -493,10 +493,10 @@ where
   fn range<'a, R>(
     &'a self,
     range: R,
-  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + Send + 'a
+  ) -> impl Stream<Item = Result<(Uuid, AutoCommit), BTreeError>> + 'a
   where
     Uuid: Ord,
-    R: RangeBounds<Uuid> + Send + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
       let (start_enc, _) = encode_doc_key_range(Uuid::from_u128(0), &self.key_codec);

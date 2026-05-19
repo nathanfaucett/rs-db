@@ -2,8 +2,8 @@ use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
 use db_core::{
-  BTree, BTreeExecutor, BTreeResult, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
-  TransactionEntry, TransactionPatch,
+  BTree, BTreeExecutor, BTreeResult, BTreeTransaction, MaybeSend, NamedTreeProvider,
+  NamedTreeTransaction, TransactionEntry, TransactionPatch,
 };
 use futures::Stream;
 
@@ -75,7 +75,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     Ok(
@@ -101,7 +101,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let mut guard = self.inner.write().await;
     Ok(
@@ -111,10 +111,10 @@ where
     )
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let inner = Arc::clone(&self.inner);
     let name = self.name.clone();
@@ -155,7 +155,7 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     let empty = BTreeMap::new();
@@ -174,7 +174,7 @@ where
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
   where
     K: Ord + Clone,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     let empty = BTreeMap::new();
@@ -186,10 +186,10 @@ where
     ))
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
+    R: RangeBounds<K> + MaybeSend + 'a,
   {
     let inner = Arc::clone(&self.inner);
     let name = self.name.clone();
@@ -271,14 +271,10 @@ where
     Ok(remove_from_patch_then_map(patch, sub_map, key))
   }
 
-  fn range<'a, R>(
-    &'a self,
-    tree: &'a str,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(K, V)>> + Send + 'a
+  fn range<'a, R>(&'a self, tree: &'a str, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord,
-    R: core::ops::RangeBounds<K> + Send + 'a,
+    R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
     let inner = Arc::clone(&self.inner);
     let patch = self.patches.get(tree).cloned().unwrap_or_default();
@@ -320,7 +316,7 @@ where
   fn get_tree<'a>(
     &'a self,
     name: &str,
-  ) -> impl core::future::Future<Output = BTreeResult<InMemoryNamedTree<K, V>>> + Send + 'a {
+  ) -> impl core::future::Future<Output = BTreeResult<InMemoryNamedTree<K, V>>> + 'a {
     let owned = name.to_string();
     let inner = Arc::clone(&self.inner);
     async move {
@@ -333,8 +329,7 @@ where
 
   fn begin_transaction<'a>(
     &'a self,
-  ) -> impl core::future::Future<Output = BTreeResult<InMemoryNamedTransaction<K, V>>> + Send + 'a
-  {
+  ) -> impl core::future::Future<Output = BTreeResult<InMemoryNamedTransaction<K, V>>> + 'a {
     let inner = Arc::clone(&self.inner);
     async move {
       Ok(InMemoryNamedTransaction {
