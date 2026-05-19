@@ -148,14 +148,14 @@ async fn open_with_strict_transaction_adapter_supports_schema_lifecycle() {
     primary_key: vec![0],
   };
 
-  db.register_table(schema.clone(), false)
+  db.register_table(schema.clone())
     .await
     .expect("register_table should succeed");
 
   let described = db.describe_table("users");
   assert_eq!(described, Some(schema));
 
-  db.drop_table("users", false)
+  db.drop_table("users")
     .await
     .expect("drop_table should succeed");
 

@@ -102,3 +102,30 @@ async fn execute_sql_with_named_u8_array_param_inserts_blob() {
 
   assert_eq!(result.rows, vec![vec![EngineValue::Blob(vec![1, 2, 255])]]);
 }
+
+#[wasm_bindgen_test]
+async fn execute_sql_with_uuid_string_param_inserts_uuid() {
+  let mut db = BrowserDatabase::open();
+
+  db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, score INT);")
+    .await
+    .expect("create table should succeed");
+
+  let params = js_sys::Array::new();
+  params.push(&JsValue::from_str("550e8400-e29b-41d4-a716-446655440000"));
+  params.push(&JsValue::from_f64(10.0));
+
+  db.execute_sql_with_params(
+    "INSERT INTO users (id, score) VALUES ($1, $2);",
+    params.into(),
+  )
+  .await
+  .expect("insert with uuid param should succeed");
+
+  let result = db
+    .execute_sql("SELECT score FROM users;")
+    .await
+    .expect("select should succeed");
+
+  assert_eq!(result.rows, vec![vec![EngineValue::Integer(10)]]);
+}

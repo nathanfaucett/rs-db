@@ -8,6 +8,25 @@ pub fn to_js_error(message: impl core::fmt::Display) -> JsValue {
   js_sys::Error::new(&message.to_string()).into()
 }
 
+fn is_date(value: &JsValue) -> bool {
+  // Check if the object has both toISOString and getTime methods, which are unique to Date
+  value.is_object()
+    && Reflect::has(value, &"toISOString".into()).unwrap_or(false)
+    && Reflect::has(value, &"getTime".into()).unwrap_or(false)
+}
+
+fn to_iso_string(value: &JsValue) -> Result<String, JsValue> {
+  let iso_string = Reflect::apply(
+    &Reflect::get(value, &"toISOString".into())?.into(),
+    value,
+    &Array::new(),
+  )?;
+
+  iso_string
+    .as_string()
+    .ok_or_else(|| to_js_error("Failed to extract ISO string from Date"))
+}
+
 fn number_to_engine_value(value: f64) -> EngineValue {
   if value.is_finite()
     && value.fract() == 0.0
@@ -84,6 +103,18 @@ fn parse_engine_value(value: JsValue, path: &str) -> Result<EngineValue, JsValue
       return Ok(bytes_to_engine_value(bytes));
     }
     return parse_json_value(&value, path);
+  }
+
+  // Check for Date objects and convert to ISO string (Text)
+  if is_date(&value) {
+    match to_iso_string(&value) {
+      Ok(iso_string) => return Ok(EngineValue::Text(iso_string)),
+      Err(_) => {
+        return Err(to_js_error(format!(
+          "invalid param at {path}: cannot extract ISO string from Date"
+        )));
+      }
+    }
   }
 
   if value.as_bool().is_some() || value.is_object() {

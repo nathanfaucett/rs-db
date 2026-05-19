@@ -1144,6 +1144,12 @@ fn convert_value_to_column_type(
   column_type: &db_engine::EngineType,
 ) -> Result<db_engine::EngineValue, TranslateError> {
   match (value, column_type) {
+    // Text -> Uuid conversion for UUID columns
+    (db_engine::EngineValue::Text(s), db_engine::EngineType::Uuid) => {
+      let parsed = uuid::Uuid::parse_str(&s)
+        .map_err(|e| TranslateError::UnsupportedFeature(format!("invalid UUID literal: {}", e)))?;
+      Ok(db_engine::EngineValue::Uuid(*parsed.as_bytes()))
+    }
     // Text -> Json conversion for JSON columns
     (db_engine::EngineValue::Text(s), db_engine::EngineType::Json) => {
       // Validate that the string is valid JSON
@@ -2255,6 +2261,79 @@ mod tests {
       },
       other => panic!("unexpected query kind: {:?}", other),
     }
+  }
+
+  #[test]
+  fn translate_insert_with_uuid_positional_param_coerces_text_to_uuid() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let raw_id = "550e8400-e29b-41d4-a716-446655440000";
+    let params = SqlParams::from(vec![
+      EngineValue::Text(raw_id.into()),
+      EngineValue::Text("Ada".into()),
+    ]);
+
+    let q = parse_and_translate_with_params(
+      "INSERT INTO users (id, name) VALUES ($1, $2);",
+      &resolver,
+      &params,
+    )
+    .expect("translate insert with uuid params");
+
+    match q {
+      EngineQuery::Insert { row, .. } => {
+        let expected = *Uuid::parse_str(raw_id).expect("valid uuid").as_bytes();
+        assert_eq!(row[0], EngineValue::Uuid(expected));
+        assert_eq!(row[1], EngineValue::Text("Ada".into()));
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_insert_with_invalid_uuid_positional_param_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Uuid,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let params = SqlParams::from(vec![EngineValue::Text("not-a-uuid".into())]);
+
+    let err =
+      parse_and_translate_with_params("INSERT INTO users (id) VALUES ($1);", &resolver, &params)
+        .expect_err("invalid uuid should be rejected");
+
+    assert!(matches!(
+      err,
+      TranslateError::UnsupportedFeature(message) if message.contains("invalid UUID literal")
+    ));
   }
 
   #[test]
