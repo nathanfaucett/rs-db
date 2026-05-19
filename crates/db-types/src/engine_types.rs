@@ -42,8 +42,14 @@ pub enum EngineValue {
   Text(String),
   Uuid([u8; 16]),
   Blob(Vec<u8>),
-  Json(String),
+  Json(#[cfg_attr(feature = "wasm", serde(serialize_with = "serialize_json_str"))] String),
   Null,
+}
+
+#[cfg(feature = "wasm")]
+fn serialize_json_str<S: serde::Serializer>(s: &String, serializer: S) -> Result<S::Ok, S::Error> {
+  let value: serde_json::Value = serde_json::from_str(s).map_err(serde::ser::Error::custom)?;
+  serde::Serialize::serialize(&value, serializer)
 }
 
 impl PartialEq for EngineValue {

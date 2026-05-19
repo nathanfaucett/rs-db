@@ -18,6 +18,20 @@ mod tests {
     age: Option<i64>,
   }
 
+  #[derive(Deserialize, Debug, PartialEq)]
+  struct UserWithConfig {
+    id: Vec<u8>,
+    name: String,
+    config: UserConfig,
+  }
+
+  #[derive(Deserialize, Debug, PartialEq)]
+  struct UserConfig {
+    role: String,
+    active: bool,
+    tags: Vec<String>,
+  }
+
   #[test]
   fn automerge_typed_query_basic() {
     block_on(async {
@@ -89,6 +103,44 @@ mod tests {
       assert_eq!(users[0].age, Some(30));
       assert_eq!(users[1].name, "Bob");
       assert_eq!(users[1].age, None);
+    });
+  }
+
+  #[test]
+  fn automerge_typed_query_deserializes_json_columns() {
+    block_on(async {
+      let mut db = Database::open_automerge_in_memory()
+        .await
+        .expect("open automerge in-memory");
+
+      db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, config JSON);")
+        .await
+        .expect("create table");
+
+      db.execute_sql(
+        r#"INSERT INTO users (id, name, config) VALUES (
+          '00000000-0000-0000-0000-000000000001'::uuid,
+          'Alice',
+          '{"role":"admin","active":true,"tags":["ops","owner"]}'
+        );"#,
+      )
+      .await
+      .expect("insert 1");
+
+      let result = db
+        .execute_sql("SELECT id, name, config FROM users;")
+        .await
+        .expect("execute query");
+
+      let users: Vec<UserWithConfig> = result
+        .into_typed_named::<UserWithConfig>()
+        .expect("deserialize");
+
+      assert_eq!(users.len(), 1);
+      assert_eq!(users[0].name, "Alice");
+      assert_eq!(users[0].config.role, "admin");
+      assert!(users[0].config.active);
+      assert_eq!(users[0].config.tags, vec!["ops", "owner"]);
     });
   }
 }

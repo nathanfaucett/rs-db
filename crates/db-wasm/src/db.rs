@@ -1,6 +1,7 @@
 use db_engine::{EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, TableSchema};
 use db_facade::Database;
 use db_in_memory::InMemoryNamedBTree;
+use serde::Serialize;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -12,8 +13,21 @@ use crate::store_adapter::{DatabaseEngineOptions, StoreAdapterCallbacks};
 /// TypeScript sees: `(error: Error | null, result: EngineResult | null) => void`
 #[wasm_bindgen]
 extern "C" {
+  #[wasm_bindgen(typescript_type = "EngineResult")]
+  pub type JsEngineResult;
+
   #[wasm_bindgen(typescript_type = "(error: Error | null, result: EngineResult | null) => void")]
   pub type SubscribeCallback;
+}
+
+fn serialize_output<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
+  value
+    .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+    .map_err(to_js_error)
+}
+
+fn serialize_engine_result(value: &EngineResult) -> Result<JsEngineResult, JsValue> {
+  serialize_output(value).map(|value| value.unchecked_into())
 }
 
 #[wasm_bindgen]
@@ -79,13 +93,15 @@ impl BrowserDatabase {
   }
 
   #[wasm_bindgen(js_name = executeQuery)]
-  pub async fn execute_query(&self, query: EngineQuery) -> Result<EngineResult, JsValue> {
-    self.inner.execute_query(query).await.map_err(to_js_error)
+  pub async fn execute_query(&self, query: EngineQuery) -> Result<JsEngineResult, JsValue> {
+    let result = self.inner.execute_query(query).await.map_err(to_js_error)?;
+    serialize_engine_result(&result)
   }
 
   #[wasm_bindgen(js_name = executeSql)]
-  pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, JsValue> {
-    self.inner.execute_sql(sql).await.map_err(to_js_error)
+  pub async fn execute_sql(&mut self, sql: &str) -> Result<JsEngineResult, JsValue> {
+    let result = self.inner.execute_sql(sql).await.map_err(to_js_error)?;
+    serialize_engine_result(&result)
   }
 
   #[wasm_bindgen(js_name = executeSqlWithParams)]
@@ -93,13 +109,14 @@ impl BrowserDatabase {
     &mut self,
     sql: &str,
     params: JsValue,
-  ) -> Result<EngineResult, JsValue> {
+  ) -> Result<JsEngineResult, JsValue> {
     let params = parse_sql_params(params)?;
-    self
+    let result = self
       .inner
       .execute_sql_with_params(sql, &params)
       .await
-      .map_err(to_js_error)
+      .map_err(to_js_error)?;
+    serialize_engine_result(&result)
   }
 
   #[wasm_bindgen(js_name = selectSimple)]
@@ -174,7 +191,7 @@ impl Subscriber for WasmSubscriber {
     let this = JsValue::null();
     match result {
       Ok(results) => {
-        let results_js: JsValue = results.into();
+        let results_js = serialize_output(&results).unwrap_or_else(|error| error);
         let _ = self.callback.call2(&this, &JsValue::null(), &results_js);
       }
       Err(e) => {

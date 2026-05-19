@@ -1291,7 +1291,17 @@ fn expr_to_qualified_predicate(
 }
 
 fn object_name_to_string(name: &ObjectName) -> String {
-  name.to_string()
+  name
+    .0
+    .iter()
+    .map(|part| {
+      part
+        .as_ident()
+        .map(|ident| ident.value.clone())
+        .expect("unsupported object name part")
+    })
+    .collect::<Vec<_>>()
+    .join(".")
 }
 
 fn parse_from_clause(
@@ -2156,6 +2166,26 @@ mod tests {
       crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateTable(table, _)) => {
         assert_eq!(table.primary_key, vec![0]);
         assert_eq!(table.columns[0].data_type, EngineType::Uuid);
+      }
+      other => panic!("unexpected statement: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_create_table_preserves_unquoted_table_name() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let statement = parse_and_translate_statement(
+      r#"CREATE TABLE "userSettings" (id UUID PRIMARY KEY, theme TEXT);"#,
+      &resolver,
+    )
+    .expect("quoted table name should be accepted");
+
+    match statement {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateTable(table, _)) => {
+        assert_eq!(table.name, "userSettings");
       }
       other => panic!("unexpected statement: {:?}", other),
     }
