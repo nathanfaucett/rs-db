@@ -30,22 +30,34 @@ fn bytes_to_engine_value(bytes: Vec<u8>) -> EngineValue {
   }
 }
 
-fn parse_byte_array(array: &Array, path: &str) -> Result<EngineValue, JsValue> {
+fn parse_json_value(value: &JsValue, path: &str) -> Result<EngineValue, JsValue> {
+  let json = js_sys::JSON::stringify(value).map_err(|_| {
+    to_js_error(format!(
+      "invalid param at {path}: value is not JSON-serializable"
+    ))
+  })?;
+
+  let Some(json) = json.as_string() else {
+    return Err(to_js_error(format!(
+      "invalid param at {path}: value is not JSON-serializable"
+    )));
+  };
+
+  Ok(EngineValue::Json(json))
+}
+
+fn parse_byte_array(array: &Array) -> Option<Vec<u8>> {
   let mut bytes = Vec::with_capacity(array.length() as usize);
-  for (index, entry) in array.iter().enumerate() {
+  for entry in array.iter() {
     let Some(number) = entry.as_f64() else {
-      return Err(to_js_error(format!(
-        "invalid param at {path}[{index}]: expected byte number (0..=255)"
-      )));
+      return None;
     };
     if !number.is_finite() || number.fract() != 0.0 || !(0.0..=255.0).contains(&number) {
-      return Err(to_js_error(format!(
-        "invalid param at {path}[{index}]: expected byte number (0..=255)"
-      )));
+      return None;
     }
     bytes.push(number as u8);
   }
-  Ok(bytes_to_engine_value(bytes))
+  Some(bytes)
 }
 
 fn parse_engine_value(value: JsValue, path: &str) -> Result<EngineValue, JsValue> {
@@ -61,18 +73,25 @@ fn parse_engine_value(value: JsValue, path: &str) -> Result<EngineValue, JsValue
     return Ok(EngineValue::Text(text));
   }
 
-  if Array::is_array(&value) {
-    let array = Array::from(&value);
-    return parse_byte_array(&array, path);
-  }
-
   if Uint8Array::instanceof(&value) {
     let bytes = Uint8Array::new(&value).to_vec();
     return Ok(bytes_to_engine_value(bytes));
   }
 
+  if Array::is_array(&value) {
+    let array = Array::from(&value);
+    if let Some(bytes) = parse_byte_array(&array) {
+      return Ok(bytes_to_engine_value(bytes));
+    }
+    return parse_json_value(&value, path);
+  }
+
+  if value.as_bool().is_some() || value.is_object() {
+    return parse_json_value(&value, path);
+  }
+
   Err(to_js_error(format!(
-    "invalid param at {path}: expected number, string, null/undefined, byte array, or Uint8Array"
+    "invalid param at {path}: unsupported parameter type"
   )))
 }
 

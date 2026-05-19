@@ -75,8 +75,22 @@ const byNamed = await db.executeSqlWithParams(
   { id: 1 },
 );
 
+const insertRecipe = await db.executeSqlWithParams(
+  "INSERT INTO recipes (id, ingredients) VALUES (:id, :ingredients)",
+  { id: "r-1", ingredients: ["salt", "pepper"] },
+);
+
 console.log(byPositional.rows, byNamed.rows);
 ```
+
+Param conversion rules in WASM:
+
+- `number` -> `INTEGER`/`FLOAT`
+- `string` -> `TEXT`
+- `null`/`undefined` -> `NULL`
+- `Uint8Array` -> `BLOB` (or `UUID` when 16 bytes)
+- array/object/boolean (JSON-serializable) -> `JSON` string
+- numeric arrays containing only bytes (`0..=255`) are treated as binary bytes
 
 You can also translate with params:
 
