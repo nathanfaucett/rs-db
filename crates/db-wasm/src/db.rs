@@ -1,9 +1,12 @@
 use db_engine::{EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, TableSchema};
 use db_facade::Database;
 use db_in_memory::InMemoryNamedBTree;
+use futures::lock::Mutex;
+use js_sys::Promise;
 use serde::Serialize;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::spawn_local;
 
 use crate::params::{parse_sql_params, to_js_error};
 use crate::pluggable_store::PluggableBackendStore;
@@ -30,9 +33,26 @@ fn serialize_engine_result(value: &EngineResult) -> Result<JsEngineResult, JsVal
   serialize_output(value).map(|value| value.unchecked_into())
 }
 
+fn map_backend_open_error(error: impl core::fmt::Display) -> JsValue {
+  let message = error.to_string();
+  let lower = message.to_ascii_lowercase();
+
+  if lower.contains("invalid magic bytes")
+    || lower.contains("failed to parse header")
+    || lower.contains("unable to parse chunk")
+  {
+    return to_js_error(format!(
+      "{}. Backend adapter returned bytes that do not match the expected row encoding. Ensure adapter methods return raw Uint8Array bytes (not JSON/base64 strings), avoid mixing old/new storage formats, and isolate keyspace by schema version.",
+      message
+    ));
+  }
+
+  to_js_error(message)
+}
+
 #[wasm_bindgen]
 pub struct BrowserDatabase {
-  inner: Database<PluggableBackendStore>,
+  inner: Arc<Mutex<Database<PluggableBackendStore>>>,
 }
 
 #[wasm_bindgen]
@@ -42,10 +62,11 @@ impl BrowserDatabase {
     let store = PluggableBackendStore::InMemory(InMemoryNamedBTree::new());
     let inner = Database::from_store(store);
 
-    BrowserDatabase { inner }
+    BrowserDatabase {
+      inner: Arc::new(Mutex::new(inner)),
+    }
   }
 
-  #[wasm_bindgen(js_name = openWithBackend)]
   pub async fn open_with_backend(
     options: DatabaseEngineOptions,
   ) -> Result<BrowserDatabase, JsValue> {
@@ -54,65 +75,127 @@ impl BrowserDatabase {
     let store = PluggableBackendStore::External(adapter);
     let inner = Database::open_with_store(store)
       .await
-      .map_err(to_js_error)?;
+      .map_err(map_backend_open_error)?;
+    Ok(BrowserDatabase {
+      inner: Arc::new(Mutex::new(inner)),
+    })
+  }
 
-    Ok(BrowserDatabase { inner })
+  #[wasm_bindgen(js_name = openWithBackend)]
+  pub fn open_with_backend_js(options: DatabaseEngineOptions) -> Promise {
+    let mut options = Some(options);
+
+    Promise::new(&mut move |resolve, reject| {
+      let resolve = resolve.clone();
+      let reject = reject.clone();
+      let Some(options) = options.take() else {
+        let error = js_sys::Error::new("openWithBackend promise executor called multiple times");
+        let _ = reject.call1(&JsValue::UNDEFINED, &error.into());
+        return;
+      };
+
+      spawn_local(async move {
+        let result = BrowserDatabase::open_with_backend(options)
+          .await
+          .map(JsValue::from);
+
+        match result {
+          Ok(value) => {
+            let _ = resolve.call1(&JsValue::UNDEFINED, &value);
+          }
+          Err(error) => {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+          }
+        }
+      });
+    })
   }
 
   #[wasm_bindgen(js_name = registerTable)]
-  pub async fn register_table(&mut self, schema: TableSchema) -> Result<(), JsValue> {
+  pub async fn register_table(&self, schema: TableSchema) -> Result<(), JsValue> {
     self
       .inner
+      .lock()
+      .await
       .register_table(schema, false)
       .await
       .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = dropTable)]
-  pub async fn drop_table(&mut self, table_name: &str) -> Result<(), JsValue> {
+  pub async fn drop_table(&self, table_name: &str) -> Result<(), JsValue> {
     self
       .inner
+      .lock()
+      .await
       .drop_table(table_name, false)
       .await
       .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = registerIndex)]
-  pub async fn register_index(&mut self, schema: IndexSchema) -> Result<(), JsValue> {
-    self.inner.register_index(schema).await.map_err(to_js_error)
+  pub async fn register_index(&self, schema: IndexSchema) -> Result<(), JsValue> {
+    self
+      .inner
+      .lock()
+      .await
+      .register_index(schema)
+      .await
+      .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = dropIndex)]
-  pub async fn drop_index(&mut self, index_name: &str) -> Result<(), JsValue> {
-    self.inner.drop_index(index_name).await.map_err(to_js_error)
+  pub async fn drop_index(&self, index_name: &str) -> Result<(), JsValue> {
+    self
+      .inner
+      .lock()
+      .await
+      .drop_index(index_name)
+      .await
+      .map_err(to_js_error)
   }
 
   #[wasm_bindgen(js_name = describeTable)]
   pub fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
-    self.inner.describe_table(table_name)
+    let inner = self.inner.try_lock()?;
+    inner.describe_table(table_name)
   }
 
   #[wasm_bindgen(js_name = executeQuery)]
   pub async fn execute_query(&self, query: EngineQuery) -> Result<JsEngineResult, JsValue> {
-    let result = self.inner.execute_query(query).await.map_err(to_js_error)?;
+    let result = self
+      .inner
+      .lock()
+      .await
+      .execute_query(query)
+      .await
+      .map_err(to_js_error)?;
     serialize_engine_result(&result)
   }
 
   #[wasm_bindgen(js_name = executeSql)]
-  pub async fn execute_sql(&mut self, sql: &str) -> Result<JsEngineResult, JsValue> {
-    let result = self.inner.execute_sql(sql).await.map_err(to_js_error)?;
+  pub async fn execute_sql(&self, sql: &str) -> Result<JsEngineResult, JsValue> {
+    let result = self
+      .inner
+      .lock()
+      .await
+      .execute_sql(sql)
+      .await
+      .map_err(to_js_error)?;
     serialize_engine_result(&result)
   }
 
   #[wasm_bindgen(js_name = executeSqlWithParams)]
   pub async fn execute_sql_with_params(
-    &mut self,
+    &self,
     sql: &str,
     params: JsValue,
   ) -> Result<JsEngineResult, JsValue> {
     let params = parse_sql_params(params)?;
     let result = self
       .inner
+      .lock()
+      .await
       .execute_sql_with_params(sql, &params)
       .await
       .map_err(to_js_error)?;
@@ -137,6 +220,8 @@ impl BrowserDatabase {
     let callback: js_sys::Function = callback.unchecked_into();
     let sub_id = self
       .inner
+      .lock()
+      .await
       .subscribe_query(query, Arc::new(WasmSubscriber { callback }), None)
       .await
       .map_err(to_js_error)?;
@@ -152,6 +237,8 @@ impl BrowserDatabase {
     let callback: js_sys::Function = callback.unchecked_into();
     let sub_id = self
       .inner
+      .lock()
+      .await
       .subscribe_sql(sql, Arc::new(WasmSubscriber { callback }), None)
       .await
       .map_err(to_js_error)?;
@@ -169,6 +256,8 @@ impl BrowserDatabase {
     let callback: js_sys::Function = callback.unchecked_into();
     let sub_id = self
       .inner
+      .lock()
+      .await
       .subscribe_sql_with_params(sql, &params, Arc::new(WasmSubscriber { callback }), None)
       .await
       .map_err(to_js_error)?;
@@ -177,7 +266,13 @@ impl BrowserDatabase {
 
   #[wasm_bindgen(js_name = unsubscribe)]
   pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), JsValue> {
-    self.inner.unsubscribe(id).await.map_err(to_js_error)
+    self
+      .inner
+      .lock()
+      .await
+      .unsubscribe(id)
+      .await
+      .map_err(to_js_error)
   }
 }
 

@@ -6,10 +6,12 @@ use db_engine::{EngineKey, PrimaryKey};
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use db_types::persistence::decode_index_schema_row;
 use futures::Stream;
-use js_sys::{Function, Promise, Reflect};
+use js_sys::{Function, JSON, Promise, Reflect};
 use serde::de::{DeserializeOwned, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -121,6 +123,21 @@ impl std::error::Error for StoreAdapterError {}
 fn js_error(value: JsValue) -> BTreeError {
   let message = value
     .as_string()
+    .or_else(|| {
+      value
+        .dyn_ref::<js_sys::Error>()
+        .map(|error| String::from(error.message()))
+    })
+    .or_else(|| {
+      Reflect::get(&value, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|message| message.as_string())
+    })
+    .or_else(|| {
+      JSON::stringify(&value)
+        .ok()
+        .and_then(|serialized| serialized.as_string())
+    })
     .unwrap_or_else(|| "store adapter callback error".to_string());
   BTreeError::other(StoreAdapterError(message))
 }
@@ -140,38 +157,44 @@ fn from_js<T: DeserializeOwned>(value: JsValue) -> BTreeResult<T> {
 }
 
 async fn resolve_js(value: JsValue) -> BTreeResult<JsValue> {
-  let promise = Promise::resolve(&value);
-  JsFuture::from(promise).await.map_err(js_error)
+  if value.is_instance_of::<Promise>() {
+    let promise: Promise = value.unchecked_into();
+    JsFuture::from(promise).await.map_err(js_error)
+  } else {
+    Ok(value)
+  }
 }
 
-async fn call_method0(function: &Function, this: &JsValue) -> BTreeResult<JsValue> {
-  let value = function.call0(this).map_err(js_error)?;
+async fn call_method0(function: Function, this: JsValue) -> BTreeResult<JsValue> {
+  let value = function.call0(&this).map_err(js_error)?;
   resolve_js(value).await
 }
 
-async fn call_method1(function: &Function, this: &JsValue, arg0: &JsValue) -> BTreeResult<JsValue> {
-  let value = function.call1(this, arg0).map_err(js_error)?;
+async fn call_method1(function: Function, this: JsValue, arg0: JsValue) -> BTreeResult<JsValue> {
+  let value = function.call1(&this, &arg0).map_err(js_error)?;
   resolve_js(value).await
 }
 
 async fn call_method2(
-  function: &Function,
-  this: &JsValue,
-  arg0: &JsValue,
-  arg1: &JsValue,
+  function: Function,
+  this: JsValue,
+  arg0: JsValue,
+  arg1: JsValue,
 ) -> BTreeResult<JsValue> {
-  let value = function.call2(this, arg0, arg1).map_err(js_error)?;
+  let value = function.call2(&this, &arg0, &arg1).map_err(js_error)?;
   resolve_js(value).await
 }
 
 async fn call_method3(
-  function: &Function,
-  this: &JsValue,
-  arg0: &JsValue,
-  arg1: &JsValue,
-  arg2: &JsValue,
+  function: Function,
+  this: JsValue,
+  arg0: JsValue,
+  arg1: JsValue,
+  arg2: JsValue,
 ) -> BTreeResult<JsValue> {
-  let value = function.call3(this, arg0, arg1, arg2).map_err(js_error)?;
+  let value = function
+    .call3(&this, &arg0, &arg1, &arg2)
+    .map_err(js_error)?;
   resolve_js(value).await
 }
 
@@ -193,7 +216,8 @@ struct CallbackRegistry {
   begin_transaction: Function,
 }
 
-struct BackendTransaction {
+#[derive(Clone)]
+struct BackendTransactionHandles {
   value: JsValue,
   get_row: Function,
   put_row: Function,
@@ -214,13 +238,25 @@ struct BackendTransaction {
   rollback: Function,
 }
 
+struct BackendTransaction {
+  handles: Rc<RefCell<BackendTransactionHandles>>,
+}
+
 impl BackendTransaction {
   async fn commit(self) -> BTreeResult<()> {
-    call_method0(&self.commit, &self.value).await.map(|_| ())
+    let (commit, value) = {
+      let handles = self.handles.borrow();
+      (handles.commit.clone(), handles.value.clone())
+    };
+    call_method0(commit, value).await.map(|_| ())
   }
 
   async fn rollback(self) -> BTreeResult<()> {
-    call_method0(&self.rollback, &self.value).await.map(|_| ())
+    let (rollback, value) = {
+      let handles = self.handles.borrow();
+      (handles.rollback.clone(), handles.value.clone())
+    };
+    call_method0(rollback, value).await.map(|_| ())
   }
 }
 
@@ -531,9 +567,9 @@ impl StoreAdapterCallbacks {
       "readonly"
     };
     let value = call_method1(
-      &self.callbacks.begin_transaction,
-      &self.callbacks.adapter,
-      &JsValue::from_str(mode),
+      self.callbacks.begin_transaction.clone(),
+      self.callbacks.adapter.clone(),
+      JsValue::from_str(mode),
     )
     .await?;
 
@@ -541,7 +577,7 @@ impl StoreAdapterCallbacks {
       return Err(serde_error("beginTransaction returned null or undefined"));
     }
 
-    Ok(BackendTransaction {
+    let handles = BackendTransactionHandles {
       get_row: load_required_function(&value, "getRow").map_err(serde_error)?,
       put_row: load_required_function(&value, "putRow").map_err(serde_error)?,
       delete_row: load_required_function(&value, "deleteRow").map_err(serde_error)?,
@@ -564,6 +600,10 @@ impl StoreAdapterCallbacks {
       commit: load_required_function(&value, "commit").map_err(serde_error)?,
       rollback: load_required_function(&value, "rollback").map_err(serde_error)?,
       value,
+    };
+
+    Ok(BackendTransaction {
+      handles: Rc::new(RefCell::new(handles)),
     })
   }
 
@@ -576,7 +616,11 @@ impl StoreAdapterCallbacks {
     if tree == TABLE_SCHEMAS_TREE {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
-      let value = call_method1(&tx.get_table_schema, &tx.value, &table_js).await?;
+      let (get_table_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.get_table_schema.clone(), handles.value.clone())
+      };
+      let value = call_method1(get_table_schema, tx_value, table_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -586,7 +630,11 @@ impl StoreAdapterCallbacks {
     if tree == INDEX_SCHEMAS_TREE {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
-      let value = call_method1(&tx.get_index_schema, &tx.value, &index_js).await?;
+      let (get_index_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.get_index_schema.clone(), handles.value.clone())
+      };
+      let value = call_method1(get_index_schema, tx_value, index_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -597,7 +645,11 @@ impl StoreAdapterCallbacks {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
-      let value = call_method2(&tx.get_row, &tx.value, &table_js, &pk_js).await?;
+      let (get_row, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.get_row.clone(), handles.value.clone())
+      };
+      let value = call_method2(get_row, tx_value, table_js, pk_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -614,7 +666,11 @@ impl StoreAdapterCallbacks {
       };
       let index_js = JsValue::from_str(index_name);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js).await?;
+      let (range_index, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.range_index.clone(), handles.value.clone())
+      };
+      let value = call_method2(range_index, tx_value, index_js, req_js).await?;
       let entries: Vec<IndexEntry> = from_js(value)?;
       let found = entries
         .into_iter()
@@ -636,7 +692,11 @@ impl StoreAdapterCallbacks {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
       let row_js = to_js(row)?;
-      let _ = call_method2(&tx.put_table_schema, &tx.value, &table_js, &row_js).await?;
+      let (put_table_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.put_table_schema.clone(), handles.value.clone())
+      };
+      let _ = call_method2(put_table_schema, tx_value, table_js, row_js).await?;
       return Ok(());
     }
 
@@ -644,7 +704,11 @@ impl StoreAdapterCallbacks {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
       let row_js = to_js(row)?;
-      let _ = call_method2(&tx.put_index_schema, &tx.value, &index_js, &row_js).await?;
+      let (put_index_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.put_index_schema.clone(), handles.value.clone())
+      };
+      let _ = call_method2(put_index_schema, tx_value, index_js, row_js).await?;
       self.maybe_update_index_schema_widths(tree, key, row);
       return Ok(());
     }
@@ -654,7 +718,11 @@ impl StoreAdapterCallbacks {
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
       let row_js = to_js(row)?;
-      let _ = call_method3(&tx.put_row, &tx.value, &table_js, &pk_js, &row_js).await?;
+      let (put_row, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.put_row.clone(), handles.value.clone())
+      };
+      let _ = call_method3(put_row, tx_value, table_js, pk_js, row_js).await?;
       self.maybe_update_index_schema_widths(tree, key, row);
       return Ok(());
     }
@@ -664,14 +732,11 @@ impl StoreAdapterCallbacks {
       let index_js = JsValue::from_str(index_name);
       let index_key_js = to_js(&index_key)?;
       let row_pk_js = to_js(&row_pk)?;
-      let _ = call_method3(
-        &tx.add_index,
-        &tx.value,
-        &index_js,
-        &index_key_js,
-        &row_pk_js,
-      )
-      .await?;
+      let (add_index, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.add_index.clone(), handles.value.clone())
+      };
+      let _ = call_method3(add_index, tx_value, index_js, index_key_js, row_pk_js).await?;
       return Ok(());
     }
 
@@ -687,7 +752,11 @@ impl StoreAdapterCallbacks {
     if tree == TABLE_SCHEMAS_TREE {
       let table = self.table_schema_name_from_engine_key(key)?;
       let table_js = JsValue::from_str(&table);
-      let value = call_method1(&tx.delete_table_schema, &tx.value, &table_js).await?;
+      let (delete_table_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.delete_table_schema.clone(), handles.value.clone())
+      };
+      let value = call_method1(delete_table_schema, tx_value, table_js).await?;
       if value.is_null() || value.is_undefined() {
         return Ok(None);
       }
@@ -697,7 +766,11 @@ impl StoreAdapterCallbacks {
     if tree == INDEX_SCHEMAS_TREE {
       let index = self.index_schema_name_from_engine_key(key)?;
       let index_js = JsValue::from_str(&index);
-      let value = call_method1(&tx.delete_index_schema, &tx.value, &index_js).await?;
+      let (delete_index_schema, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.delete_index_schema.clone(), handles.value.clone())
+      };
+      let value = call_method1(delete_index_schema, tx_value, index_js).await?;
       self.maybe_remove_index_schema_width(tree, key);
       if value.is_null() || value.is_undefined() {
         return Ok(None);
@@ -709,7 +782,11 @@ impl StoreAdapterCallbacks {
       let table_js = JsValue::from_str(table);
       let pk = self.primary_key_from_engine_key(key)?;
       let pk_js = to_js(&pk)?;
-      let value = call_method2(&tx.delete_row, &tx.value, &table_js, &pk_js).await?;
+      let (delete_row, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.delete_row.clone(), handles.value.clone())
+      };
+      let value = call_method2(delete_row, tx_value, table_js, pk_js).await?;
       if value.is_null() || value.is_undefined() {
         self.maybe_remove_index_schema_width(tree, key);
         return Ok(None);
@@ -723,14 +800,11 @@ impl StoreAdapterCallbacks {
       let index_js = JsValue::from_str(index_name);
       let index_key_js = to_js(&index_key)?;
       let row_pk_js = to_js(&row_pk)?;
-      let _ = call_method3(
-        &tx.remove_index,
-        &tx.value,
-        &index_js,
-        &index_key_js,
-        &row_pk_js,
-      )
-      .await?;
+      let (remove_index, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.remove_index.clone(), handles.value.clone())
+      };
+      let _ = call_method3(remove_index, tx_value, index_js, index_key_js, row_pk_js).await?;
       return Ok(None);
     }
 
@@ -747,7 +821,11 @@ impl StoreAdapterCallbacks {
     R: RangeBounds<EngineKey>,
   {
     if tree == TABLE_SCHEMAS_TREE {
-      let value = call_method0(&tx.range_table_schemas, &tx.value).await?;
+      let (range_table_schemas, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.range_table_schemas.clone(), handles.value.clone())
+      };
+      let value = call_method0(range_table_schemas, tx_value).await?;
       let entries: Vec<TableSchemaEntry> = from_js(value)?;
       return Ok(
         entries
@@ -765,7 +843,11 @@ impl StoreAdapterCallbacks {
     }
 
     if tree == INDEX_SCHEMAS_TREE {
-      let value = call_method0(&tx.range_index_schemas, &tx.value).await?;
+      let (range_index_schemas, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.range_index_schemas.clone(), handles.value.clone())
+      };
+      let value = call_method0(range_index_schemas, tx_value).await?;
       let entries: Vec<IndexSchemaEntry> = from_js(value)?;
       let out = entries
         .into_iter()
@@ -806,7 +888,11 @@ impl StoreAdapterCallbacks {
 
       let table_js = JsValue::from_str(table);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_rows, &tx.value, &table_js, &req_js).await?;
+      let (range_rows, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.range_rows.clone(), handles.value.clone())
+      };
+      let value = call_method2(range_rows, tx_value, table_js, req_js).await?;
       let rows: Vec<PrimaryKeyEntry> = from_js(value)?;
       let out = rows
         .into_iter()
@@ -844,7 +930,11 @@ impl StoreAdapterCallbacks {
 
       let index_js = JsValue::from_str(index_name);
       let req_js = to_js(&request)?;
-      let value = call_method2(&tx.range_index, &tx.value, &index_js, &req_js).await?;
+      let (range_index, tx_value) = {
+        let handles = tx.handles.borrow();
+        (handles.range_index.clone(), handles.value.clone())
+      };
+      let value = call_method2(range_index, tx_value, index_js, req_js).await?;
       let entries: Vec<IndexEntry> = from_js(value)?;
       return Ok(
         entries
