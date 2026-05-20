@@ -47,7 +47,7 @@ pub enum EngineValue {
 }
 
 #[cfg(feature = "wasm")]
-fn serialize_json_str<S: serde::Serializer>(s: &String, serializer: S) -> Result<S::Ok, S::Error> {
+fn serialize_json_str<S: serde::Serializer>(s: &str, serializer: S) -> Result<S::Ok, S::Error> {
   let value: serde_json::Value = serde_json::from_str(s).map_err(serde::ser::Error::custom)?;
   serde::Serialize::serialize(&value, serializer)
 }
