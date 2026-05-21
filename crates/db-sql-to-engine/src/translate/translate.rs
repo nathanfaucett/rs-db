@@ -1476,6 +1476,28 @@ fn parse_projection_item(
         }
       }
     }
+    SelectItem::QualifiedWildcard(kind, _) => {
+      let table_name = match kind {
+        sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+          let raw = object_name_to_string(name);
+          alias_map.get(&raw).cloned().unwrap_or(raw)
+        }
+        _ => {
+          return Err(TranslateError::UnsupportedFeature(
+            "unsupported qualified wildcard projection item".into(),
+          ));
+        }
+      };
+      let schema = table_schemas
+        .get(&table_name)
+        .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
+      for (i, _) in schema.columns.iter().enumerate() {
+        projection_qc.push(db_engine::QualifiedColumn {
+          table: table_name.clone(),
+          column_index: i,
+        });
+      }
+    }
     SelectItem::UnnamedExpr(expr) => {
       parse_projection_expression(
         expr,
@@ -2000,6 +2022,73 @@ mod tests {
             assert_eq!(right.column_index, 1);
           }
         }
+      }
+      other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_join_select_with_qualified_wildcard_projection() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "recipes".into(),
+      TableSchema {
+        name: "recipes".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "updatedAt".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    tables.insert(
+      "comments".into(),
+      TableSchema {
+        name: "comments".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "recipeId".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let q = parse_and_translate(
+      "SELECT t0.* FROM recipes AS t0 LEFT JOIN comments AS j1 ON t0.id = j1.recipeId ORDER BY t0.updatedAt DESC;",
+      &resolver,
+    )
+    .expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        options,
+        ..
+      } => {
+        assert_eq!(table, "recipes");
+        assert_eq!(projection.len(), 2);
+        assert_eq!(projection[0].table, "recipes");
+        assert_eq!(projection[0].column_index, 0);
+        assert_eq!(projection[1].table, "recipes");
+        assert_eq!(projection[1].column_index, 1);
+        assert_eq!(options.joins.len(), 1);
+        assert_eq!(options.joins[0].kind, JoinKind::Left);
       }
       other => panic!("unexpected query: {:?}", other),
     }
